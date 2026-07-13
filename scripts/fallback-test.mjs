@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives} from "./fetch-snapshot.mjs";
+const NOW=Date.now(),DAY=864e5;
+const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json"}}),text=(body,status=200)=>new Response(body,{status,headers:{"content-type":"text/plain"}});
+const originalFetch=globalThis.fetch,originalSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
+let mode="";
+const blockchain=(name,n=1500,unit="")=>({status:"ok",name,unit,period:"day",values:Array.from({length:n},(_,i)=>({x:Math.floor((NOW-(n-1-i)*DAY)/1000),y:name==="hash-rate"?600_000_000+i*1000:name==="difficulty"?80e12+i*1e9:name==="mvrv"?1.2+i/10000:name==="n-unique-addresses"?700000+i:name==="n-transactions"?300000+i:name==="miners-revenue"?30e6+i*1000:name==="trade-volume"?5e9+i*1e6:50000+i}))});
+function cftcCsv(){const h="report_date_as_yyyy_mm_dd,open_interest_all,asset_mgr_positions_long,asset_mgr_positions_short,lev_money_positions_long,lev_money_positions_short",r=Array.from({length:24},(_,i)=>`${new Date(NOW-i*7*DAY).toISOString()},${30000-i},8000,2000,3000,12000`);return[h,...r].join("\n");}
+globalThis.fetch=async input=>{const u=String(input);
+  if(mode==="fred"){if(u.includes("api.stlouisfed.org"))return json({},503);if(u.includes("fredgraph.csv")){const rows=["observation_date,WALCL",...Array.from({length:40},(_,i)=>`${new Date(NOW-(39-i)*7*DAY).toISOString().slice(0,10)},7000000`)];return text(rows.join("\n"));}}
+  if(mode==="market_bitstamp"){if(u.includes("exchange.coinbase.com/products/BTC-USD/candles"))return json({},503);if(u.includes("bitstamp.net/api/v2/ohlc")){const q=new URL(u),a=Number(q.searchParams.get("start"))*1000,b=Number(q.searchParams.get("end"))*1000,rows=[];for(let t=a;t<=b;t+=DAY)rows.push({timestamp:String(Math.floor(t/1000)),close:String(50000+Math.floor((t-a)/DAY)),volume:"1000"});return json({data:{ohlc:rows}});}if(u.includes("coins/markets"))return json([{ath:120000}]);}
+  if(mode==="market"){if(u.includes("exchange.coinbase.com/products/BTC-USD/candles"))return json({},503);if(u.includes("bitstamp.net/api/v2/ohlc"))return json({},503);if(u.includes("coins/markets"))return json({},503);if(u.includes("charts/market-price"))return json(blockchain("market-price",u.includes("timespan=all")?2000:1500,"USD"));if(u.includes("charts/trade-volume"))return json(blockchain("trade-volume",1500,"USD"));}
+  if(mode==="network"){if(u.includes("mempool.space/api/v1/mining/hashrate"))return json({},503);if(u.includes("charts/hash-rate"))return json(blockchain("hash-rate",400,"TH/s"));if(u.includes("charts/difficulty"))return json(blockchain("difficulty",100,""));if(u.includes("difficulty-adjustment"))return json({},503);if(u.includes("fees/recommended"))return json({},503);if(u.includes("blockstream.info/api/fee-estimates"))return json({"1":2.5,"3":2,"6":1.5});}
+  if(mode==="pegs"){if(u.includes("stablecoins.llama.fi"))return json({peggedAssets:[]});if(u.includes("products/USDT-USD"))return json({price:"0.9998"});if(u.includes("products/USDC-USD"))return json({price:"1.0001"});if(u.includes("pair=USDTUSD"))return json({error:[],result:{USDTUSD:{c:["0.9999"]}}});if(u.includes("pair=USDCUSD"))return json({error:[],result:{USDCUSD:{c:["1.0000"]}}});if(u.includes("pubticker/USDTUSD"))return json({last:"1.0000"});if(u.includes("pubticker/USDCUSD"))return json({last:"1.0001"});}
+  if(mode==="onchain"){for(const name of ["mvrv","n-unique-addresses","n-transactions","miners-revenue"])if(u.includes(`/charts/${name}`))return json(blockchain(name,700,name==="miners-revenue"?"USD":""));}
+  if(mode==="cftc"){if(u.includes(".json?"))return json({},503);if(u.includes(".csv?"))return text(cftcCsv());}
+  if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:"FI_XBTUSD_260925",tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"0.00001",openInterest:"2000000000"}});return json({},503);}
+  throw new Error(`unexpected ${mode} URL ${u}`);
+};
+try{
+  mode="fred";const f=await fetchFredSeries("WALCL",{limit:30});assert.equal(f.partial,true);assert.match(f.source,/CSV/);assert.equal(f.data.length,30);assert.equal(f.data.at(-1).v,7000000);
+  mode="market_bitstamp";const mb=await fetchMarket();assert.equal(mb.data.historySource,"bitstamp");assert.ok(mb.data.price.length>=1200);assert.equal(mb.data.athSource,"coingecko");
+  mode="market";const m=await fetchMarket();assert.equal(m.data.historySource,"blockchain");assert.equal(m.data.price.length,1500);assert.equal(m.data.volume.length,1500);assert.equal(m.data.athSource,"blockchain");assert.equal(m.data.price.at(-1).v,51499);
+  mode="network";const n=await fetchNetwork();assert.match(n.source,/Blockchain/);assert.equal(n.data.hashrate.length,400);assert.ok(n.data.hashrate.at(-1).v>6e20);assert.equal(n.data.fees.fastest,2.5);
+  mode="pegs";const p=await fetchPegs();assert.ok(Math.abs(p.data.USDT-.9999)<.0002);assert.ok(Math.abs(p.data.USDC-1.0001)<.0002);assert.equal(p.partial,true);
+  mode="onchain";const o=await fetchBlockchainOnchain();assert.equal(o.data.MVRV.length,700);assert.equal(o.data.AdrActCnt.length,700);assert.equal(o.data.TxCnt.length,700);assert.equal(o.data.MinerRevUSD.length,700);
+  mode="cftc";const c=await fetchCftc();assert.equal(c.partial,true);assert.match(c.source,/CSV/);assert.equal(c.data.length,24);
+  mode="derivatives";const d=await fetchDerivatives();assert.equal(d.partial,true);assert.equal(d.data.funding.length,1);assert.equal(d.data.funding[0].venue,"Kraken Futures");assert.equal(d.data.funding[0].rate8h,.00008);assert.equal(d.data.funding[0].oiUsd,2e9);assert.equal(d.data.basisSource,"Kraken Futures");assert.ok(Number.isFinite(d.data.basis));
+  console.log("Fallback contract tests OK");
+}finally{globalThis.fetch=originalFetch;globalThis.setTimeout=originalSetTimeout;}

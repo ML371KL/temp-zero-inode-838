@@ -1,0 +1,46 @@
+/* Endpoint and unit-contract probe. Diagnostic only; never prints secrets. */
+const FRED_KEY=String(process.env.FRED_KEY||"").trim(),CM_KEY=String(process.env.CM_API_KEY||"").trim(),TIMEOUT=20_000;
+const host=u=>{try{return new URL(u).host}catch{return"?"}},safe=v=>String(v??"").replace(/[\r\n\t]+/g," ").slice(0,180);
+async function probe(name,url,inspect,{critical=false,text=false}={}){const t=Date.now();try{const r=await fetch(url,{headers:{"User-Agent":"btc-21m-dashboard/2.5-probe","Accept":text?"text/plain,text/csv,text/html,*/*":"application/json,*/*"},signal:AbortSignal.timeout(TIMEOUT)}),raw=await r.text();let body=null;try{body=JSON.parse(raw)}catch{}let note="";try{note=safe(inspect?.(body,raw,r)||"")}catch(e){note=`!inspect ${safe(e.message||e)}`;}return{name,critical,ok:r.ok&&!note.startsWith("!"),status:r.status,ms:Date.now()-t,host:host(url),note};}catch(e){return{name,critical,ok:false,status:"-",ms:Date.now()-t,host:host(url),note:safe(e.message||e)};}}
+const fredApi=`https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&api_key=${encodeURIComponent(FRED_KEY)}&file_type=json&sort_order=desc&limit=3`;
+const cftcParams=new URLSearchParams({"$select":"report_date_as_yyyy_mm_dd,open_interest_all,asset_mgr_positions_long,asset_mgr_positions_short,lev_money_positions_long,lev_money_positions_short","$limit":"3","$where":"market_and_exchange_names='BITCOIN - CHICAGO MERCANTILE EXCHANGE'","$order":"report_date_as_yyyy_mm_dd desc"});
+const cmMetrics="CapMVRVCur,FlowInExNtv,FlowOutExNtv,SplyExNtv,IssTotUSD,FeeTotNtv,AdrActCnt,TxCnt,TxTfrCnt",cmRoot=CM_KEY?"https://api.coinmetrics.io/v4":"https://community-api.coinmetrics.io/v4",cmQ=new URLSearchParams({assets:"btc",metrics:cmMetrics,frequency:"1d",page_size:"3",sort:"desc",ignore_forbidden_errors:"true",ignore_unsupported_errors:"true"});if(CM_KEY)cmQ.set("api_key",CM_KEY);
+const chart=(name,unit,scale=1)=>b=>{const a=b?.values||[],v=Number(a.at(-1)?.y)*scale;return b?.status==="ok"&&a.length&&Number.isFinite(v)?`${a.length} points · unit ${b.unit||"?"} · last ${v}`:`!invalid chart ${name}`;};
+const checks=[
+ ["FRED API WALCL",fredApi,b=>b?.error_message?`!${b.error_message}`:`${b?.observations?.[0]?.date} · millions USD`,{critical:true}],
+ ["FRED CSV WALCL","https://fred.stlouisfed.org/graph/fredgraph.csv?id=WALCL",(_b,t)=>/,WALCL/i.test(t)&&t.trim().split(/\r?\n/).length>20?`${t.trim().split(/\r?\n/).length-1} rows · same FRED series`:'!CSV invalid',{critical:true,text:true}],
+ ["Coinbase daily price","https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400",b=>Array.isArray(b)&&b.length?`${b.length} candles · USD/BTC close ${b[0]?.[4]} · base volume BTC ${b[0]?.[5]}`:'!candles missing',{critical:true}],
+ ["Blockchain market price","https://api.blockchain.info/charts/market-price?timespan=30days&format=json&sampled=false",chart("market-price","USD"),{critical:true}],
+ ["Blockchain trade volume","https://api.blockchain.info/charts/trade-volume?timespan=30days&format=json&sampled=false",chart("trade-volume","USD")],
+ ["CoinGecko ATH","https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin&sparkline=false",b=>Number.isFinite(Number(b?.[0]?.ath))?`ATH USD ${b[0].ath}`:'!ATH missing'],
+ ["mempool hashrate","https://mempool.space/api/v1/mining/hashrate/3y",b=>Array.isArray(b?.hashrates)&&b.hashrates.length>300?`${b.hashrates.length} points · H/s ${b.hashrates.at(-1)?.avgHashrate}`:'!hashrate missing',{critical:true}],
+ ["Blockchain hash-rate","https://api.blockchain.info/charts/hash-rate?timespan=30days&format=json&sampled=false",chart("hash-rate","TH/s",1e12),{critical:true}],
+ ["Blockchain difficulty","https://api.blockchain.info/charts/difficulty?timespan=30days&format=json&sampled=false",chart("difficulty","difficulty"),{critical:true}],
+ ["mempool fees","https://mempool.space/api/v1/fees/recommended",b=>Number.isFinite(Number(b?.fastestFee))?`sat/vB 1-block ${b.fastestFee}`:'!fees missing'],
+ ["Blockstream fees","https://blockstream.info/api/fee-estimates",b=>Number.isFinite(Number(b?.["1"]))?`sat/vB targets 1=${b["1"]},3=${b["3"]},6=${b["6"]}`:'!fee estimates missing'],
+ ["Coin Metrics enrichment",`${cmRoot}/timeseries/asset-metrics?${cmQ}`,b=>{const row=b?.data?.[0],served=row?Object.keys(row).filter(k=>!['asset','time'].includes(k)):[];return row?`${served.length}/9 fields · ${row.time?.slice(0,10)} · ${served.join(',')}`:'!no rows';}],
+ ["Blockchain MVRV","https://api.blockchain.info/charts/mvrv?timespan=30days&format=json&sampled=false",chart("mvrv","ratio")],
+ ["Blockchain active addresses","https://api.blockchain.info/charts/n-unique-addresses?timespan=30days&format=json&sampled=false",chart("addresses","count")],
+ ["Blockchain transactions","https://api.blockchain.info/charts/n-transactions?timespan=30days&format=json&sampled=false",chart("transactions","count")],
+ ["Blockchain miner revenue","https://api.blockchain.info/charts/miners-revenue?timespan=30days&format=json&sampled=false",chart("miners-revenue","USD")],
+ ["Farside ETF","https://farside.co.uk/bitcoin-etf-flow-all-data/",(_b,t)=>{const rows=(t.match(/<tr[\s\S]*?<\/tr>/gi)||[]).length,dates=(t.match(/\d{1,2}\s+[A-Z][a-z]{2}\s+20\d{2}/g)||[]);return rows>=50&&dates.length?`${rows} HTML rows · latest ${dates.at(-1)} · USD millions table`:`!HTML/parser contract failed`;},{critical:true,text:true}],
+ ["DefiLlama supply","https://stablecoins.llama.fi/stablecoincharts/all",b=>Array.isArray(b)&&b.length>100?`${b.length} points · USD total supply`:'!history missing',{critical:true}],
+ ["DefiLlama pegs","https://stablecoins.llama.fi/stablecoins?includePrices=true",b=>{const a=b?.peggedAssets||b?.data||[],f=s=>a.find(x=>String(x.symbol||'').toUpperCase()===s)?.price;return f('USDT')&&f('USDC')?`USD/token USDT ${f('USDT')} · USDC ${f('USDC')}`:'!peg prices missing';},{critical:true}],
+ ["Coinbase USDT/USD","https://api.exchange.coinbase.com/products/USDT-USD/ticker",b=>b?.price?`USD/token ${b.price}`:'!missing'],
+ ["Kraken USDC/USD","https://api.kraken.com/0/public/Ticker?pair=USDCUSD",b=>b?.error?.length?`!${b.error.join(',')}`:`USD/token ${Object.values(b?.result||{})[0]?.c?.[0]||'missing'}`],
+ ["Gemini USDT/USD","https://api.gemini.com/v1/pubticker/USDTUSD",b=>b?.last?`USD/token ${b.last}`:'!missing'],
+ ["CFTC JSON",`https://publicreporting.cftc.gov/resource/gpe5-46if.json?${cftcParams}`,b=>Array.isArray(b)&&b[0]?.asset_mgr_positions_long?`${b[0].report_date_as_yyyy_mm_dd?.slice(0,10)} · contracts`:'!fields missing'],
+ ["CFTC CSV",`https://publicreporting.cftc.gov/resource/gpe5-46if.csv?${cftcParams}`,(_b,t)=>/asset_mgr_positions_long/.test(t)&&t.split(/\r?\n/).length>1?'same Socrata rows · CSV transport':'!CSV invalid',{text:true}],
+ ["Coinbase BTCUSD","https://api.exchange.coinbase.com/products/BTC-USD/ticker",b=>b?.price?`USD/BTC ${b.price}`:'!price missing',{critical:true}],
+ ["Kraken XBTUSD","https://api.kraken.com/0/public/Ticker?pair=XBTUSD",b=>b?.error?.length?`!${b.error.join(',')}`:`USD/BTC ${Object.values(b?.result||{})[0]?.c?.[0]||'missing'}`,{critical:true}],
+ ["Bitstamp BTCUSD","https://www.bitstamp.net/api/v2/ticker/btcusd/",b=>b?.last?`USD/BTC ${b.last}`:'!price missing'],
+ ["Gemini BTCUSD","https://api.gemini.com/v1/pubticker/BTCUSD",b=>b?.last?`USD/BTC ${b.last}`:'!price missing'],
+ ["Deribit perpetual","https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL",b=>b?.error?`!${b.error.message}`:`8h funding ${b?.result?.funding_8h} · OI USD contracts ${b?.result?.open_interest}`],
+ ["Kraken Futures PI_XBTUSD","https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",b=>b?.result==="success"?`hourly funding ${b?.ticker?.fundingRate} · OI $1 contracts ${b?.ticker?.openInterest}`:`!${b?.error||b?.result}`],
+ ["Kraken dated futures","https://futures.kraken.com/derivatives/api/v3/tickers?contractType=futures_inverse",b=>b?.result==="success"&&Array.isArray(b?.tickers)?`${b.tickers.filter(x=>String(x.symbol||'').startsWith('FI_XBTUSD_')).length} BTC dated tickers · annualized basis fallback`:`!${b?.error||b?.result}`],
+ ["Bybit linear","https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT",b=>Number(b?.retCode)===0?`funding interval ${b?.result?.list?.[0]?.fundingIntervalHour}h · OI USD ${b?.result?.list?.[0]?.openInterestValue}`:`!retCode ${b?.retCode}`],
+ ["OKX swap","https://openapi.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP",b=>String(b?.code)==="0"?`OI USD ${b?.data?.[0]?.oiUsd}`:`!code ${b?.code}`],
+];
+const results=[];for(const [n,u,i,o] of checks)results.push(await probe(n,u,i,o));
+console.log("STATE CRIT HTTP    MS HOST                         NAME · CONTRACT");for(const x of results)console.log(`${x.ok?'OK  ':'FAIL'}  ${x.critical?'YES ':' no '} ${String(x.status).padEnd(4)} ${String(x.ms).padStart(5)} ${x.host.padEnd(28)} ${x.name} · ${x.note}`);
+const cf=results.filter(x=>x.critical&&!x.ok),of=results.filter(x=>!x.critical&&!x.ok);console.log(`\nCritical failures: ${cf.length}${cf.length?' · '+cf.map(x=>x.name).join(', '):''}`);console.log(`Optional/fallback failures: ${of.length}${of.length?' · '+of.map(x=>x.name).join(', '):''}`);console.log('Probe is diagnostic; candidate validation and TTL remain authoritative.');

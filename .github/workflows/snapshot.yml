@@ -1,0 +1,140 @@
+name: Обновление Bitcoin-снимка
+
+on:
+  schedule:
+    - cron: "23 */8 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/snapshot.yml"
+      - "scripts/**"
+      - "docs/index.html"
+      - "package.json"
+
+permissions:
+  contents: write   # коммит снимка в репозиторий (история + резерв состояния)
+  pages: write      # публикация сайта
+  id-token: write   # требуется actions/deploy-pages
+
+# Развёртывание не отменяется на полпути: иначе можно оставить Pages в подвешенном состоянии.
+concurrency:
+  group: btc-21m-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # fetch-depth: 1. Публикация делает rebase на свежий tip ветки — полная история не нужна,
+      # а полный клон дорожает каждый день, потому что snapshot.json переписывается трижды в сутки.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Восстановить внутреннее состояние
+        uses: actions/cache@v5
+        with:
+          path: .state/cache.json
+          key: btc21m-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            btc21m-state-${{ github.ref_name }}-
+            btc21m-state-
+
+      # 1. Структурные тесты работают на изолированном mock и не трогают опубликованный снимок,
+      #    поэтому ведут себя одинаково на ноутбуке и в CI. Сюда входит live-regression: он доказывает,
+      #    что живой кандидат прошёл бы гейт публикации.
+      - name: Изолированные тесты
+        run: npm run check
+
+      # 2. Проверка FRED-ключа — НЕОБЯЗАТЕЛЬНАЯ диагностика. FRED_KEY не требуется: без него сборщик
+      #    читает FRED через keyless CSV-эндпоинт (fredgraph.csv). Шаг никогда не блокирует публикацию —
+      #    если ключ задан, он валидирует его; если нет, подтверждает, что keyless-путь жив.
+      - name: Проверить доступ к FRED (необязательно)
+        continue-on-error: true
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+        run: npm run fred-smoke
+
+      # 3. Диагностика. Никогда не блокирует публикацию: она нужна, чтобы в логе было видно, что
+      #    каждый источник — первичный И резервный — реально ответил ИМЕННО С ЭТОГО РАННЕРА.
+      - name: Диагностика эндпоинтов
+        continue-on-error: true
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+          CM_API_KEY: ${{ secrets.CM_API_KEY }}
+        run: npm run probe
+
+      # 4. Live-кандидат пишется во ВРЕМЕННЫЕ пути. docs/snapshot.json хранит последний
+      #    подтверждённый снимок, пока кандидат не докажет свою пригодность.
+      #    FRED_KEY необязателен: без него сборщик читает FRED через keyless CSV-эндпоинт.
+      - name: Собрать live-кандидата
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+          CM_API_KEY: ${{ secrets.CM_API_KEY }}
+          OUT: .candidate/snapshot.json
+          STATE: .candidate/cache.json
+          PREVIOUS_STATE: .state/cache.json
+          PREVIOUS_PUBLIC: docs/snapshot.json
+        run: npm run snapshot
+
+      # 5. Строгая проверка самого кандидата. REQUIRE_LIVE отвергает mock и устаревшие данные; при этом
+      #    честно неполный вердикт («переходный» / «недостаточно данных») ПУБЛИКУЕТСЯ, а не замораживается —
+      #    прозрачность деградации важнее иллюзии полноты. Последний подтверждённый снимок остаётся
+      #    только если кандидат вовсе не проходит REQUIRE_LIVE.
+      - name: Проверить live-кандидата
+        env:
+          REQUIRE_LIVE: "1"
+          OUT: .candidate/snapshot.json
+          STATE: .candidate/cache.json
+        run: npm run verify
+
+      # 6. Публикуется только проверенный кандидат.
+      - name: Принять кандидата
+        run: |
+          set -euo pipefail
+          mkdir -p .state
+          cp .candidate/snapshot.json docs/snapshot.json
+          cp .candidate/cache.json .state/cache.json
+
+      # 7. САЙТ ПУБЛИКУЕТСЯ ОТСЮДА, а не коммитом.
+      #    Документация GitHub: «Commits pushed by a GitHub Actions workflow that uses the
+      #    GITHUB_TOKEN do not trigger a GitHub Pages build.» То есть при источнике Pages
+      #    «Deploy from a branch» коммит снимка НЕ пересобрал бы сайт: Action был бы зелёным,
+      #    данные легли бы в репозиторий, а страница вечно показывала бы старый снимок.
+      #    Поэтому источник Pages = «GitHub Actions», и развёртывание здесь явное.
+      - name: Настроить Pages
+        uses: actions/configure-pages@v5
+
+      - name: Загрузить артефакт сайта
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+      - name: Развернуть сайт
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # 8. Коммит — только ради истории снимков и как резерв состояния, если кэш Actions
+      #    будет вытеснен. На доступность сайта он больше не влияет.
+      - name: Сохранить снимок в репозиторий
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_REF_NAME:-main}"
+          git config user.name "21m-dashboard-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs/snapshot.json
+          if git diff --cached --quiet; then
+            echo "Снимок не изменился"
+            exit 0
+          fi
+          git commit -m "BTC snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
+          git fetch origin "$branch"
+          git rebase "origin/$branch"
+          git push origin "HEAD:$branch"

@@ -1,0 +1,63 @@
+import { readFileSync, existsSync } from "node:fs";
+import assert from "node:assert/strict";
+const y=readFileSync(new URL("../.github/workflows/snapshot.yml",import.meta.url),"utf8");
+assert.match(y,/cron:\s*"23 \*\/8 \* \* \*"/,"8-hour schedule missing");
+assert.match(y,/actions\/checkout@v6/);
+assert.match(y,/actions\/setup-node@v6/);
+assert.match(y,/actions\/cache@v5/,"internal state must use Actions cache");
+assert.match(y,/path:\s*\.state\/cache\.json/,"state cache path missing");
+assert.match(y,/restore-keys:[\s\S]*btc21m-state-/,"rolling state restore key missing");
+assert.match(y,/node-version:\s*24/);
+assert.match(y,/package-manager-cache:\s*false/,"automatic package-manager cache must stay disabled");
+assert.match(y,/timeout-minutes:\s*20/);
+// FRED_KEY is OPTIONAL (the collector has a keyless fredgraph.csv fallback): the workflow must not
+// hard-gate on it, or a keyless deployment — the project's headline promise — would fail CI.
+assert.doesNotMatch(y,/::error::[^\n]*FRED_KEY/,"FRED_KEY must stay optional — no hard secret gate");
+assert.match(y,/npm run fred-smoke/,"FRED smoke (optional, non-blocking) step missing");
+assert.match(y,/npm run probe/,"endpoint probe step missing");
+// The live candidate must never be written straight into docs/: publication happens only after
+// the candidate has passed strict verification.
+assert.match(y,/OUT:\s*\.candidate\/snapshot\.json/,"live candidate must be collected into a temporary path");
+assert.match(y,/REQUIRE_LIVE:\s*"1"/,"strict live verification step missing");
+assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"verified candidate is never promoted");
+assert.ok(y.indexOf("npm run verify")<y.indexOf("cp .candidate/snapshot.json"),"publication must happen after verification");
+assert.doesNotMatch(y,/fetch-depth:\s*0/,"a full clone gets slower every day and is not needed for a rebase");
+assert.match(y,/continue-on-error:\s*true/,"probe must never block publication");
+assert.match(y,/REQUIRE_LIVE:\s*"1"/);
+assert.match(y,/branch="\$\{GITHUB_REF_NAME:-main\}"/,"branch must not be hardcoded");
+assert.doesNotMatch(y,/pull --rebase origin main/,"hardcoded main branch remains");
+assert.match(y,/git push origin "HEAD:\$branch"/);
+assert.match(y,/git add docs\/snapshot\.json/,"public snapshot must be committed");
+assert.doesNotMatch(y,/git add[^\n]*\.state\/cache\.json/,"raw internal state must not be committed");
+assert.match(y,/"package\.json"/,"package changes must trigger workflow");
+const gitignore=readFileSync(new URL("../.gitignore",import.meta.url),"utf8");
+assert.match(gitignore,/^\.state\/cache\.json$/m,"internal cache must be ignored by git");
+const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));
+assert.match(pkg.scripts?.["fred-smoke"]||"",/fred-smoke-test\.mjs/,"FRED smoke command missing");
+assert.match(pkg.scripts?.probe||"",/probe\.mjs/,"probe command missing");
+assert.match(pkg.scripts?.["live-regression"]||"",/live-regression-test\.mjs/,"live regression command missing");
+assert.ok(existsSync(new URL("./probe.mjs",import.meta.url)),"probe script missing");
+assert.ok(existsSync(new URL("./fred-smoke-test.mjs",import.meta.url)),"FRED smoke script missing");
+const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
+assert.match(html,/id="uiVersion"/,"dynamic UI version element missing");
+assert.match(html,/SNAP\.version/,"UI version is not tied to snapshot version");
+// No literal version may be baked into the markup: it silently desynchronises from package.json.
+const baked=[...html.matchAll(/v\d+\.\d+\.\d+/g)].map(x=>x[0]);
+assert.deepEqual(baked,[],`hardcoded version in markup: ${baked.join(", ")}`);
+assert.doesNotMatch(html,/~openai\/gpt-latest/,"invalid default OpenRouter model id");
+assert.match(html,/"X-Title"/,"OpenRouter title header must use X-Title");
+// The site MUST be deployed by the workflow itself. GitHub does not rebuild a "Deploy from a branch"
+// Pages site for commits pushed with the GITHUB_TOKEN — the run would be green, the data would land
+// in the repo, and the live page would serve a stale snapshot forever. So the workflow deploys Pages.
+assert.match(y,/actions\/configure-pages/,"Pages must be configured by the workflow");
+assert.match(y,/actions\/upload-pages-artifact/,"the site must be uploaded as a Pages artifact");
+assert.match(y,/actions\/deploy-pages/,"the site must be deployed by the workflow, not by a commit");
+assert.match(y,/path:\s*docs/,"the Pages artifact must be the docs/ folder");
+assert.match(y,/pages:\s*write/,"pages: write permission missing");
+assert.match(y,/id-token:\s*write/,"id-token: write permission missing");
+assert.match(y,/name:\s*github-pages/,"the github-pages environment is required by deploy-pages");
+assert.ok(y.indexOf("cp .candidate/snapshot.json")<y.indexOf("upload-pages-artifact"),"the artifact must be uploaded AFTER the verified candidate is promoted");
+// Honest partial verdicts must publish rather than freeze the site, so the production gate is
+// REQUIRE_LIVE only. REQUIRE_COMPLETE stays an opt-in capability (self-test.mjs), not a workflow gate.
+assert.doesNotMatch(y,/REQUIRE_COMPLETE/,"the production publish gate must not force both regimes complete");
+console.log("Workflow static tests OK");
