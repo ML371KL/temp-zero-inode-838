@@ -1,0 +1,114 @@
+name: Обновление Bitcoin-снимка
+
+on:
+  schedule:
+    - cron: "23 */8 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/snapshot.yml"
+      - "scripts/**"
+      - "docs/index.html"
+      - "package.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: btc-21m-snapshot
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # fetch-depth: 1. Публикация делает rebase на свежий tip ветки, полная история не нужна —
+      # а полный клон дорожает каждый день, потому что snapshot.json переписывается трижды в сутки.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Восстановить внутреннее состояние
+        uses: actions/cache@v5
+        with:
+          path: .state/cache.json
+          key: btc21m-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            btc21m-state-${{ github.ref_name }}-
+            btc21m-state-
+
+      # 1. Структурные тесты работают на изолированном mock и не трогают опубликованный снимок,
+      #    поэтому ведут себя одинаково на ноутбуке и в CI.
+      - name: Изолированные тесты
+        run: npm run check
+
+      - name: Проверить секреты
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+        run: |
+          if ! [[ "$FRED_KEY" =~ ^[a-z0-9]{32}$ ]]; then
+            echo "::error::FRED_KEY отсутствует или имеет неверный формат"
+            exit 1
+          fi
+
+      - name: Проверить доступ к FRED
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+        run: npm run fred-smoke
+
+      # 2. Диагностика. Никогда не блокирует публикацию: она нужна, чтобы в логе было видно,
+      #    что каждый источник реально ответил ИМЕННО С ЭТОГО РАННЕРА.
+      - name: Диагностика эндпоинтов
+        continue-on-error: true
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+          CM_API_KEY: ${{ secrets.CM_API_KEY }}
+        run: npm run probe
+
+      # 3. Live-кандидат пишется во ВРЕМЕННЫЕ пути. docs/snapshot.json хранит последний
+      #    подтверждённый снимок, пока кандидат не докажет свою пригодность.
+      - name: Собрать live-кандидата
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+          CM_API_KEY: ${{ secrets.CM_API_KEY }}
+          OUT: .candidate/snapshot.json
+          STATE: .candidate/cache.json
+          PREVIOUS_STATE: .state/cache.json
+          PREVIOUS_PUBLIC: docs/snapshot.json
+        run: node scripts/fetch-snapshot.mjs
+
+      # 4. Строгая проверка самого кандидата.
+      - name: Проверить live-кандидата
+        env:
+          REQUIRE_LIVE: "1"
+          REQUIRE_COMPLETE: "1"
+          OUT: .candidate/snapshot.json
+          STATE: .candidate/cache.json
+        run: npm run verify
+
+      # 5. Публикуется только проверенный кандидат.
+      - name: Принять кандидата
+        run: |
+          set -euo pipefail
+          mkdir -p .state
+          cp .candidate/snapshot.json docs/snapshot.json
+          cp .candidate/cache.json .state/cache.json
+
+      - name: Опубликовать снимок
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_REF_NAME:-main}"
+          git config user.name "21m-dashboard-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add docs/snapshot.json
+          if git diff --cached --quiet; then
+            echo "Снимок не изменился"
+            exit 0
+          fi
+          git commit -m "BTC snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
+          git fetch origin "$branch"
+          git rebase "origin/$branch"
+          git push origin "HEAD:$branch"
