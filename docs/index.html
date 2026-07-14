@@ -87,7 +87,7 @@ const cleanUrls=o=>[...new Set([...(Array.isArray(o?.source_urls)?o.source_urls:
 const urlLabel=u=>{try{return new URL(u).hostname.replace(/^www\./,"")}catch{return"источник"}};
 const sourceLinks=o=>cleanUrls(o).map(u=>`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(urlLabel(u))}</a>`).join(" · ")||"<span>нет ссылки</span>";
 const fmtScore=v=>Number.isFinite(v)?`${v>=0?"+":""}${v.toFixed(0)}`:"—";
-const cls=s=>s==null?"na":s>=1?`s${s}`:s<=-1?`s${s}`:"s0";
+const cls=s=>s==null?"na":s>=1.5?"s2":s>=0.5?"s1":s<=-1.5?"s-2":s<=-0.5?"s-1":"s0";
 const badge=s=>s==null?"нет данных":s===2?"+2 сильная поддержка":s===1?"+1 поддержка":s===0?"0 нейтрально":s===-1?"−1 напряжение":"−2 разлом";
 const roleLabel={leading:"опережающий",confirming:"подтверждающий",context:"контекст",component:"компонент"};const horizonLabel={fast:"часы–дни",short:"дни–недели",medium:"недели–месяцы"};const methodLabel={dynamic:"динамический порог",mechanical:"механический порог",derived:"вычисляемый",mixed:"смешанный"};
 function ageText(t){if(!t)return"—";const min=Math.max(0,Math.round((Date.now()-new Date(t))/60000));if(min<60)return`${min} мин назад`;if(min<1440)return`${Math.round(min/60)} ч назад`;return`${Math.round(min/1440)} дн назад`}

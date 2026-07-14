@@ -14,7 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.7.3";
+const VERSION = "2.7.4";
 const OUT = process.env.OUT || "docs/snapshot.json";
 const STATE = process.env.STATE || ".state/cache.json";
 // The live candidate is written to temporary paths and only copied into docs/ after it passes
@@ -684,7 +684,9 @@ function sourceMeta(key){return{observed_at:obs(key),stale:stale(key)};}
 function datasetSource(key,fallback=""){return datasets[key]?.source||sourceStates[key]?.source||fallback;}
 function datasetUrls(key,...fallback){return uniqueHttps(datasets[key]?.source_urls?.length?datasets[key].source_urls:fallback.flat());}
 function links(...values){return uniqueHttps(values.flat());}
-function componentScore(parts){const a=parts.filter(finite).map(Number);return a.length?clamp(roundSym(mean(a)),-2,2):null;}
+// Round the component mean to the nearest 0.5 rather than to a whole number: integer rounding
+// amplifies a weak signal (mean +0.5 -> +1). Half-steps keep [-2,-1.5,-1,-0.5,0,+0.5,+1,+1.5,+2].
+function componentScore(parts){const a=parts.filter(finite).map(Number);return a.length?clamp(Math.round(mean(a)*2)/2,-2,2):null;}
 function highGood(p){return !finite(p)?null:p>=90?2:p>=65?1:p>=35?0:p>=10?-1:-2;}
 function lowGood(p){return !finite(p)?null:p<=10?2:p<=35?1:p<=65?0:p<=90?-1:-2;}
 
@@ -699,7 +701,7 @@ function buildMetrics(){
   const net4Series=trailingChangeSeries(net,28),net13Series=trailingChangeSeries(net,91),net4=last(net4Series)?.v,net13=last(net13Series)?.v;
   const net4Pct=percentileRank(net4Series.slice(-260).map(x=>x.v),net4),net13Pct=percentileRank(net13Series.slice(-260).map(x=>x.v),net13);
   const liqScore=componentScore([highGood(net4Pct),highGood(net13Pct)]);
-  add({id:"liquidity_regime",block:"macro",family:"liquidity",name:"Режим чистой долларовой ликвидности",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:liqScore,value:finite(liqScore)?(liqScore>=1?"расширение":liqScore<=-1?"сжатие":"нейтрально"):"—",delta:finite(net4)&&finite(net13)?`4н ${net4.toFixed(1)}% · 13н ${net13.toFixed(1)}%`:"",note:"WALCL − TGA − ON RRP. 4- и 13-недельные импульсы сравниваются с собственной историей; это прокси направления ликвидности, а не точная мера денег, доступных BTC.",score:liqScore,source:"FRED",source_url:fredSeriesUrl("WALCL"),source_urls:fredSeriesUrls(["WALCL","WTREGEN","RRPONTSYD"]),...sourceMetaMany(["fred_WALCL","fred_WTREGEN","fred_RRPONTSYD"]),series:net});
+  add({id:"liquidity_regime",block:"macro",family:"liquidity",name:"Режим чистой долларовой ликвидности",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:liqScore,value:finite(liqScore)?(liqScore>=1?"расширение":liqScore<=-1?"сжатие":"нейтрально"):"—",delta:finite(net4)&&finite(net13)?`4н ${net4.toFixed(1)}% · 13н ${net13.toFixed(1)}%`:"",note:"WALCL − TGA − ON RRP — чистая ликвидность ФРС США. 4- и 13-недельные импульсы сравниваются с собственной историей. Это прокси направления американской ликвидности как индикатора глобальных условий (не-US ЦБ здесь не учитываются), а не точная мера денег, доступных BTC.",score:liqScore,source:"FRED",source_url:fredSeriesUrl("WALCL"),source_urls:fredSeriesUrls(["WALCL","WTREGEN","RRPONTSYD"]),...sourceMetaMany(["fred_WALCL","fred_WTREGEN","fred_RRPONTSYD"]),series:net});
   add({id:"netliq_4w",block:"macro",family:"liquidity",name:"Net Liquidity · 4 недели",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:net4,value:finite(net4)?`${net4>=0?"+":""}${net4.toFixed(1)}%`:"—",delta:finite(net4Pct)?`${net4Pct.toFixed(0)}-й перцентиль`:"",note:"Компонент семейства; отдельного голоса не получает.",score:null,source:"fred",...sourceMeta("fred_WALCL"),series:net4Series});
   add({id:"netliq_13w",block:"macro",family:"liquidity",name:"Net Liquidity · 13 недель",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:net13,value:finite(net13)?`${net13>=0?"+":""}${net13.toFixed(1)}%`:"—",delta:finite(net13Pct)?`${net13Pct.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный импульс того же семейства.",score:null,source:"fred",...sourceMeta("fred_WALCL"),series:net13Series});
 
@@ -730,7 +732,7 @@ function buildMetrics(){
   const p5=percentileRank(f5Btc.map(x=>x.v),last(f5Btc)?.v),p20=percentileRank(f20Btc.map(x=>x.v),last(f20Btc)?.v);
   const etf5Btc=last(f5Btc)?.v,etf20Btc=last(f20Btc)?.v;
   const etfScore=componentScore([finite(etf5Btc)?highGood(p5):null,finite(etf20Btc)?highGood(p20):null]);
-  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и сравниваются с собственным историческим распределением. В BTC они напрямую сопоставимы с эмиссией (~450 BTC/день). Это основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
+  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
   add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf});
   add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf5s});
   add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf20s});
@@ -832,7 +834,9 @@ function buildMetrics(){
 
   // V. Качество цены
   const usdDisp=quoteDispersion(spot,"USD"),usdtDisp=quoteDispersion(spot,"USDT"),spreads=[usdDisp,usdtDisp].filter(finite),disp=spreads.length?Math.max(...spreads):null,completeSpotPairs=finite(usdDisp)&&finite(usdtDisp);
-  const integrityScore=completeSpotPairs?customScore(disp,[[v=>v<20,1],[v=>v<50,0],[v=>v<100,-1],[()=>true,-2]]):customScore(disp,[[v=>v<50,null],[v=>v<100,-1],[()=>true,-2]]);
+  // Penalty-only: healthy cross-venue synchrony carries no directional edge (only "no emergency"), so it
+  // scores 0, not +1. Dispersion widening still penalizes and can trip the integrity override.
+  const integrityScore=completeSpotPairs?customScore(disp,[[v=>v<20,0],[v=>v<50,0],[v=>v<100,-1],[()=>true,-2]]):customScore(disp,[[v=>v<50,null],[v=>v<100,-1],[()=>true,-2]]);
   add({id:"spot_integrity",block:"market",family:"integrity",name:"Синхронность спотовых площадок",horizon:"fast",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:disp,value:finite(disp)?`${disp.toFixed(0)} б.п.`:"—",delta:`USD ${finite(usdDisp)?usdDisp.toFixed(0):"—"} · USDT ${finite(usdtDisp)?usdtDisp.toFixed(0):"—"} б.п.`,note:"USD-площадки (Coinbase/Kraken/Bitstamp/Gemini) и USDT-площадки (OKX/Kraken/Coinbase) сравниваются только внутри одинаковой валюты котирования. Положительный голос требует обеих полных пар; одна доступная группа может только предупредить о расхождении.",score:integrityScore,source:"Coinbase · Kraken · Bitstamp · Gemini · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot,...sourceMeta("spot")});
 
   const vol=marketSeries("volume"),volCh=changeOfAverage(vol,30,30);let volumeScore=null,volumeText="—";
@@ -841,7 +845,7 @@ function buildMetrics(){
 
   const pegs=data("pegs")||{},completePeg=["USDT","USDC"].every(k=>finite(pegs[k]));
   const pegValues=["USDT","USDC"].filter(k=>finite(pegs[k])).map(k=>Math.abs(Number(pegs[k])-1)*100),pegDev=completePeg?Math.max(...pegValues):null;
-  add({id:"stablecoin_peg",block:"market",family:"stablecoin_integrity",name:"Целостность крупных стейблкоинов",horizon:"fast",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:pegDev,value:finite(pegDev)?`${pegDev.toFixed(2)}% max deviation`:"неполное покрытие",delta:["USDT","USDC"].filter(k=>finite(pegs[k])).map(k=>`${k} ${Number(pegs[k]).toFixed(4)}`).join(" · "),note:"Здоровый голос требует одновременно валидных USDT и USDC. Одиночный доступный экстремальный депег всё ещё виден аварийному детектору, но отсутствие второй монеты не оценивается как нормальный паритет.",score:customScore(pegDev,[[v=>v<.2,1],[v=>v<.5,0],[v=>v<1,-1],[()=>true,-2]]),source:"DefiLlama · exchange fallback",source_url:SOURCE_URLS.defillama,source_urls:links(SOURCE_URLS.defillama,SOURCE_URLS.coinbase,SOURCE_URLS.kraken,SOURCE_URLS.gemini),...sourceMeta("pegs")});
+  add({id:"stablecoin_peg",block:"market",family:"stablecoin_integrity",name:"Целостность крупных стейблкоинов",horizon:"fast",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:pegDev,value:finite(pegDev)?`${pegDev.toFixed(2)}% max deviation`:"неполное покрытие",delta:["USDT","USDC"].filter(k=>finite(pegs[k])).map(k=>`${k} ${Number(pegs[k]).toFixed(4)}`).join(" · "),note:"Здоровый голос требует одновременно валидных USDT и USDC. Одиночный доступный экстремальный депег всё ещё виден аварийному детектору, но отсутствие второй монеты не оценивается как нормальный паритет.",score:customScore(pegDev,[[v=>v<.2,0],[v=>v<.5,0],[v=>v<1,-1],[()=>true,-2]]),source:"DefiLlama · exchange fallback",source_url:SOURCE_URLS.defillama,source_urls:links(SOURCE_URLS.defillama,SOURCE_URLS.coinbase,SOURCE_URLS.kraken,SOURCE_URLS.gemini),...sourceMeta("pegs")});
 
   return m;
 }
@@ -872,12 +876,18 @@ function buildDetectors(metrics){
   out.push({id:"demand_break",name:"Слом маржинального спроса",state:detectorState(demandHits,4),strategic_points:demandHits>=3?-15:demandHits>=2?-5:0,tactical_points:demandHits>=3?-15:demandHits>=2?-5:0,inputs:`условий ${demandHits}/4`,logic:"ETF, стейблкоины, биржевое предложение и американский спот должны ухудшаться совместно."});
   const macroHits=[le("liquidity_regime",-1),le("financial_conditions",-1),le("system_stress",-1)].filter(Boolean).length;
   out.push({id:"macro_shock",name:"Макрошок ликвидности",state:detectorState(macroHits,3),strategic_points:macroHits>=3?-12:macroHits>=2?-5:0,tactical_points:macroHits>=3?-10:macroHits>=2?-5:0,inputs:`условий ${macroHits}/3`,logic:"Сжатие Net Liquidity, ужесточение ставок/доллара и кредитный стресс должны подтвердить друг друга."});
-  const distHits=[le("mvrv_cycle",-1),le("exchange_supply",-1),le("trend_regime",-1)].filter(Boolean).length;
-  out.push({id:"distribution",name:"Дистрибуция и потеря тренда",state:detectorState(distHits,3),strategic_points:distHits>=3?-12:distHits>=2?-5:0,tactical_points:distHits>=3?-5:0,inputs:`условий ${distHits}/3`,logic:"Высокая накопленная прибыль опасна только вместе с ростом биржевого предложения и потерей ценовых опор."});
-  const squeezeHits=[finite(v("funding"))&&v("funding")<-.03,ge("us_spot_premium",0),ge("etf_regime",0),le("oi_quality",0)].filter(Boolean).length;
-  out.push({id:"short_squeeze",name:"Условия short squeeze",state:detectorState(squeezeHits,4,true),strategic_points:0,tactical_points:squeezeHits>=3?8:0,inputs:`условий ${squeezeHits}/4`,logic:"Отрицательный funding при стабилизации спот-спроса создаёт топливо отскока, но не меняет среднесрочный режим."});
-  const recoveryHits=[finite(v("mvrv_cycle"))&&v("mvrv_cycle")<25,ge("trend_regime",0),ge("etf_regime",0),ge("exchange_supply",0)].filter(Boolean).length;
-  out.push({id:"recovery",name:"Капитуляция → восстановление",state:detectorState(recoveryHits,4,true),strategic_points:recoveryHits>=3?8:0,tactical_points:recoveryHits>=3?8:0,inputs:`условий ${recoveryHits}/4`,logic:"Низкая циклическая оценка полезна только после стабилизации тренда, потоков ETF и биржевого предложения."});
+  // High valuation (MVRV) is a REQUIRED anchor: "distribution" means selling accumulated profit, so it
+  // cannot fire at a cheap MVRV. Exchange-supply/trend are supporting confirmations, not equal votes.
+  const distAnchor=le("mvrv_cycle",-1),distSupport=[le("exchange_supply",-1),le("trend_regime",-1)].filter(Boolean).length,distState=!distAnchor?"calm":distSupport>=2?"fired":distSupport>=1?"watch":"calm";
+  out.push({id:"distribution",name:"Дистрибуция и потеря тренда",state:distState,strategic_points:distState==="fired"?-12:distState==="watch"?-5:0,tactical_points:distState==="fired"?-5:0,inputs:`оценка ${distAnchor?"высокая":"не высокая"} · подтверждений ${distSupport}/2`,logic:"Высокая накопленная прибыль (MVRV) — обязательный якорь; штраф только когда высокая оценка сопровождается ростом биржевого предложения и/или потерей ценовых опор."});
+  // Sharply negative funding (a crowded short) is a REQUIRED anchor — without it there is no squeeze fuel,
+  // regardless of the other signals. Then require at least two supporting stabilizations.
+  const sqAnchor=finite(v("funding"))&&v("funding")<-.03,sqSupport=[ge("us_spot_premium",0),ge("etf_regime",0),le("oi_quality",0)].filter(Boolean).length,sqState=!sqAnchor?"calm":sqSupport>=2?"good":sqSupport>=1?"watch":"calm";
+  out.push({id:"short_squeeze",name:"Условия short squeeze",state:sqState,strategic_points:0,tactical_points:sqState==="good"?8:0,inputs:`funding ${sqAnchor?"отрицательный":"не отрицательный"} · подтверждений ${sqSupport}/3`,logic:"Сильно отрицательный funding (переполненный шорт) — обязательный якорь; плюс минимум два подтверждения стабилизации спота/ETF/OI. Не меняет среднесрочный режим."});
+  // Low valuation (MVRV percentile < 25 — capitulation) is a REQUIRED anchor; recovery cannot be claimed
+  // from stabilizing trend/flows alone without a cheap cycle. Then require at least two stabilizations.
+  const recAnchor=finite(v("mvrv_cycle"))&&v("mvrv_cycle")<25,recSupport=[ge("trend_regime",0),ge("etf_regime",0),ge("exchange_supply",0)].filter(Boolean).length,recState=!recAnchor?"calm":recSupport>=2?"good":recSupport>=1?"watch":"calm";
+  out.push({id:"recovery",name:"Капитуляция → восстановление",state:recState,strategic_points:recState==="good"?8:0,tactical_points:recState==="good"?8:0,inputs:`оценка ${recAnchor?"низкая":"не низкая"} · подтверждений ${recSupport}/3`,logic:"Низкая циклическая оценка (MVRV) — обязательный якорь; плюс минимум два подтверждения стабилизации тренда/ETF/биржевого предложения."});
   return{detectors:out,hardOverride:hard};
 }
 
