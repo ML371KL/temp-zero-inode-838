@@ -14,7 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.7.4";
+const VERSION = "2.7.3";
 const OUT = process.env.OUT || "docs/snapshot.json";
 const STATE = process.env.STATE || ".state/cache.json";
 // The live candidate is written to temporary paths and only copied into docs/ after it passes
