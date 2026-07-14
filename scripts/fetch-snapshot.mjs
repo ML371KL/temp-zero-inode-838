@@ -664,7 +664,11 @@ function metric(def){return{
 };}
 function cmSeries(id){return series(data("coinmetrics")?.[id]||[]);}
 function bcSeries(id){return series(data("blockchain_onchain")?.[id]||[]);}
-function chooseWholeSeries(cmId,bcId){const c=cmSeries(cmId);if(c.length>=180)return{series:c,source:"Coin Metrics",keys:["coinmetrics"],urls:[SOURCE_URLS.coinmetrics]};const b=bcSeries(bcId);return b.length>=180?{series:b,source:"Blockchain.com",keys:["blockchain_onchain"],urls:[SOURCE_URLS.blockchain]}:{series:[],source:"",keys:["coinmetrics","blockchain_onchain"],urls:[SOURCE_URLS.coinmetrics,SOURCE_URLS.blockchain]};}
+function chooseWholeSeries(cmId,bcId){const c=cmSeries(cmId);if(c.length>=180)return{series:c,source:"Coin Metrics",keys:["coinmetrics"],urls:[SOURCE_URLS.coinmetrics]};const b=bcSeries(bcId);
+  // blockchain.info publishes no MVRV chart, so the MVRV fallback is actually bitcoin-data.com (BGeometrics);
+  // attribute it correctly. Other blockchain_onchain series (activity, miner revenue) do come from blockchain.info.
+  const bcMeta=bcId==="MVRV"?{source:"bitcoin-data.com (BGeometrics)",urls:[SOURCE_URLS.bitcoindata]}:{source:"Blockchain.com",urls:[SOURCE_URLS.blockchain]};
+  return b.length>=180?{series:b,source:bcMeta.source,keys:["blockchain_onchain"],urls:bcMeta.urls}:{series:[],source:"",keys:["coinmetrics","blockchain_onchain"],urls:[SOURCE_URLS.coinmetrics,SOURCE_URLS.bitcoindata]};}
 function marketSeries(k){return series(data("market")?.[k]||[]);}
 function netSeries(k){return series(data("network")?.[k]||[]);}
 function fred(id){return series(data("fred_"+id)||[]);}
@@ -753,7 +757,7 @@ function buildMetrics(){
   const mvrvChoice=chooseWholeSeries("CapMVRVCur","MVRV"),mvrv=mvrvChoice.series,mvrvNow=last(mvrv)?.v,mvrvPct=percentileRank(sliceDays(mvrv,4*365).map(x=>x.v),mvrvNow),mvrv90=mvrv.length?pct(last(mvrv).v,priorByDays(mvrv,90)?.v):null;
   const ma200=price.length>=200?mean(price.slice(-200).map(x=>x.v)):null,trendAbove=priceLast&&ma200?priceLast>ma200:false;
   let mvrvScore=null;if(finite(mvrvPct)){mvrvScore=mvrvPct>=95?-2:mvrvPct>=82?-1:mvrvPct<=10?(trendAbove?1:0):mvrvPct<=70?1:0;}
-  add({id:"mvrv_cycle",block:"cycle",family:"valuation",name:"MVRV · динамический цикл",horizon:"medium",role:"confirming",method:"dynamic",tactical:false,value_num:mvrvPct,value:finite(mvrvPct)?`${mvrvPct.toFixed(0)}-й перцентиль 4 лет`:"нет данных оценки",delta:finite(mvrvNow)&&finite(mvrv90)?`MVRV ${mvrvNow.toFixed(2)} · Δ90д ${mvrv90.toFixed(1)}%`:"",note:"Статические пороги прошлых циклов не используются. Верхние перцентили означают большую накопленную прибыль и риск дистрибуции; низкие требуют подтверждения трендом. Coin Metrics используется первым; Blockchain.com даёт открытый MVRV ratio fallback. Истории разных методологий не сшиваются и каждая оценивается по собственным перцентилям.",score:mvrvScore,source:mvrvChoice.source||"Coin Metrics / Blockchain.com",source_url:mvrvChoice.urls[0],source_urls:mvrvChoice.urls,...sourceMetaMany(mvrvChoice.keys),series:mvrv});
+  add({id:"mvrv_cycle",block:"cycle",family:"valuation",name:"MVRV · динамический цикл",horizon:"medium",role:"confirming",method:"dynamic",tactical:false,value_num:mvrvPct,value:finite(mvrvPct)?`${mvrvPct.toFixed(0)}-й перцентиль 4 лет`:"нет данных оценки",delta:finite(mvrvNow)&&finite(mvrv90)?`MVRV ${mvrvNow.toFixed(2)} · Δ90д ${mvrv90.toFixed(1)}%`:"",note:"Статические пороги прошлых циклов не используются. Верхние перцентили означают большую накопленную прибыль и риск дистрибуции; низкие требуют подтверждения трендом. Coin Metrics используется первым; bitcoin-data.com (BGeometrics) даёт открытый keyless MVRV ratio fallback. Истории разных методологий не сшиваются и каждая оценивается по собственным перцентилям.",score:mvrvScore,source:mvrvChoice.source||"Coin Metrics / Blockchain.com",source_url:mvrvChoice.urls[0],source_urls:mvrvChoice.urls,...sourceMetaMany(mvrvChoice.keys),series:mvrv});
 
   // Network security uses mempool.space first and Blockchain.com hashrate/difficulty as an independent fallback:
   // US-reachable and independent of any commercial vendor. It is the always-available cycle leg.
@@ -907,7 +911,7 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   let tactical="balanced";
   if(!criticalTactical)tactical="insufficient";
   else if(levDet==="fired"&&demandDet==="fired")tactical="deleveraging";
-  else if(L!=null&&L<=-35&&Q!=null&&Q<=-15)tactical="fragile";
+  else if(L!=null&&L<=-35&&Q!=null&&Q<=0)tactical="fragile";
   else if(L!=null&&L<=-35&&Q!=null&&Q>0)tactical="overheated_supported";
   else if(L!=null&&L>=15&&Q!=null&&Q>=15&&K>=-20)tactical="spot_led";
   else if(detectors.find(x=>x.id==="short_squeeze")?.state==="good")tactical="short_squeeze";
