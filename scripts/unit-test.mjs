@@ -4,7 +4,7 @@ import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
   validObservationAge, roundSym, percentChangeCommonVenues, classifyIntegrity,
-  quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv
+  quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
 const fail=[];
@@ -33,6 +33,13 @@ ok(!validateEtfSeries(weekend),"weekend ETF row rejected");
 // Retry-After supports both delta-seconds and HTTP-date forms.
 eq(retryAfterMs("3",1_000),3_000,"Retry-After seconds");
 eq(retryAfterMs(new Date(6_000).toUTCString(),1_000),5_000,"Retry-After HTTP date");
+// Permanent 4xx errors must fail immediately instead of multiplying latency and rate-limit pressure.
+const originalFetch=globalThis.fetch;let permanentCalls=0;
+try{
+  globalThis.fetch=async()=>{permanentCalls++;return new Response("not found",{status:404});};
+  await assert.rejects(()=>request("https://example.invalid/permanent",{tries:3}),/HTTP 404/);
+  eq(permanentCalls,1,"non-retryable 4xx requested once");
+}finally{globalThis.fetch=originalFetch;}
 eq(retryAfterMs("not-a-date",1_000),null,"invalid Retry-After ignored");
 
 const base=Date.UTC(2026,0,10),points=[0,1,2].map(i=>({t:base+i*864e5,v:i+1}));
@@ -102,6 +109,7 @@ eq(parseFredCsv("observation_date,WALCL\n2026-01-02,7000000").length,1,"live `ob
 eq(parseFredCsv("observation_date,WALCL\n2026-01-02,7000000")[0].v,7000000,"value column read by position, not by name");
 eq(parseFredCsv("DATE,WALCL\n2026-01-02,7000000").length,1,"legacy `DATE` header still parsed");
 eq(parseFredCsv("observation_date,DGS10\n2026-01-02,.").length,0,"FRED writes `.` for a missing value; it must be dropped");
+eq(parseFredCsv("observation_date,DGS10\n2026-01-02,").length,0,"blank FRED cells must not become numeric zero");
 eq(parseFredCsv("observation_date,X\n2026-01-03,2\n2026-01-02,1").map(r=>r.v),[1,2],"CSV sorted ascending by date");
 let fredCsvThrew=false;try{parseFredCsv("garbage")}catch{fredCsvThrew=true}
 ok(fredCsvThrew,"a malformed FRED CSV must throw, not silently return an empty series");
@@ -137,14 +145,20 @@ ok(Math.abs(estimatedSupply(Date.UTC(2024,3,20))-19_687_500)<1,"supply anchored 
 ok(Math.abs(estimatedSupply(Date.UTC(2025,0,1))/19_804_167-1)<0.002,"supply model within 0.2% of Coin Metrics SplyCur");
 
 const src=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
+const selfSrc=readFileSync(new URL("./self-test.mjs",import.meta.url),"utf8");
 ok(src.includes("sort_order=desc"),"FRED must request newest observations");
 ok(!src.includes("sort_order=asc&limit"),"unsafe FRED asc+limit pattern present");
 ok(!src.includes("https://docs.coinmetrics.io/api/v4/"),"obsolete Coin Metrics docs URL present");
 ok(!src.includes("coinmetrics-io/data"),"redirecting legacy Coin Metrics repository URL present");
 ok(!src.includes("raw.githubusercontent.com/coinmetrics"),"the coinmetrics/data CSV archive froze on 2026-05-24 and can never pass the freshness rule; it must not be used as a fallback");
 ok(src.includes("api.coinmetrics.io/v4"),"documented Coin Metrics root endpoint missing");
+ok(!src.includes('sort:"time"'),"unnecessary Coin Metrics time-sort increases query cost for a single asset");
 ok(src.includes("const CM_HOSTS = CM_KEY"),"paid Coin Metrics host must be conditional on CM_API_KEY");
 ok(src.includes("api.exchange.coinbase.com/products/BTC-USD/candles"),"independent price history missing");
+ok(src.includes("get-product-candles"),"Coinbase history must link to candle documentation");
+ok(src.includes('User-Agent":"btc-21m-dashboard/2.7.2"'),"collector User-Agent/version stale");
+ok(src.includes("nonRetryable"),"permanent 4xx retry guard missing");
+ok(src.includes("Fast demand × Market integrity × Realized volatility"),"methodology text does not match tactical gate");
 ok(src.includes("mempool.space/api/v1/mining/hashrate"),"vendor-independent hashrate source missing");
 ok(src.includes("fetchBlockchainChart(\"hash-rate\""),"hashrate fallback missing");
 ok(src.includes("fredgraph.csv"),"official FRED CSV fallback missing");
@@ -152,7 +166,12 @@ ok(src.includes("blockstream.info/api/fee-estimates"),"fee fallback missing");
 ok(src.includes("futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD"),"Kraken Futures fallback missing");
 ok(src.includes("contractType=futures_inverse"),"Kraken dated-futures basis fallback missing");
 ok(src.includes("api.gemini.com/v1/pubticker/BTCUSD"),"Gemini USD quote missing");
+ok(selfSrc.includes('["coingecko","blockchain","window"]'),"self-test must accept declared Blockchain ATH fallback");
+ok(selfSrc.includes('["coinbase","kraken","bitstamp","gemini"]'),"self-test headline USD median must include Gemini");
 ok(src.includes('obs("market")'),"price timestamp must fall back to market dataset, not Coin Metrics");
+ok(src.includes('quoteGroupPrices(s,"USD").length>=2'),"reference price must require two USD venues");
+ok(!src.includes('for(const group of ["USD","USDT"])'),"USDT quotes must never be treated as USD/BTC reference price");
+ok(src.includes('referencePriceUsesSpot()?obs("spot"):obs("market")'),"price timestamp must follow the actual USD reference source");
 ok(!/coins\/bitcoin\/market_chart/.test(src),"CoinGecko keyless market_chart is capped at 365 days and must not be used for multi-year history");
 ok(src.includes("CM_REQUIRED_METRICS = [];")||/CM_REQUIRED_METRICS\s*=\s*\[\s*\]/.test(src),"Coin Metrics must not be a hard dependency");
 ok(src.includes("valuationAvailable"),"asymmetric valuation gate missing");

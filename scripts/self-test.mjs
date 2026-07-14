@@ -155,7 +155,7 @@ if(!hasInternal){
   const mkt=internal.datasets?.market?.data;
   if(!Array.isArray(mkt?.price)||mkt.price.length<1200)fail.push("market price history missing or too short");
   else{if(!sorted(mkt.price))fail.push("market price series unsorted");const age=Date.now()-Number(last(mkt.price)?.t);if(age>4*864e5+36e5)fail.push("market price series stale");}
-  if(mkt&&!["coingecko","window"].includes(mkt.athSource))fail.push("ATH provenance must be declared");
+  if(mkt&&!["coingecko","blockchain","window"].includes(mkt.athSource))fail.push("ATH provenance must be declared");
   const nw=internal.datasets?.network?.data;
   if(!Array.isArray(nw?.hashrate)||nw.hashrate.length<300)fail.push("network hashrate history missing or too short");
   else if(!sorted(nw.hashrate))fail.push("network hashrate series unsorted");
@@ -172,12 +172,12 @@ if(!hasInternal){
   const spotObserved=Date.parse(internal.datasets?.spot?.observed_at||"");
   // The headline price must be the median of the live USD quote group — never a stale daily close
   // and never a USD/USDT blend.
-  const usdGroup=["coinbase","kraken","bitstamp"].map(k=>spotData[k]).filter(strictFinite).map(Number).sort((a,b)=>a-b);
+  const usdGroup=["coinbase","kraken","bitstamp","gemini"].map(k=>spotData[k]).filter(strictFinite).map(Number).sort((a,b)=>a-b);
   if(usdGroup.length>=2){const mid=Math.floor(usdGroup.length/2),med=usdGroup.length%2?usdGroup[mid]:(usdGroup[mid-1]+usdGroup[mid])/2;
     if(!strictFinite(s.price)||Math.abs(Number(s.price)/med-1)>.02)fail.push("headline price must use the live USD quote group median");
     if(Number.isFinite(spotObserved)&&Date.now()-spotObserved<=6*36e5&&Math.abs(Date.parse(s.price_observed_at)-spotObserved)>1000)fail.push("price_observed_at must follow fresh spot packet");}
   const spotMetric=(s.metrics||[]).find(x=>x.id==="spot_integrity");
-  const quoteGroups={USD:["coinbase","kraken","bitstamp"],USDT:["okx","bybit","kraken_usdt","coinbase_usdt"]};
+  const quoteGroups={USD:["coinbase","kraken","bitstamp","gemini"],USDT:["okx","bybit","kraken_usdt","coinbase_usdt"]};
   const aliveInGroup=g=>quoteGroups[g].filter(k=>strictFinite(spotData[k])).length;
   const bothSpotPairs=["USD","USDT"].every(g=>aliveInGroup(g)>=2);
   if(!bothSpotPairs&&Number(spotMetric?.score)>0)fail.push("incomplete spot quote groups must not receive a positive integrity score");

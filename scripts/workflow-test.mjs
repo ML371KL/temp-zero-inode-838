@@ -38,14 +38,18 @@ assert.match(pkg.scripts?.probe||"",/probe\.mjs/,"probe command missing");
 assert.match(pkg.scripts?.["live-regression"]||"",/live-regression-test\.mjs/,"live regression command missing");
 assert.ok(existsSync(new URL("./probe.mjs",import.meta.url)),"probe script missing");
 assert.ok(existsSync(new URL("./fred-smoke-test.mjs",import.meta.url)),"FRED smoke script missing");
+const probe=readFileSync(new URL("./probe.mjs",import.meta.url),"utf8");
+assert.match(probe,/The Block ETF API/,"primary ETF endpoint missing from runner probe");
+assert.match(probe,/tbstat ETF mirror/,"ETF mirror missing from runner probe");
+assert.match(probe,/Bitstamp daily OHLC/,"Bitstamp history fallback missing from runner probe");
 const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
 assert.match(html,/id="uiVersion"/,"dynamic UI version element missing");
 assert.match(html,/SNAP\.version/,"UI version is not tied to snapshot version");
 // No literal version may be baked into the markup: it silently desynchronises from package.json.
 const baked=[...html.matchAll(/v\d+\.\d+\.\d+/g)].map(x=>x[0]);
 assert.deepEqual(baked,[],`hardcoded version in markup: ${baked.join(", ")}`);
-assert.doesNotMatch(html,/~openai\/gpt-latest/,"invalid default OpenRouter model id");
-assert.match(html,/"X-Title"/,"OpenRouter title header must use X-Title");
+assert.match(html,/value="openai\/gpt-4o-mini"/,"default OpenRouter model must be an explicit valid slug");
+assert.match(html,/"X-OpenRouter-Title"/,"OpenRouter attribution should use the current X-OpenRouter-Title header");
 // The site MUST be deployed by the workflow itself. GitHub does not rebuild a "Deploy from a branch"
 // Pages site for commits pushed with the GITHUB_TOKEN — the run would be green, the data would land
 // in the repo, and the live page would serve a stale snapshot forever. So the workflow deploys Pages.

@@ -13,7 +13,7 @@ on:
       - "package.json"
 
 permissions:
-  contents: write   # коммит снимка в репозиторий (история + резерв состояния)
+  contents: write   # коммит публичного снимка в репозиторий; raw datasets живут только в Actions Cache
   pages: write      # публикация сайта
   id-token: write   # требуется actions/deploy-pages
 
@@ -121,8 +121,9 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
-      # 8. Коммит — только ради истории снимков и как резерв состояния, если кэш Actions
-      #    будет вытеснен. На доступность сайта он больше не влияет.
+      # 8. Коммит — только ради истории публичных снимков. Он НЕ заменяет Actions Cache: public JSON
+      #    не содержит raw datasets, поэтому при вытеснении cache stale-fallback на один цикл исчезает.
+      #    На доступность уже развёрнутого сайта этот коммит не влияет.
       - name: Сохранить снимок в репозиторий
         run: |
           set -euo pipefail
