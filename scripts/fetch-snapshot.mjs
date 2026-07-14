@@ -14,7 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.7.3";
+const VERSION = "2.7.0";
 const OUT = process.env.OUT || "docs/snapshot.json";
 const STATE = process.env.STATE || ".state/cache.json";
 // The live candidate is written to temporary paths and only copied into docs/ after it passes
@@ -40,18 +40,17 @@ const SOURCE_URLS = {
   defillama: "https://defillama.com/stablecoins",
   coinmetrics: "https://docs.coinmetrics.io/api",
   cftc: "https://publicreporting.cftc.gov/Commitments-of-Traders/TFF-Futures-Only/gpe5-46if",
-  deribit: "https://docs.deribit.com/",
+  deribit: "https://docs.deribit.com/api-reference/market-data/public-get_book_summary_by_currency",
   bybit: "https://bybit-exchange.github.io/docs/v5/market/tickers",
   okx: "https://www.okx.com/docs-v5/en/",
   hyperliquid: "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint",
   coinbase: "https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker",
-  coinbase_candles: "https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles",
   kraken: "https://docs.kraken.com/api-reference/market-data/get-ticker-information",
-  kraken_futures: "https://docs.kraken.com/api-reference/market-data/get-tickers",
+  kraken_futures: "https://docs.kraken.com/api/docs/futures-api/trading/get-tickers/",
   gemini: "https://developer.gemini.com/trading/rest-api/market-data/get-ticker",
   blockchain: "https://www.blockchain.com/explorer/api/charts_api",
   blockstream: "https://github.com/Blockstream/esplora/blob/master/API.md",
-  bitcoindata: "https://bitcoin-data.com/bguser/free-features.html",
+  bitcoindata: "https://bitcoin-data.com/",
 };
 const SOURCE_URL_GROUPS = {
   derivatives: [SOURCE_URLS.deribit, SOURCE_URLS.kraken_futures, SOURCE_URLS.okx, SOURCE_URLS.hyperliquid],
@@ -196,21 +195,17 @@ async function request(url,{text=false,tries=3,headers={}}={}){
   let err;
   for(let i=0;i<tries;i++){
     try{
-      const r=await fetch(url,{headers:{"User-Agent":"btc-21m-dashboard/2.7.2","Accept":text?"text/plain,text/html,*/*":"application/json,*/*",...headers},signal:AbortSignal.timeout(25_000)});
+      const r=await fetch(url,{headers:{"User-Agent":"btc-21m-dashboard/2.6","Accept":text?"text/plain,text/html,*/*":"application/json,*/*",...headers},signal:AbortSignal.timeout(25_000)});
       if(!r.ok){
         const wait=(r.status===429||r.status>=500)?retryAfterMs(r.headers.get("retry-after")):null;
         if(wait!==null&&wait>0)await sleep(wait);
-        const error=new Error(`HTTP ${r.status}`);
-        // Authentication, permission and malformed-request errors do not improve with retries.
-        error.nonRetryable=r.status>=400&&r.status<500&&r.status!==429;
-        throw error;
+        throw new Error(`HTTP ${r.status}`);
       }
       const body=text?await r.text():await r.json();
       if(body==null)throw new Error("empty response");
       return body;
     }catch(e){
       err=e;
-      if(e?.nonRetryable)break;
       if(i<tries-1){const base=900*(2**i),jitter=Math.floor(Math.random()*250);await sleep(Math.min(5_000,base+jitter));}
     }
   }
@@ -221,7 +216,7 @@ async function deribitRequest(url){const j=await request(url);if(j?.error)throw 
 async function bybitRequest(url){const j=await request(url);if(j?.retCode!==undefined&&Number(j.retCode)!==0)throw new Error(`Bybit ${j.retCode}: ${j.retMsg||"API error"}`);return j;}
 // Hyperliquid is a decentralised perp exchange: its public /info endpoint is POST-only and, being
 // crypto-native, is never geo-blocked from datacentre/CI IPs (unlike Bybit/OKX). Used for BTC funding + OI.
-async function hyperliquidRequest(body,tries=2){let err;for(let i=0;i<tries;i++){try{const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/2.7.3"},body:JSON.stringify(body),signal:AbortSignal.timeout(25_000)});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();if(j==null)throw new Error("empty response");return j;}catch(e){err=e;if(i<tries-1)await sleep(700);}}throw err;}
+async function hyperliquidRequest(body,tries=2){let err;for(let i=0;i<tries;i++){try{const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/2.7"},body:JSON.stringify(body),signal:AbortSignal.timeout(25_000)});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();if(j==null)throw new Error("empty response");return j;}catch(e){err=e;if(i<tries-1)await sleep(700);}}throw err;}
 async function okxRequest(url){
   const candidates=[
     String(url).replace("https://www.okx.com","https://openapi.okx.com"),
@@ -275,8 +270,7 @@ function stale(key){return ["stale","partial"].includes(sourceStates[key]?.state
 function sourceMetaMany(keys){const packets=(keys||[]).map(k=>({state:sourceStates[k],dataset:datasets[k]})).filter(x=>x.state);const dates=packets.map(x=>Date.parse(x.dataset?.observed_at||"")).filter(Number.isFinite);return{observed_at:dates.length?iso(Math.min(...dates)):null,stale:packets.some(x=>["stale","partial","fail"].includes(x.state.state))};}
 function quoteGroupPrices(spot,group){return (SPOT_QUOTE_GROUPS[group]||[]).map(k=>spot?.[k]).filter(sanePrice).map(Number);}
 function quoteDispersion(spot,group){const v=quoteGroupPrices(spot,group);return v.length>=2?(Math.max(...v)/Math.min(...v)-1)*10000:null;}
-function referencePriceUsesSpot(){const packet=datasets.spot,s=packet?.data||{};return !!(packet&&validObservationAge(packet,6*HOUR)&&quoteGroupPrices(s,"USD").length>=2);}
-function referencePrice(){if(referencePriceUsesSpot())return median(quoteGroupPrices(datasets.spot?.data||{},"USD"));const daily=series(datasets.market?.data?.price||[]);return last(daily)?.v??null;}
+function referencePrice(){const packet=datasets.spot,s=packet?.data||{};if(packet&&validObservationAge(packet,6*HOUR)){for(const group of ["USD","USDT"]){const v=quoteGroupPrices(s,group);if(v.length>=2)return median(v);}}const daily=series(datasets.market?.data?.price||[]);return last(daily)?.v??null;}
 
 function parseFred(j){return (j?.observations||[]).filter(o=>o.value!=="."&&finite(o.value)).map(o=>({t:Date.parse(o.date+"T00:00:00Z"),v:Number(o.value)})).sort((a,b)=>a.t-b.t);}
 function parseFredCsv(text){
@@ -292,9 +286,7 @@ function parseFredCsv(text){
   for(const line of lines.slice(1)){
     const cells=line.split(",");
     const t=Date.parse(String(cells[0]||"").trim()+"T00:00:00Z");
-    const raw=String(cells[1]??"").trim();
-    if(!raw||raw===".")continue;
-    const v=Number(raw);
+    const v=Number(String(cells[1]||"").trim());   // FRED writes "." for a missing value -> NaN -> dropped
     if(Number.isFinite(t)&&Number.isFinite(v))out.push({t,v});
   }
   return out.sort((a,b)=>a.t-b.t);
@@ -382,9 +374,8 @@ function validateBlockchainOnchainData(data,maxAge=4*DAY){const errors=[],dates=
 // Keyless realized-cap MVRV ratio (BGeometrics / bitcoin-data.com). blockchain.info publishes no MVRV
 // chart, so this is the only free, vendor-independent MVRV fallback for Coin Metrics' CapMVRVCur.
 async function fetchBitcoinDataMvrv(){
-  const payload=await request("https://bitcoin-data.com/v1/mvrv",{tries:2});
-  const arr=Array.isArray(payload)?payload:Array.isArray(payload?.data)?payload.data:[];
-  const rows=arr.map(x=>{const raw=x?.unixTs??x?.timestamp??x?.time??x?.date,number=Number(raw),t=Number.isFinite(number)?(number<1e12?number*1000:number):Date.parse(raw),v=Number(x?.mvrv??x?.value);return{t,v};}).filter(x=>finite(x.t)&&finite(x.v)).sort((a,b)=>a.t-b.t);
+  const arr=await request("https://bitcoin-data.com/v1/mvrv",{tries:2});
+  const rows=(Array.isArray(arr)?arr:[]).map(x=>({t:Number(x.unixTs)*1000,v:Number(x.mvrv)})).filter(x=>finite(x.t)&&finite(x.v)).sort((a,b)=>a.t-b.t);
   if(rows.length<180)throw new Error(`bitcoin-data MVRV too short: ${rows.length}`);
   return rows;
 }
@@ -405,7 +396,7 @@ function makeMock(){
   datasets.coinmetrics={data:cm,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"coinmetrics",source_url:SOURCE_URLS.coinmetrics};sourceStates.coinmetrics={state:"mock",source:"coinmetrics",url:SOURCE_URLS.coinmetrics,observed_at:iso(last(price).t),fetched_at:iso(NOW)};
   const bc={MVRV:cm.CapMVRVCur,AdrActCnt:cm.AdrActCnt,TxCnt:cm.TxCnt,MinerRevUSD:cm.IssTotUSD.map((x,i)=>({t:x.t,v:x.v+(cm.FeeTotNtv[i]?.v||0)*price[i].v}))};datasets.blockchain_onchain={data:bc,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"blockchain",source_url:SOURCE_URLS.blockchain};sourceStates.blockchain_onchain={state:"mock",source:"blockchain",url:SOURCE_URLS.blockchain,observed_at:iso(last(price).t),fetched_at:iso(NOW)};
   const mkt={price,volume:price.map((p,i)=>({t:p.t,v:p.v*(6000+((i*7919)%4000))})),marketCap:price.map(p=>({t:p.t,v:p.v*estimatedSupply(p.t)})),ath:Math.max(...price.map(x=>x.v))*1.08,athSource:"coingecko",supplyModelled:true};
-  datasets.market={data:mkt,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"coinbase",source_url:SOURCE_URLS.coinbase_candles,source_urls:[SOURCE_URLS.coinbase_candles,SOURCE_URLS.coingecko,SOURCE_URLS.blockchain]};sourceStates.market={state:"mock",source:"coinbase",url:SOURCE_URLS.coinbase_candles,urls:[SOURCE_URLS.coinbase_candles,SOURCE_URLS.coingecko,SOURCE_URLS.blockchain],observed_at:iso(last(price).t),fetched_at:iso(NOW)};
+  datasets.market={data:mkt,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"coinbase",source_url:SOURCE_URLS.coinbase,source_urls:[SOURCE_URLS.coinbase,SOURCE_URLS.coingecko]};sourceStates.market={state:"mock",source:"coinbase",url:SOURCE_URLS.coinbase,urls:[SOURCE_URLS.coinbase,SOURCE_URLS.coingecko],observed_at:iso(last(price).t),fetched_at:iso(NOW)};
   const nw={hashrate:mockWalk(1100,6e20,.0008,.02,61),difficulty:mockWalk(1100,8e13,.0008,.012,62),difficultyChange:2.4,fees:{fastest:12,halfHour:8,hour:5}};
   datasets.network={data:nw,observed_at:iso(last(nw.hashrate).t),fetched_at:iso(NOW),source:"mempool",source_url:SOURCE_URLS.mempool};sourceStates.network={state:"mock",source:"mempool",url:SOURCE_URLS.mempool,observed_at:iso(last(nw.hashrate).t),fetched_at:iso(NOW)};
   const etf=Array.from({length:900},(_,i)=>({t:NOW-(899-i)*DAY,v:(Math.sin(i/11)*120+40+(i%17===0?-260:0))*1e6})).filter(x=>![0,6].includes(new Date(x.t).getUTCDay()));datasets.etf={data:etf,observed_at:iso(last(etf).t),fetched_at:iso(NOW),source:"theblock",source_url:SOURCE_URLS.theblock};sourceStates.etf={state:"mock",source:"theblock",url:SOURCE_URLS.theblock,observed_at:iso(last(etf).t),fetched_at:iso(NOW)};
@@ -413,7 +404,7 @@ function makeMock(){
   datasets.pegs={data:{USDT:0.9997,USDC:1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"defillama",source_url:SOURCE_URLS.defillama};sourceStates.pegs={state:"mock",source:"defillama",url:SOURCE_URLS.defillama,observed_at:iso(NOW),fetched_at:iso(NOW)};
   const cot=Array.from({length:160},(_,i)=>({t:NOW-(159-i)*7*DAY,oi:25000+i*20,assetLong:7500+i*8,assetShort:1800+i*2,levLong:2500+i*3,levShort:11000+i*11}));datasets.cftc={data:cot,observed_at:iso(last(cot).t),fetched_at:iso(NOW),source:"cftc",source_url:SOURCE_URLS.cftc};sourceStates.cftc={state:"mock",source:"cftc",url:SOURCE_URLS.cftc,observed_at:iso(last(cot).t),fetched_at:iso(NOW)};
   datasets.derivatives={data:{funding:[{venue:"Deribit",rate8h:.00011,oiUsd:1.1e9},{venue:"Hyperliquid",rate8h:.00013,oiUsd:4.8e9},{venue:"OKX",rate8h:.00009,oiUsd:3.1e9}],basis:9.2,dvol:55,dvolSeries:mockWalk(730,52,0,.025,61),skew:4.5,optionExpiry:iso(NOW+35*DAY)},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives};sourceStates.derivatives={state:"mock",source:"Deribit · Kraken Futures · OKX · Hyperliquid",url:SOURCE_URLS.deribit,urls:SOURCE_URL_GROUPS.derivatives,observed_at:iso(NOW),fetched_at:iso(NOW)};
-  datasets.spot={data:{coinbase:last(price).v*1.0003,kraken:last(price).v,bitstamp:last(price).v*.9998,gemini:last(price).v*1.0001,okx:last(price).v*.9998,kraken_usdt:last(price).v*.9999,coinbase_usdt:last(price).v*1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Coinbase · Kraken · Bitstamp · Gemini · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot};sourceStates.spot={state:"mock",source:"Coinbase · Kraken · Bitstamp · Gemini · OKX",url:SOURCE_URLS.coinbase,urls:SOURCE_URL_GROUPS.spot,observed_at:iso(NOW),fetched_at:iso(NOW)};
+  datasets.spot={data:{coinbase:last(price).v*1.0003,kraken:last(price).v,bitstamp:last(price).v*.9998,okx:last(price).v*.9998,kraken_usdt:last(price).v*.9999,coinbase_usdt:last(price).v*1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Coinbase · Kraken · Bitstamp · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot};sourceStates.spot={state:"mock",source:"Coinbase · Kraken · Bitstamp · OKX",url:SOURCE_URLS.coinbase,urls:SOURCE_URL_GROUPS.spot,observed_at:iso(NOW),fetched_at:iso(NOW)};
   for(const [k,d] of Object.entries(datasets)){
     const urls=uniqueHttps(d.source_urls?.length?d.source_urls:[d.source_url]);
     d.source_urls=urls;
@@ -456,9 +447,9 @@ function validateMarket(d){
   return Array.isArray(d?.price)&&d.price.length>=1200&&finite(last(d.price)?.v)&&NOW-last(d.price).t<=4*DAY;
 }
 async function fetchMarket(){
-  const errors=[];let candles=null,historySource="coinbase",historyUrl=SOURCE_URLS.coinbase_candles;
+  const errors=[];let candles=null,historySource="coinbase",historyUrl=SOURCE_URLS.coinbase;
   for(const candidate of [
-    {name:"coinbase",url:SOURCE_URLS.coinbase_candles,load:()=>fetchCoinbaseHistory()},
+    {name:"coinbase",url:SOURCE_URLS.coinbase,load:()=>fetchCoinbaseHistory()},
     {name:"bitstamp",url:SOURCE_URLS.bitstamp,load:()=>fetchBitstampHistory()},
   ]){
     try{const rows=await candidate.load();if(rows.length<1200)throw new Error(`${candidate.name} history too short: ${rows.length}`);candles=rows;historySource=candidate.name;historyUrl=candidate.url;break;}
@@ -476,7 +467,7 @@ async function fetchMarket(){
   if(cg.ok&&sanePrice(cg.value?.[0]?.ath)){ath=Number(cg.value[0].ath);athSource="coingecko";}else{errors.push(`CoinGecko ATH: ${cg.ok?"no ath field":cg.error}`);const all=await settled("blockchain all-time price",()=>fetchBlockchainChart("market-price","all",{minPoints:1200,expectedUnit:"USD"}));if(all.ok){ath=Math.max(...all.value.map(x=>x.v));athSource="blockchain";}else errors.push(`Blockchain ATH: ${all.error}`);}
   if(!finite(ath))ath=Math.max(...price.map(x=>x.v));
   const data={price,volume,marketCap,ath,athSource,supplyModelled:true,historySource};if(!validateMarket(data))throw new Error("market price history invalid");
-  return{data,observed_at:iso(last(price).t),source:historySource==="coinbase"?"Coinbase":historySource==="bitstamp"?"Bitstamp":"Blockchain.com price fallback",source_url:historyUrl,source_urls:uniqueHttps([SOURCE_URLS.coinbase_candles,SOURCE_URLS.bitstamp,SOURCE_URLS.blockchain,SOURCE_URLS.coingecko]),partial:errors.length>0,errors};
+  return{data,observed_at:iso(last(price).t),source:historySource==="coinbase"?"Coinbase":historySource==="bitstamp"?"Bitstamp":"Blockchain.com price fallback",source_url:historyUrl,source_urls:uniqueHttps([SOURCE_URLS.coinbase,SOURCE_URLS.bitstamp,SOURCE_URLS.blockchain,SOURCE_URLS.coingecko]),partial:errors.length>0,errors};
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -494,10 +485,7 @@ async function fetchNetwork(){
   const hr=await settled("mempool hashrate",()=>request("https://mempool.space/api/v1/mining/hashrate/3y"));if(hr.ok){base=parseMempoolHashrate(hr.value);if(base.hashrate.length<300){errors.push("mempool history too short");base=null;}}else errors.push(`mempool hashrate: ${hr.error}`);
   if(!base){const [h,d]=await Promise.all([fetchBlockchainChart("hash-rate","3years",{minPoints:300}),fetchBlockchainChart("difficulty","3years",{minPoints:60})]);base={hashrate:h,difficulty:d};source="Blockchain.com network fallback";sourceUrl=SOURCE_URLS.blockchain;}
   else if(base.difficulty.length<60){const d=await settled("Blockchain difficulty",()=>fetchBlockchainChart("difficulty","3years",{minPoints:60}));if(d.ok){base.difficulty=d.value;source="mempool.space · Blockchain.com difficulty fallback";}else errors.push(`Blockchain difficulty: ${d.error}`);}
-  const hashrateNorm=normalizeToContract("hashrate",base.hashrate);
-  if(NOW-Number(last(hashrateNorm.rows)?.t)>4*DAY)throw new Error("hashrate history stale");
-  let difficultyNorm=safeContract("difficulty",base.difficulty,errors);
-  if(difficultyNorm.length&&NOW-Number(last(difficultyNorm)?.t)>21*DAY){errors.push("difficulty history stale");difficultyNorm=[];}
+  const hashrateNorm=normalizeToContract("hashrate",base.hashrate),difficultyNorm=safeContract("difficulty",base.difficulty,errors);
   const adj=await settled("mempool difficulty adjustment",()=>request("https://mempool.space/api/v1/difficulty-adjustment"));if(!adj.ok)errors.push(`difficulty adjustment: ${adj.error}`);
   let fees=null;const mf=await settled("mempool fees",()=>request("https://mempool.space/api/v1/fees/recommended"));if(mf.ok)fees={fastest:num(mf.value.fastestFee),halfHour:num(mf.value.halfHourFee),hour:num(mf.value.hourFee)};else{errors.push(`mempool fees: ${mf.error}`);const bf=await settled("Blockstream fees",()=>request("https://blockstream.info/api/fee-estimates",{tries:2}));if(bf.ok)fees={fastest:num(bf.value?.["1"]),halfHour:num(bf.value?.["3"]),hour:num(bf.value?.["6"])};else errors.push(`Blockstream fees: ${bf.error}`);}
   return{data:{hashrate:hashrateNorm.rows,difficulty:difficultyNorm,hashrateScale:hashrateNorm.scale,difficultyChange:num(adj.value?.difficultyChange),fees:fees||{}},observed_at:iso(last(hashrateNorm.rows).t),source,source_url:sourceUrl,source_urls:uniqueHttps([SOURCE_URLS.mempool,SOURCE_URLS.blockchain,SOURCE_URLS.blockstream]),partial:errors.length>0,errors};
@@ -515,7 +503,7 @@ const CM_HOSTS = CM_KEY
 async function fetchCoinMetrics(){
   const start=new Date(NOW-5*365*DAY).toISOString().slice(0,10),errors=[];
   for(const {root,useKey} of CM_HOSTS){
-    const q=new URLSearchParams({assets:"btc",metrics:CM_METRICS.join(","),frequency:"1d",start_time:start,page_size:"10000",ignore_forbidden_errors:"true",ignore_unsupported_errors:"true"});
+    const q=new URLSearchParams({assets:"btc",metrics:CM_METRICS.join(","),frequency:"1d",start_time:start,page_size:"10000",sort:"time",ignore_forbidden_errors:"true",ignore_unsupported_errors:"true"});
     if(useKey&&CM_KEY)q.set("api_key",CM_KEY);
     try{
       const j=await request(`${root}/timeseries/asset-metrics?${q}`);
@@ -537,7 +525,7 @@ async function fetchCoinMetrics(){
 async function fetchPegs(){
   const out={},errors=[],urls=[SOURCE_URLS.defillama,SOURCE_URLS.coinbase,SOURCE_URLS.kraken,SOURCE_URLS.gemini];let fallbackUsed=false;const dl=await settled("DefiLlama pegs",()=>request("https://stablecoins.llama.fi/stablecoins?includePrices=true"));
   if(dl.ok){for(const r of dl.value?.peggedAssets||dl.value?.data||[]){const sym=String(r.symbol||"").toUpperCase(),px=Number(r.price);if(["USDT","USDC"].includes(sym)&&px>.01&&px<5)out[sym]=px;}}else errors.push(`DefiLlama: ${dl.error}`);
-  async function exchangePeg(sym){const tasks=await Promise.all([settled("Coinbase",()=>request(`https://api.exchange.coinbase.com/products/${sym}-USD/ticker`,{tries:1})),settled("Kraken",()=>krakenRequest(`https://api.kraken.com/0/public/Ticker?pair=${sym}USD`)),settled("Gemini",()=>request(`https://api.gemini.com/v1/pubticker/${sym}USD`,{tries:1}))]),vals=[];for(const x of tasks){if(!x.ok){errors.push(`${sym} ${x.label}: ${x.error}`);continue;}let px=null;if(x.label==="Coinbase")px=num(x.value?.price);else if(x.label==="Gemini")px=num(x.value?.last);else px=num(Object.values(x.value?.result||{})[0]?.c?.[0]);if(finite(px)&&px>.01&&px<5)vals.push(px);else errors.push(`${sym} ${x.label}: invalid price`);}if(vals.length<2){errors.push(`${sym}: exchange fallback needs at least 2 independent quotes, got ${vals.length}`);return null;}return median(vals);}
+  async function exchangePeg(sym){const tasks=await Promise.all([settled("Coinbase",()=>request(`https://api.exchange.coinbase.com/products/${sym}-USD/ticker`,{tries:1})),settled("Kraken",()=>krakenRequest(`https://api.kraken.com/0/public/Ticker?pair=${sym}USD`)),settled("Gemini",()=>request(`https://api.gemini.com/v1/pubticker/${sym}USD`,{tries:1}))]),vals=[];for(const x of tasks){if(!x.ok){errors.push(`${sym} ${x.label}: ${x.error}`);continue;}let px=null;if(x.label==="Coinbase")px=num(x.value?.price);else if(x.label==="Gemini")px=num(x.value?.last);else px=num(Object.values(x.value?.result||{})[0]?.c?.[0]);if(finite(px)&&px>.01&&px<5)vals.push(px);else errors.push(`${sym} ${x.label}: invalid price`);}return vals.length?median(vals):null;}
   for(const sym of ["USDT","USDC"])if(!finite(out[sym])){fallbackUsed=true;const px=await exchangePeg(sym);if(finite(px))out[sym]=px;}
   for(const sym of ["USDT","USDC"]){if(!finite(out[sym]))errors.push(`${sym}: unavailable from DefiLlama and exchanges`);else{try{out[sym]=normalizeToContract("pegPrice",[{t:NOW,v:out[sym]}]).rows[0].v;}catch(e){errors.push(`${sym}: ${String(e.message||e)}`);delete out[sym];}}}
   return{data:out,observed_at:iso(NOW),source:"DefiLlama · exchange peg fallback",source_url:SOURCE_URLS.defillama,source_urls:urls,partial:fallbackUsed||errors.length>0,errors};
@@ -676,7 +664,11 @@ function metric(def){return{
 };}
 function cmSeries(id){return series(data("coinmetrics")?.[id]||[]);}
 function bcSeries(id){return series(data("blockchain_onchain")?.[id]||[]);}
-function chooseWholeSeries(cmId,bcId,{fallbackSource="Blockchain.com",fallbackUrls=[SOURCE_URLS.blockchain]}={}){const c=cmSeries(cmId);if(c.length>=180)return{series:c,source:"Coin Metrics",keys:["coinmetrics"],urls:[SOURCE_URLS.coinmetrics]};const b=bcSeries(bcId);return b.length>=180?{series:b,source:fallbackSource,keys:["blockchain_onchain"],urls:fallbackUrls}:{series:[],source:"",keys:["coinmetrics","blockchain_onchain"],urls:[SOURCE_URLS.coinmetrics,...fallbackUrls]};}
+function chooseWholeSeries(cmId,bcId){const c=cmSeries(cmId);if(c.length>=180)return{series:c,source:"Coin Metrics",keys:["coinmetrics"],urls:[SOURCE_URLS.coinmetrics]};const b=bcSeries(bcId);
+  // blockchain.info publishes no MVRV chart, so the MVRV fallback is actually bitcoin-data.com (BGeometrics);
+  // attribute it correctly. Other blockchain_onchain series (activity, miner revenue) do come from blockchain.info.
+  const bcMeta=bcId==="MVRV"?{source:"bitcoin-data.com (BGeometrics)",urls:[SOURCE_URLS.bitcoindata]}:{source:"Blockchain.com",urls:[SOURCE_URLS.blockchain]};
+  return b.length>=180?{series:b,source:bcMeta.source,keys:["blockchain_onchain"],urls:bcMeta.urls}:{series:[],source:"",keys:["coinmetrics","blockchain_onchain"],urls:[SOURCE_URLS.coinmetrics,SOURCE_URLS.bitcoindata]};}
 function marketSeries(k){return series(data("market")?.[k]||[]);}
 function netSeries(k){return series(data("network")?.[k]||[]);}
 function fred(id){return series(data("fred_"+id)||[]);}
@@ -719,7 +711,7 @@ function buildMetrics(){
 
   const ndx=fred("NASDAQ100"),btcByDay=new Map(price.map(x=>[dayKey(x.t),x.v])),commonNdx=ndx.map(x=>({t:x.t,n:x.v,b:btcByDay.get(dayKey(x.t))})).filter(x=>finite(x.b)),btcCommonR=commonNdx.slice(1).map((x,i)=>Math.log(x.b/commonNdx[i].b)),ndxCommonR=commonNdx.slice(1).map((x,i)=>Math.log(x.n/commonNdx[i].n)),c60=corr(btcCommonR.slice(-60),ndxCommonR.slice(-60));
   const ndx30=ndx.length?pct(last(ndx).v,priorByDays(ndx,30)?.v):null,rel=finite(p30)&&finite(ndx30)?p30-ndx30:null;
-  add({id:"macro_lens",block:"macro",family:"macro_lens",name:"BTC ↔ Nasdaq · режим корреляции",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:c60,value:finite(c60)?c60.toFixed(2):"—",delta:finite(rel)?`относительная сила 30д ${rel>=0?"+":""}${rel.toFixed(1)} п.п.`:"",note:"Не голосует. Высокая корреляция повышает значимость макроблока; низкая указывает на криптоспецифические потоки.",score:null,source:`FRED · ${datasetSource("market","market price")}`,source_url:fredSeriesUrl("NASDAQ100"),source_urls:links(fredSeriesUrl("NASDAQ100"),datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["fred_NASDAQ100","market"])});
+  add({id:"macro_lens",block:"macro",family:"macro_lens",name:"BTC ↔ Nasdaq · режим корреляции",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:c60,value:finite(c60)?c60.toFixed(2):"—",delta:finite(rel)?`относительная сила 30д ${rel>=0?"+":""}${rel.toFixed(1)} п.п.`:"",note:"Не голосует. Высокая корреляция повышает значимость макроблока; низкая указывает на криптоспецифические потоки.",score:null,source:`FRED · ${datasetSource("market","market price")}`,source_url:fredSeriesUrl("NASDAQ100"),source_urls:links(fredSeriesUrl("NASDAQ100"),datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain)),...sourceMetaMany(["fred_NASDAQ100","market"])});
 
   // II. Спрос и предложение
   const etf=series(data("etf")||[]),etf1=last(etf)?.v,etf5s=rollingSum(etf,5),etf20s=rollingSum(etf,20),etf5=last(etf5s)?.v,etf20=last(etf20s)?.v;
@@ -730,7 +722,7 @@ function buildMetrics(){
   const p5=percentileRank(f5Btc.map(x=>x.v),last(f5Btc)?.v),p20=percentileRank(f20Btc.map(x=>x.v),last(f20Btc)?.v);
   const etf5Btc=last(f5Btc)?.v,etf20Btc=last(f20Btc)?.v;
   const etfScore=componentScore([finite(etf5Btc)?highGood(p5):null,finite(etf20Btc)?highGood(p20):null]);
-  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и сравниваются с собственным историческим распределением. В BTC они напрямую сопоставимы с эмиссией (~450 BTC/день). Это основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
+  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и сравниваются с собственным историческим распределением. В BTC они напрямую сопоставимы с эмиссией (~450 BTC/день). Это основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
   add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf});
   add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf5s});
   add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf20s});
@@ -759,13 +751,13 @@ function buildMetrics(){
   add({id:"us_spot_premium",block:"demand",family:"us_spot",name:"Премия американского спота",horizon:"short",role:"confirming",method:"mechanical",strategic:false,tactical:true,value_num:premium,value:finite(premium)?`${premium>=0?"+":""}${premium.toFixed(0)} б.п.`:"—",delta:`Coinbase против медианы USD-площадок (${comparisonUsd.length})`,note:"Синхронная бесплатная прокси американского bid. Kraken, Bitstamp и Gemini взаимозаменяемы в знаменателе; USD и USDT никогда не смешиваются.",score:premiumScore,source:"Coinbase · Kraken · Bitstamp · Gemini",source_url:SOURCE_URLS.coinbase,source_urls:links(SOURCE_URLS.coinbase,SOURCE_URLS.kraken,SOURCE_URLS.bitstamp,SOURCE_URLS.gemini),...sourceMeta("spot")});
 
   // III. Цикл, сеть, майнеры
-  // Valuation (MVRV) uses Coin Metrics when available and a dimensionally equivalent bitcoin-data.com/BGeometrics ratio fallback. It is
+  // Valuation (MVRV) uses Coin Metrics when available and a dimensionally equivalent Blockchain.com ratio fallback. It is
   // therefore an OPTIONAL family: its absence must not break the panel — but it must also never be
   // allowed to manufacture optimism (see the valuation gate in candidateRegimes).
-  const mvrvChoice=chooseWholeSeries("CapMVRVCur","MVRV",{fallbackSource:"bitcoin-data.com",fallbackUrls:[SOURCE_URLS.bitcoindata]}),mvrv=mvrvChoice.series,mvrvNow=last(mvrv)?.v,mvrvPct=percentileRank(sliceDays(mvrv,4*365).map(x=>x.v),mvrvNow),mvrv90=mvrv.length?pct(last(mvrv).v,priorByDays(mvrv,90)?.v):null;
+  const mvrvChoice=chooseWholeSeries("CapMVRVCur","MVRV"),mvrv=mvrvChoice.series,mvrvNow=last(mvrv)?.v,mvrvPct=percentileRank(sliceDays(mvrv,4*365).map(x=>x.v),mvrvNow),mvrv90=mvrv.length?pct(last(mvrv).v,priorByDays(mvrv,90)?.v):null;
   const ma200=price.length>=200?mean(price.slice(-200).map(x=>x.v)):null,trendAbove=priceLast&&ma200?priceLast>ma200:false;
-  let mvrvScore=null;if(finite(mvrvPct)){mvrvScore=mvrvPct>=95?-2:mvrvPct>=82?-1:mvrvPct<=10?(trendAbove?1:0):mvrvPct<=70?1:0;}
-  add({id:"mvrv_cycle",block:"cycle",family:"valuation",name:"MVRV · динамический цикл",horizon:"medium",role:"confirming",method:"dynamic",tactical:false,value_num:mvrvPct,value:finite(mvrvPct)?`${mvrvPct.toFixed(0)}-й перцентиль 4 лет`:"нет данных оценки",delta:finite(mvrvNow)&&finite(mvrv90)?`MVRV ${mvrvNow.toFixed(2)} · Δ90д ${mvrv90.toFixed(1)}%`:"",note:"Статические пороги прошлых циклов не используются. Верхние перцентили означают большую накопленную прибыль и риск дистрибуции; низкие требуют подтверждения трендом. Coin Metrics используется первым; bitcoin-data.com/BGeometrics даёт открытый MVRV ratio fallback. Истории разных методологий не сшиваются и каждая оценивается по собственным перцентилям.",score:mvrvScore,source:mvrvChoice.source||"Coin Metrics / bitcoin-data.com",source_url:mvrvChoice.urls[0],source_urls:mvrvChoice.urls,...sourceMetaMany(mvrvChoice.keys),series:mvrv});
+  let mvrvScore=null;if(finite(mvrvPct)){mvrvScore=mvrvPct>=95?-2:mvrvPct>=82?-1:mvrvPct<=10?(trendAbove?1:0):mvrvPct<=50?1:0;}
+  add({id:"mvrv_cycle",block:"cycle",family:"valuation",name:"MVRV · динамический цикл",horizon:"medium",role:"confirming",method:"dynamic",tactical:false,value_num:mvrvPct,value:finite(mvrvPct)?`${mvrvPct.toFixed(0)}-й перцентиль 4 лет`:"нет данных оценки",delta:finite(mvrvNow)&&finite(mvrv90)?`MVRV ${mvrvNow.toFixed(2)} · Δ90д ${mvrv90.toFixed(1)}%`:"",note:"Статические пороги прошлых циклов не используются. Верхние перцентили означают большую накопленную прибыль и риск дистрибуции; низкие требуют подтверждения трендом. Coin Metrics используется первым; bitcoin-data.com (BGeometrics) даёт открытый keyless MVRV ratio fallback. Истории разных методологий не сшиваются и каждая оценивается по собственным перцентилям.",score:mvrvScore,source:mvrvChoice.source||"Coin Metrics / Blockchain.com",source_url:mvrvChoice.urls[0],source_urls:mvrvChoice.urls,...sourceMetaMany(mvrvChoice.keys),series:mvrv});
 
   // Network security uses mempool.space first and Blockchain.com hashrate/difficulty as an independent fallback:
   // US-reachable and independent of any commercial vendor. It is the always-available cycle leg.
@@ -797,13 +789,13 @@ function buildMetrics(){
 
   const ma140=price.length>=140?mean(price.slice(-140).map(x=>x.v)):null,ma1400=price.length>=1400?mean(price.slice(-1400).map(x=>x.v)):null;
   let trendScore=null,trendText="—";if(priceLast&&ma200&&ma140){if(priceLast>ma200&&priceLast>ma140){trendScore=2;trendText="выше 20W и 200D";}else if(priceLast>ma200||priceLast>ma140){trendScore=0;trendText="смешанный тренд";}else if(!ma1400||priceLast>ma1400){trendScore=-1;trendText="ниже среднесрочных опор";}else{trendScore=-2;trendText="ниже 200W";}}
-  add({id:"trend_regime",block:"cycle",family:"trend",name:"Старший ценовой тренд",horizon:"medium",role:"confirming",method:"mechanical",tactical:true,value_num:trendScore,value:trendText,delta:priceLast&&ma200?`цена к 200D ${pct(priceLast,ma200).toFixed(1)}%`:"",note:"Рефлексивная, но воспроизводимая проверка 20-недельной, 200-дневной и 200-недельной средних. Не используется как оценка справедливой стоимости.",score:trendScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase_candles,source_urls:datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain),...sourceMeta("market"),series:price});
+  add({id:"trend_regime",block:"cycle",family:"trend",name:"Старший ценовой тренд",horizon:"medium",role:"confirming",method:"mechanical",tactical:true,value_num:trendScore,value:trendText,delta:priceLast&&ma200?`цена к 200D ${pct(priceLast,ma200).toFixed(1)}%`:"",note:"Рефлексивная, но воспроизводимая проверка 20-недельной, 200-дневной и 200-недельной средних. Не используется как оценка справедливой стоимости.",score:trendScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase,source_urls:datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain),...sourceMeta("market"),series:price});
   const athVal=num(data("market")?.ath),athSource=data("market")?.athSource,dd=priceLast&&athVal?pct(priceLast,athVal):null;
-  add({id:"drawdown",block:"cycle",family:"trend",name:"Просадка от исторического максимума",horizon:"short",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:dd,value:finite(dd)?`${dd.toFixed(1)}%`:"—",delta:athSource==="coingecko"?"ATH: CoinGecko":athSource==="blockchain"?"ATH: Blockchain.com all-time":"ATH: максимум наблюдаемого окна",note:"Контекст стадии рынка; сама по себе не является сигналом дешёвой или дорогой цены. При недоступности CoinGecko используется all-time ряд Blockchain.com; если недоступен и он — максимум наблюдаемого ценового окна с явной пометкой.",score:null,source:"CoinGecko · Blockchain.com · market history",source_url:SOURCE_URLS.coingecko,source_urls:links(SOURCE_URLS.coingecko,SOURCE_URLS.blockchain,SOURCE_URLS.coinbase_candles,SOURCE_URLS.bitstamp),...sourceMeta("market"),series:price});
+  add({id:"drawdown",block:"cycle",family:"trend",name:"Просадка от исторического максимума",horizon:"short",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:dd,value:finite(dd)?`${dd.toFixed(1)}%`:"—",delta:athSource==="coingecko"?"ATH: CoinGecko":athSource==="blockchain"?"ATH: Blockchain.com all-time":"ATH: максимум наблюдаемого окна",note:"Контекст стадии рынка; сама по себе не является сигналом дешёвой или дорогой цены. Источник ATH подписан явно: при недоступности CoinGecko используется максимум пятилетнего окна, а не выдуманное значение.",score:null,source:"CoinGecko · Coinbase",source_url:SOURCE_URLS.coingecko,source_urls:links(SOURCE_URLS.coingecko,SOURCE_URLS.coinbase),...sourceMeta("market"),series:price});
 
   // IV. Плечо и волатильность
   const der=data("derivatives")||{},fund=der.funding||[],weightedRows=fund.filter(x=>finite(x.rate8h)&&finite(x.oiUsd)&&Number(x.oiUsd)>0),oiTotal=sumOrNull(weightedRows.map(x=>x.oiUsd)),weightedFunding=oiTotal?sum(weightedRows.map(x=>x.rate8h*x.oiUsd))/oiTotal:median(fund.map(x=>x.rate8h)),fundPct=finite(weightedFunding)?weightedFunding*100:null,basis=num(der.basis);
-  const carryScore=componentScore([customScore(fundPct,[[v=>v>.05,-2],[v=>v>.02,-1],[v=>v>-.02,1],[v=>v>-.05,0],[()=>true,-1]]),customScore(basis,[[v=>v<0,-1],[v=>v<3,0],[v=>v<12,1],[v=>v<20,0],[v=>v<30,-1],[()=>true,-2]])]);
+  const carryScore=componentScore([customScore(fundPct,[[v=>v>.05,-2],[v=>v>.02,-1],[v=>v>-.02,1],[v=>v>-.05,0],[v=>v>-.10,-1],[()=>true,-2]]),customScore(basis,[[v=>v<0,-1],[v=>v<3,0],[v=>v<12,1],[v=>v<20,0],[v=>v<30,-1],[()=>true,-2]])]);
   add({id:"carry_regime",block:"leverage",family:"carry",name:"Funding и фьючерсный carry",horizon:"short",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:carryScore,value:finite(carryScore)?(carryScore>=1?"сбалансировано":carryScore<=-1?"перегрето / стресс":"смешанно"):"—",delta:finite(fundPct)&&finite(basis)?`funding ${fundPct>=0?"+":""}${fundPct.toFixed(3)}%/8ч · basis ${basis.toFixed(1)}% (${der.basisSource||"—"})`:"",note:"Funding нормируется к 8 часам и агрегируется с весом USD OI. Annualized basis берётся с ближайшего сопоставимого датированного фьючерса Deribit, а при его отсутствии — Kraken Futures. Умеренное контанго нормально.",score:carryScore,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
   add({id:"funding",block:"leverage",family:"carry",name:"Агрегированный funding",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:fundPct,value:finite(fundPct)?`${fundPct>=0?"+":""}${fundPct.toFixed(3)}% / 8ч`:"—",delta:`площадки ${fund.length}`,note:"Компонент семейства. Отрицательный экстремум — не автоматически бычий сигнал, а потенциальное топливо short squeeze.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
 
@@ -820,7 +812,7 @@ function buildMetrics(){
   for(let i=30;i<price.length;i++){const w=price.slice(i-30,i+1),v=annualizedVol(w,30);if(finite(v))rv30Series.push({t:price[i].t,v});}
   const rvPct=percentileRank(rv30Series.slice(-730).map(x=>x.v),rv30);
   const rvScore=!finite(rvPct)?null:rvPct>=95?-2:rvPct>=85?-1:rvPct<=8?-1:1;
-  add({id:"realized_volatility",block:"leverage",family:"realized_vol",name:"Реализованная волатильность · 30 дней",horizon:"short",role:"leading",method:"dynamic",strategic:false,tactical:true,value_num:rv30,value:finite(rv30)?`${rv30.toFixed(1)}%`:"—",delta:finite(rvPct)?`${rvPct.toFixed(0)}-й перцентиль 2 лет`:"",note:"Годовая реализованная волатильность по дневным ценам. Считается из собственного ценового ряда и потому доступна даже когда все биржи деривативов недоступны с IP раннера — это опора тактического гейта. Экстремумы в обе стороны означают хрупкость: перегрев или сжатую пружину.",score:rvScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase_candles,source_urls:datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain),...sourceMeta("market"),series:rv30Series});
+  add({id:"realized_volatility",block:"leverage",family:"realized_vol",name:"Реализованная волатильность · 30 дней",horizon:"short",role:"leading",method:"dynamic",strategic:false,tactical:true,value_num:rv30,value:finite(rv30)?`${rv30.toFixed(1)}%`:"—",delta:finite(rvPct)?`${rvPct.toFixed(0)}-й перцентиль 2 лет`:"",note:"Годовая реализованная волатильность по дневным ценам. Считается из собственного ценового ряда и потому доступна даже когда все биржи деривативов недоступны с IP раннера — это опора тактического гейта. Экстремумы в обе стороны означают хрупкость: перегрев или сжатую пружину.",score:rvScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase,source_urls:datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain),...sourceMeta("market"),series:rv30Series});
 
   const dvolS=series(der.dvolSeries||[]),dvol=num(der.dvol),dvolPct=percentileRank(sliceDays(dvolS,2*365).map(x=>x.v),dvol),skew=num(der.skew),vrp=finite(dvol)&&finite(rv30)?dvol-rv30:null;
   // Skew no longer hands out a free +1 for "normal": an ordinary put-call spread is not evidence of
@@ -837,7 +829,7 @@ function buildMetrics(){
 
   const vol=marketSeries("volume"),volCh=changeOfAverage(vol,30,30);let volumeScore=null,volumeText="—";
   if(finite(volCh)&&finite(p30)){if(p30>5&&volCh>10){volumeScore=1;volumeText="рост подтверждён объёмом";}else if(p30<-5&&volCh>15){volumeScore=-1;volumeText="продажи подтверждены объёмом";}else if(Math.abs(p30)<5){volumeScore=0;volumeText="боковой режим";}else{volumeScore=0;volumeText="движение без сильного подтверждения";}}
-  add({id:"volume_confirmation",block:"market",family:"volume",name:"Подтверждение движения спот-объёмом",horizon:"short",role:"confirming",method:"derived",strategic:false,tactical:true,value_num:volumeScore,value:volumeText,delta:finite(p30)&&finite(volCh)?`цена 30д ${p30.toFixed(1)}% · объём ${volCh.toFixed(1)}%`:"",note:"Primary — дневной Coinbase BTC-USD volume в USD; fallback — Blockchain.com exchange trade volume, также USD/day, но с иным набором площадок. Выбирается целая история одного источника. Это не CVD и не попытка определить агрессора сделки.",score:volumeScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase_candles,source_urls:datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain),...sourceMeta("market"),series:vol});
+  add({id:"volume_confirmation",block:"market",family:"volume",name:"Подтверждение движения спот-объёмом",horizon:"short",role:"confirming",method:"derived",strategic:false,tactical:true,value_num:volumeScore,value:volumeText,delta:finite(p30)&&finite(volCh)?`цена 30д ${p30.toFixed(1)}% · объём ${volCh.toFixed(1)}%`:"",note:"Primary — дневной Coinbase BTC-USD volume в USD; fallback — Blockchain.com exchange trade volume, также USD/day, но с иным набором площадок. Выбирается целая история одного источника. Это не CVD и не попытка определить агрессора сделки.",score:volumeScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase,source_urls:datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain),...sourceMeta("market"),series:vol});
 
   const pegs=data("pegs")||{},completePeg=["USDT","USDC"].every(k=>finite(pegs[k]));
   const pegValues=["USDT","USDC"].filter(k=>finite(pegs[k])).map(k=>Math.abs(Number(pegs[k])-1)*100),pegDev=completePeg?Math.max(...pegValues):null;
@@ -864,8 +856,16 @@ function buildDetectors(metrics){
   const peg=v("stablecoin_peg"),disp=v("spot_integrity"),pegData=data("pegs")||{},majorDevs=["USDT","USDC"].map(k=>finite(pegData[k])?Math.abs(Number(pegData[k])-1)*100:null).filter(finite),spotData=data("spot")||{};let hard=null;
   const usdSpread=quoteDispersion(spotData,"USD"),usdtSpread=quoteDispersion(spotData,"USDT");
   let state=classifyIntegrity({peg,disp,majorDevs,usdSpread,usdtSpread});
+  // Hysteresis on the one 'fired' trigger prone to a single stale/illiquid venue tick: >=300 bps dispersion
+  // in a SINGLE quote group with nothing else confirming. It must persist one snapshot before it escalates
+  // to emergency (first occurrence is held at 'watch'). Catastrophic depeg (>=10%) and simultaneous
+  // two-group fragmentation (both >=100 bps) stay instant — those cannot come from one bad venue tick.
+  const eDisp=[usdSpread,usdtSpread].filter(finite).some(x=>Number(x)>=300),dDisp=finite(usdSpread)&&finite(usdtSpread)&&Number(usdSpread)>=100&&Number(usdtSpread)>=100;
+  const catastrophicPeg=majorDevs.some(x=>Number(x)>=10),extremePeg=majorDevs.some(x=>Number(x)>=5),doublePeg=majorDevs.length===2&&majorDevs.every(x=>Number(x)>=1);
+  const pureExtremeDisp=eDisp&&!dDisp&&!catastrophicPeg&&!extremePeg&&!doublePeg;
+  if(state==="fired"&&pureExtremeDisp){const prevState=previous?.detectors?.find(d=>d.id==="integrity")?.state;if(prevState!=="fired"&&prevState!=="watch")state="watch";}
   if(state==="fired")hard="НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА";
-  out.push({id:"integrity",name:"Нарушение целостности рынка",state,strategic_points:state==="fired"?-20:0,tactical_points:state==="fired"?-45:state==="watch"?-10:0,inputs:`peg ${finite(peg)?peg.toFixed(2)+"%":"—"} · spread ${finite(disp)?disp.toFixed(0)+" б.п.":"—"}`,logic:"Hard override требует независимого подтверждения для депега 5–10%; катастрофическое отклонение ≥10% срабатывает самостоятельно. Также override включается при экстремальной фрагментации сразу в двух quote-группах или ≥300 б.п. в одной. Более слабая одиночная аномалия остаётся наблюдением."});
+  out.push({id:"integrity",name:"Нарушение целостности рынка",state,strategic_points:state==="fired"?-20:0,tactical_points:state==="fired"?-45:state==="watch"?-10:0,inputs:`peg ${finite(peg)?peg.toFixed(2)+"%":"—"} · spread ${finite(disp)?disp.toFixed(0)+" б.п.":"—"}`,logic:"Аварийный override мгновенно включается при катастрофическом депеге ≥10% или одновременной фрагментации двух quote-групп (≥100 б.п. каждая). Депег 5–10% требует рыночного подтверждения; одиночная группа ≥300 б.п. должна повториться в следующем снимке, прежде чем поднять аварийный режим — иначе один устаревший/неликвидный тик биржи давал бы ложную тревогу. Более слабая аномалия остаётся наблюдением."});
   const levHits=[le("carry_regime",-1),le("oi_quality",-1),le("options_vol",-1)].filter(Boolean).length;
   out.push({id:"leverage",name:"Перегрев / каскад плеча",state:detectorState(levHits,3),strategic_points:0,tactical_points:levHits>=3?-25:levHits>=2?-10:0,inputs:`условий ${levHits}/3`,logic:"Конвергенция дорогого carry, ухудшения цена×OI и напряжения опционов. Один funding не считается каскадом."});
   const demandHits=[le("etf_regime",-1),le("stablecoin_regime",-1),le("exchange_supply",-1),le("us_spot_premium",-1)].filter(Boolean).length;
@@ -919,7 +919,7 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   let tactical="balanced";
   if(!criticalTactical)tactical="insufficient";
   else if(levDet==="fired"&&demandDet==="fired")tactical="deleveraging";
-  else if(L!=null&&L<=-35&&Q!=null&&Q<=-15)tactical="fragile";
+  else if(L!=null&&L<=-35&&Q!=null&&Q<=0)tactical="fragile";
   else if(L!=null&&L<=-35&&Q!=null&&Q>0)tactical="overheated_supported";
   else if(L!=null&&L>=15&&Q!=null&&Q>=15&&K>=-20)tactical="spot_led";
   else if(detectors.find(x=>x.id==="short_squeeze")?.state==="good")tactical="short_squeeze";
@@ -961,7 +961,7 @@ function compute(){
   history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical),regime,raw});
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
-    schema:2,version:VERSION,generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
+    schema:2,version:VERSION,generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:validObservationAge(datasets.spot,6*HOUR)?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
     regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,
     sources:sourceStates,history,datasets,
@@ -969,7 +969,7 @@ function compute(){
       indicator_scale:"−2…+2; числовые баллы вторичны относительно гейтов",
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
       mechanical_metrics:"stablecoin peg, funding, basis, spreads and price-to-moving-average relations use economic/mechanical thresholds",
-      regime_logic:"strategic = Macro × Demand × Cycle; tactical = Fast demand × Market integrity × Realized volatility; leverage confirms fragility but is not required",
+      regime_logic:"strategic = Macro × Demand × Cycle; tactical = Leverage × Fast demand × Market integrity",
       hysteresis:"ordinary transition requires two consecutive snapshots; hard override is immediate",
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),
@@ -978,7 +978,7 @@ function compute(){
   };
 }
 
-export { request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, roundSym, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { quoteDispersion, quoteGroupPrices, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, roundSym, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
