@@ -68,7 +68,8 @@ const requiredDocs=[
   "fred.stlouisfed.org","farside.co.uk","defillama.com","docs.coinmetrics.io",
   "publicreporting.cftc.gov","docs.deribit.com","bybit-exchange.github.io",
   "okx.com","docs.cdp.coinbase.com","docs.kraken.com",
-  "docs.coingecko.com","mempool.space","bitstamp.net","blockchain.com","blockstream","gemini.com"
+  "docs.coingecko.com","mempool.space","bitstamp.net","blockchain.com","blockstream","gemini.com",
+  "theblock.co","bitcoin-data.com"
 ];
 for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation/source host missing: ${host}`);
 

@@ -53,7 +53,8 @@ trigger a GitHub Pages build.»* При источнике «Deploy from a branc
 | Капитализация | цена × модель эмиссии | — | — | — | USD |
 | Хешрейт, сложность | mempool.space | blockchain.info | — | — | **H/s** (сырые хеши) |
 | Комиссии | mempool.space | Blockstream | — | — | sat/vB |
-| **MVRV** | **Coin Metrics** | **blockchain.info** | — | — | безразмерное отношение |
+| Потоки spot-ETF | **The Block (без ключа)** | data.tbstat.com | Farside (за Cloudflare) | — | USD/день |
+| **MVRV** | **Coin Metrics** | **bitcoin-data.com (без ключа)** | — | — | безразмерное отношение |
 | Адреса, транзакции | Coin Metrics | blockchain.info | — | — | шт/день |
 | Доход майнеров | Coin Metrics (эмиссия + комиссии) | blockchain.info (total) | — | — | USD/день |
 | Пеги USDT/USDC | DefiLlama | медиана Kraken/Coinbase/Gemini | — | — | USD за токен |
@@ -88,7 +89,6 @@ trigger a GitHub Pages build.»* При источнике «Deploy from a branc
 
 Притворяться, что резерв есть, хуже, чем сказать прямо:
 
-- **Farside** (дневные потоки spot-ETF) — ни один бесплатный провайдер их не публикует.
 - **Биржевые балансы и потоки** (Coin Metrics `SplyExNtv`, `FlowIn/OutExNtv`) — размеченные биржевые
   адреса бесплатно не публикует никто. При падении Coin Metrics эти карточки гаснут, но требуемую
   группу закрывает `stablecoin_regime`.

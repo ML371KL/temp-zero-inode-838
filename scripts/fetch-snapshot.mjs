@@ -35,6 +35,7 @@ const SOURCE_URLS = {
   coingecko: "https://docs.coingecko.com/docs/keyless-public-api",
   mempool: "https://mempool.space/docs/api/rest",
   bitstamp: "https://www.bitstamp.net/api/",
+  theblock: "https://www.theblock.co/data/crypto-markets/bitcoin-etf",
   farside: "https://farside.co.uk/bitcoin-etf-flow-all-data/",
   defillama: "https://defillama.com/stablecoins",
   coinmetrics: "https://docs.coinmetrics.io/api",
@@ -48,6 +49,7 @@ const SOURCE_URLS = {
   gemini: "https://developer.gemini.com/trading/rest-api/market-data/get-ticker",
   blockchain: "https://www.blockchain.com/explorer/api/charts_api",
   blockstream: "https://github.com/Blockstream/esplora/blob/master/API.md",
+  bitcoindata: "https://bitcoin-data.com/",
 };
 const SOURCE_URL_GROUPS = {
   derivatives: [SOURCE_URLS.deribit, SOURCE_URLS.kraken_futures, SOURCE_URLS.bybit, SOURCE_URLS.okx],
@@ -303,6 +305,35 @@ function validateEtfSeries(rows,maxAge=5*DAY){
   // US spot-ETF data must be trading-day data. Weekend rows signal that the HTML layout/parser changed.
   return rows.slice(-80).every(x=>![0,6].includes(new Date(Number(x.t)).getUTCDay()));
 }
+// The Block publishes the aggregate US spot-BTC-ETF net flow as a keyless JSON chart series. Two
+// mirrors carry an identical payload: the chart API wraps it under .chart.jsonFile, the tbstat file
+// serves the raw jsonFile. Series "Total Net Flow" holds one {Timestamp(sec), Result(USD)} per day.
+function parseEtfFlowJson(text){
+  const j=JSON.parse(text),jf=j?.chart?.jsonFile||j,data=jf?.Series?.["Total Net Flow"]?.Data;
+  if(!Array.isArray(data))throw new Error("ETF net-flow series not found in payload");
+  const rows=data.map(d=>({t:Number(d.Timestamp)*1000,v:Number(d.Result)})).filter(x=>finite(x.t)&&finite(x.v)&&![0,6].includes(new Date(x.t).getUTCDay()));
+  return [...new Map(rows.map(x=>[x.t,x])).values()].sort((a,b)=>a.t-b.t);
+}
+// US spot-ETF net flows (USD/day). Primary: The Block's keyless chart data API, mirrored on
+// data.tbstat.com — both return clean JSON and are reachable from datacenter/CI IPs. Farside stays as a
+// last-resort HTML source: it sits behind Cloudflare bot-protection and 403s from CI runners, but it
+// keeps a local/manual path alive and its parser under test.
+async function fetchEtfFlows(){
+  const providers=[
+    {name:"The Block",url:"https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow",ref:SOURCE_URLS.theblock,parse:parseEtfFlowJson},
+    {name:"The Block (tbstat)",url:"https://data.tbstat.com/dashboard/markets_structuredproducts_btcspotetftotalnetflows_daily_other.json",ref:SOURCE_URLS.theblock,parse:parseEtfFlowJson},
+    {name:"Farside",url:"https://farside.co.uk/bitcoin-etf-flow-all-data/",ref:SOURCE_URLS.farside,parse:parseFarside},
+  ];
+  let lastErr=null;
+  for(const p of providers){
+    try{
+      const s=p.parse(await request(p.url,{text:true,tries:2}));
+      if(s.length<100)throw new Error(`history too short: ${s.length}`);
+      return{data:s,observed_at:iso(last(s).t),source:p.name,source_url:p.ref,source_urls:[p.ref]};
+    }catch(e){lastErr=new Error(`${p.name}: ${e.message}`);}
+  }
+  throw new Error(`ETF flows unavailable: ${lastErr?.message}`);
+}
 function parseCsv(text){const lines=String(text).trim().split(/\r?\n/);if(lines.length<2)return[];const h=lines[0].split(",");return lines.slice(1).map(line=>{const c=line.split(","),o={};h.forEach((k,i)=>o[k]=c[i]);return o;});}
 function normalizeCoinMetricsRows(rows){const by={};CM_METRICS.forEach(k=>by[k]=[]);for(const r of rows){const t=Date.parse(String(r.time).slice(0,10)+"T00:00:00Z");if(!finite(t))continue;for(const k of CM_METRICS)if(finite(r[k]))by[k].push({t,v:Number(r[k])});}for(const k of CM_METRICS)by[k].sort((a,b)=>a.t-b.t);return by;}
 function validateCoinMetricsData(by,maxAge=4*DAY){
@@ -336,12 +367,20 @@ function parseCftc(rows){return (rows||[]).map(r=>({
 function parseBlockchainChart(j,{scale=1,minPoints=30,expectedUnit=null}={}){if(j?.status&&j.status!=="ok")throw new Error(`Blockchain chart status ${j.status}`);if(expectedUnit&&j?.unit&&String(j.unit).toLowerCase()!==String(expectedUnit).toLowerCase())throw new Error(`Blockchain chart unit ${j.unit}, expected ${expectedUnit}`);const a=(j?.values||[]).map(x=>({t:Number(x.x)*1000,v:Number(x.y)*scale})).filter(x=>finite(x.t)&&finite(x.v)).sort((x,y)=>x.t-y.t);if(a.length<minPoints)throw new Error(`Blockchain chart too short: ${a.length}`);return a;}
 async function fetchBlockchainChart(name,timespan,{scale=1,minPoints=30,expectedUnit=null}={}){const u=`https://api.blockchain.info/charts/${name}?timespan=${encodeURIComponent(timespan)}&format=json&sampled=false`;return parseBlockchainChart(await request(u,{tries:2}),{scale,minPoints,expectedUnit});}
 function validateBlockchainOnchainData(data,maxAge=4*DAY){const errors=[],dates=[];for(const[k,a]of Object.entries(data||{})){const t=Number(last(a)?.t),age=NOW-t;if(!Array.isArray(a)||a.length<180||!Number.isFinite(t)||age< -HOUR||age>maxAge){data[k]=[];errors.push(`series unavailable/stale: ${k}`);}else dates.push(t);}if(!dates.length)throw new Error(errors.join("; ")||"no Blockchain on-chain series");return{observed_at:iso(Math.min(...dates)),partial:errors.length>0,errors};}
+// Keyless realized-cap MVRV ratio (BGeometrics / bitcoin-data.com). blockchain.info publishes no MVRV
+// chart, so this is the only free, vendor-independent MVRV fallback for Coin Metrics' CapMVRVCur.
+async function fetchBitcoinDataMvrv(){
+  const arr=await request("https://bitcoin-data.com/v1/mvrv",{tries:2});
+  const rows=(Array.isArray(arr)?arr:[]).map(x=>({t:Number(x.unixTs)*1000,v:Number(x.mvrv)})).filter(x=>finite(x.t)&&finite(x.v)).sort((a,b)=>a.t-b.t);
+  if(rows.length<180)throw new Error(`bitcoin-data MVRV too short: ${rows.length}`);
+  return rows;
+}
 async function fetchBlockchainOnchain(){const tasks=await Promise.all([
-  settled("mvrv",()=>fetchBlockchainChart("mvrv","5years",{minPoints:500})),
+  settled("mvrv",()=>fetchBitcoinDataMvrv()),
   settled("addresses",()=>fetchBlockchainChart("n-unique-addresses","5years",{minPoints:500})),
   settled("transactions",()=>fetchBlockchainChart("n-transactions","5years",{minPoints:500})),
   settled("miner revenue",()=>fetchBlockchainChart("miners-revenue","5years",{minPoints:500,expectedUnit:"USD"})),
-]);const by=Object.fromEntries(tasks.filter(x=>x.ok).map(x=>[x.label,x.value])),errors=tasks.filter(x=>!x.ok).map(x=>`${x.label}: ${x.error}`),data={MVRV:safeContract("mvrv",by.mvrv||[],errors),AdrActCnt:safeContract("activeAddresses",by.addresses||[],errors),TxCnt:safeContract("txCount",by.transactions||[],errors),MinerRevUSD:safeContract("minerRevenue",by["miner revenue"]||[],errors)};const q=validateBlockchainOnchainData(data);errors.push(...q.errors);return{data,observed_at:q.observed_at,source:"Blockchain.com Charts",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain],partial:errors.length>0,errors};}
+]);const by=Object.fromEntries(tasks.filter(x=>x.ok).map(x=>[x.label,x.value])),errors=tasks.filter(x=>!x.ok).map(x=>`${x.label}: ${x.error}`),data={MVRV:safeContract("mvrv",by.mvrv||[],errors),AdrActCnt:safeContract("activeAddresses",by.addresses||[],errors),TxCnt:safeContract("txCount",by.transactions||[],errors),MinerRevUSD:safeContract("minerRevenue",by["miner revenue"]||[],errors)};const q=validateBlockchainOnchainData(data);errors.push(...q.errors);return{data,observed_at:q.observed_at,source:"Blockchain.com · bitcoin-data.com",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitcoindata],partial:errors.length>0,errors};}
 
 function mockWalk(days,start,drift,vol,seed=1){let x=start,s=seed>>>0,out=[];for(let i=days-1;i>=0;i--){s=(1664525*s+1013904223)>>>0;const u=s/4294967296-.5;x=Math.max(.0001,x*(1+drift+u*vol));out.push({t:NOW-i*DAY,v:x});}return out;}
 function makeMock(){
@@ -356,7 +395,7 @@ function makeMock(){
   datasets.market={data:mkt,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"coinbase",source_url:SOURCE_URLS.coinbase,source_urls:[SOURCE_URLS.coinbase,SOURCE_URLS.coingecko]};sourceStates.market={state:"mock",source:"coinbase",url:SOURCE_URLS.coinbase,urls:[SOURCE_URLS.coinbase,SOURCE_URLS.coingecko],observed_at:iso(last(price).t),fetched_at:iso(NOW)};
   const nw={hashrate:mockWalk(1100,6e20,.0008,.02,61),difficulty:mockWalk(1100,8e13,.0008,.012,62),difficultyChange:2.4,fees:{fastest:12,halfHour:8,hour:5}};
   datasets.network={data:nw,observed_at:iso(last(nw.hashrate).t),fetched_at:iso(NOW),source:"mempool",source_url:SOURCE_URLS.mempool};sourceStates.network={state:"mock",source:"mempool",url:SOURCE_URLS.mempool,observed_at:iso(last(nw.hashrate).t),fetched_at:iso(NOW)};
-  const etf=Array.from({length:900},(_,i)=>({t:NOW-(899-i)*DAY,v:(Math.sin(i/11)*120+40+(i%17===0?-260:0))*1e6})).filter(x=>![0,6].includes(new Date(x.t).getUTCDay()));datasets.etf={data:etf,observed_at:iso(last(etf).t),fetched_at:iso(NOW),source:"farside",source_url:SOURCE_URLS.farside};sourceStates.etf={state:"mock",source:"farside",url:SOURCE_URLS.farside,observed_at:iso(last(etf).t),fetched_at:iso(NOW)};
+  const etf=Array.from({length:900},(_,i)=>({t:NOW-(899-i)*DAY,v:(Math.sin(i/11)*120+40+(i%17===0?-260:0))*1e6})).filter(x=>![0,6].includes(new Date(x.t).getUTCDay()));datasets.etf={data:etf,observed_at:iso(last(etf).t),fetched_at:iso(NOW),source:"theblock",source_url:SOURCE_URLS.theblock};sourceStates.etf={state:"mock",source:"theblock",url:SOURCE_URLS.theblock,observed_at:iso(last(etf).t),fetched_at:iso(NOW)};
   const stable=mockWalk(1200,145e9,.0005,.003,51);datasets.stablecoins={data:stable,observed_at:iso(last(stable).t),fetched_at:iso(NOW),source:"defillama",source_url:SOURCE_URLS.defillama};sourceStates.stablecoins={state:"mock",source:"defillama",url:SOURCE_URLS.defillama,observed_at:iso(last(stable).t),fetched_at:iso(NOW)};
   datasets.pegs={data:{USDT:0.9997,USDC:1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"defillama",source_url:SOURCE_URLS.defillama};sourceStates.pegs={state:"mock",source:"defillama",url:SOURCE_URLS.defillama,observed_at:iso(NOW),fetched_at:iso(NOW)};
   const cot=Array.from({length:160},(_,i)=>({t:NOW-(159-i)*7*DAY,oi:25000+i*20,assetLong:7500+i*8,assetShort:1800+i*2,levLong:2500+i*3,levShort:11000+i*11}));datasets.cftc={data:cot,observed_at:iso(last(cot).t),fetched_at:iso(NOW),source:"cftc",source_url:SOURCE_URLS.cftc};sourceStates.cftc={state:"mock",source:"cftc",url:SOURCE_URLS.cftc,observed_at:iso(last(cot).t),fetched_at:iso(NOW)};
@@ -460,7 +499,7 @@ const CM_HOSTS = CM_KEY
 async function fetchCoinMetrics(){
   const start=new Date(NOW-5*365*DAY).toISOString().slice(0,10),errors=[];
   for(const {root,useKey} of CM_HOSTS){
-    const q=new URLSearchParams({assets:"btc",metrics:CM_METRICS.join(","),frequency:"1d",start_time:start,page_size:"10000",sort:"asc",ignore_forbidden_errors:"true",ignore_unsupported_errors:"true"});
+    const q=new URLSearchParams({assets:"btc",metrics:CM_METRICS.join(","),frequency:"1d",start_time:start,page_size:"10000",sort:"time",ignore_forbidden_errors:"true",ignore_unsupported_errors:"true"});
     if(useKey&&CM_KEY)q.set("api_key",CM_KEY);
     try{
       const j=await request(`${root}/timeseries/asset-metrics?${q}`);
@@ -608,7 +647,7 @@ async function collect(){
     // MVRV/flows/activity/miners and nothing else.
     loadDataset("coinmetrics","coinmetrics",4*DAY,fetchCoinMetrics,x=>CM_METRICS.some(k=>x?.[k]?.length>=180),{maxObservedAge:4*DAY}),
     loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY}),
-    loadDataset("etf","farside",5*DAY,async()=>{const s=parseFarside(await request("https://farside.co.uk/bitcoin-etf-flow-all-data/",{text:true}));return{data:s,observed_at:s.length?iso(last(s).t):iso(NOW),source:"farside",source_url:SOURCE_URLS.farside,source_urls:[SOURCE_URLS.farside]};},x=>validateEtfSeries(x,5*DAY),{maxObservedAge:5*DAY}),
+    loadDataset("etf","theblock",5*DAY,fetchEtfFlows,x=>validateEtfSeries(x,5*DAY),{maxObservedAge:5*DAY}),
     loadDataset("stablecoins","defillama",4*DAY,async()=>{const s=normalizeStableHistory(await request("https://stablecoins.llama.fi/stablecoincharts/all"));return{data:s,observed_at:s.length?iso(last(s).t):iso(NOW)};},x=>x?.length>100,{maxObservedAge:4*DAY}),
     loadDataset("pegs","defillama",18*HOUR,fetchPegs,x=>[x?.USDT,x?.USDC].some(v=>finite(v)&&Number(v)>.01&&Number(v)<5),{maxObservedAge:18*HOUR}),
     loadDataset("cftc","cftc",15*DAY,fetchCftc,x=>x?.length>20,{maxObservedAge:15*DAY}),
@@ -679,10 +718,10 @@ function buildMetrics(){
   const p5=percentileRank(f5Btc.map(x=>x.v),last(f5Btc)?.v),p20=percentileRank(f20Btc.map(x=>x.v),last(f20Btc)?.v);
   const etf5Btc=last(f5Btc)?.v,etf20Btc=last(f20Btc)?.v;
   const etfScore=componentScore([finite(etf5Btc)?highGood(p5):null,finite(etf20Btc)?highGood(p20):null]);
-  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и сравниваются с собственным историческим распределением. В BTC они напрямую сопоставимы с эмиссией (~450 BTC/день). Это основной наблюдаемый маржинальный спрос.",score:etfScore,source:`Farside · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.farside,source_urls:links(SOURCE_URLS.farside,datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
-  add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:"farside",...sourceMeta("etf"),series:etf});
-  add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:"farside",...sourceMeta("etf"),series:etf5s});
-  add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:"farside",...sourceMeta("etf"),series:etf20s});
+  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и сравниваются с собственным историческим распределением. В BTC они напрямую сопоставимы с эмиссией (~450 BTC/день). Это основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
+  add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf});
+  add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf5s});
+  add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf20s});
 
   const stable=series(data("stablecoins")||[]),st30Series=trailingChangeSeries(stable,30),st90Series=trailingChangeSeries(stable,90),st30=last(st30Series)?.v,st90=last(st90Series)?.v;
   const st30Pct=percentileRank(st30Series.slice(-1460).map(x=>x.v),st30),st90Pct=percentileRank(st90Series.slice(-1460).map(x=>x.v),st90),stableScore=componentScore([highGood(st30Pct),highGood(st90Pct)]);
@@ -701,7 +740,7 @@ function buildMetrics(){
   const asset4=cLast&&c4&&cLast.oi&&c4.oi?assetNet-(c4.assetLong-c4.assetShort)/c4.oi*100:null,lev4=cLast&&c4&&cLast.oi&&c4.oi?levShort-(c4.levShort-c4.levLong)/c4.oi*100:null;
   let qualityScore=null,qualityText="—";
   if(finite(asset4)&&finite(lev4)){qualityScore=asset4>1&&lev4<1?1:lev4>3&&finite(etf20)&&etf20>0?-1:asset4<-2?-1:0;qualityText=qualityScore>0?"направленный спрос подтверждён":qualityScore<0?"ETF-поток частично похож на basis trade":"смешанное позиционирование";}
-  add({id:"institutional_quality",block:"demand",family:"institutional",name:"Качество институционального спроса",horizon:"medium",role:"confirming",method:"derived",tactical:false,value_num:qualityScore,value:qualityText,delta:finite(assetNet)&&finite(levShort)?`asset mgr ${assetNet.toFixed(1)}% OI · lev. net short ${levShort.toFixed(1)}% OI`:"",note:"CFTC CME futures-only. Рост шортов leveraged funds при ETF-притоках понижает уверенность: часть спроса может быть cash-and-carry, а не направленной ставкой.",score:qualityScore,source:"CFTC · Farside",source_url:SOURCE_URLS.cftc,source_urls:links(SOURCE_URLS.cftc,SOURCE_URLS.farside),...sourceMetaMany(["cftc","etf"]),series:cot});
+  add({id:"institutional_quality",block:"demand",family:"institutional",name:"Качество институционального спроса",horizon:"medium",role:"confirming",method:"derived",tactical:false,value_num:qualityScore,value:qualityText,delta:finite(assetNet)&&finite(levShort)?`asset mgr ${assetNet.toFixed(1)}% OI · lev. net short ${levShort.toFixed(1)}% OI`:"",note:"CFTC CME futures-only. Рост шортов leveraged funds при ETF-притоках понижает уверенность: часть спроса может быть cash-and-carry, а не направленной ставкой.",score:qualityScore,source:"CFTC · The Block",source_url:SOURCE_URLS.cftc,source_urls:links(SOURCE_URLS.cftc,SOURCE_URLS.theblock),...sourceMetaMany(["cftc","etf"]),series:cot});
 
   const spot=data("spot")||{},cb=num(spot.coinbase),comparisonUsd=[spot.kraken,spot.bitstamp,spot.gemini].filter(sanePrice).map(Number),usdRef=median(comparisonUsd),premium=cb&&usdRef?(cb/usdRef-1)*10000:null;
   const premiumScore=customScore(premium,[[v=>v>35,2],[v=>v>8,1],[v=>v>-8,0],[v=>v>-35,-1],[()=>true,-2]]);
@@ -927,7 +966,7 @@ function compute(){
   };
 }
 
-export { quoteDispersion, quoteGroupPrices, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, roundSym, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { quoteDispersion, quoteGroupPrices, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, roundSym, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
