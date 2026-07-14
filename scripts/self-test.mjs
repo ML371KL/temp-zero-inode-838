@@ -4,8 +4,17 @@ const path=process.env.OUT||"docs/snapshot.json";
 const statePath=process.env.STATE||".state/cache.json";
 const s=JSON.parse(readFileSync(path,"utf8"));
 const pkg=JSON.parse(readFileSync("package.json","utf8"));
-const hasInternal=existsSync(statePath);
-const internal=hasInternal?JSON.parse(readFileSync(statePath,"utf8")):null;
+const internalRaw=existsSync(statePath)?JSON.parse(readFileSync(statePath,"utf8")):null;
+// A state cache written by ANOTHER engine version is stale by definition: right after a version
+// bump the first CI run restores the previous release's cache while docs/snapshot.json already
+// carries the new release. Deep cross-checks between artifacts of two different engines are
+// meaningless — treat this exactly like an absent cache (skip deep checks, warn), instead of
+// failing "out of sync" and making every release un-shippable on its first run. The candidate
+// verification step (step 5 of the workflow) is unaffected: there OUT and STATE always come from
+// the same build.
+const staleInternal=internalRaw&&String(internalRaw.version||"")!==String(pkg.version||"");
+const hasInternal=!!internalRaw&&!staleInternal;
+const internal=hasInternal?internalRaw:null;
 const fail=[],warn=[];
 const strictFinite=x=>x!==null&&x!==undefined&&x!==""&&Number.isFinite(Number(x));
 const isDate=x=>typeof x==="string"&&!Number.isNaN(Date.parse(x));
@@ -117,7 +126,7 @@ const requiredSourceKeys=["fred_WALCL","fred_WTREGEN","fred_RRPONTSYD","fred_DFI
 for(const k of requiredSourceKeys)if(!s.sources?.[k])fail.push(`critical source state absent:${k}`);
 
 if(!hasInternal){
-  warn.push("internal cache absent; deep dataset checks skipped");
+  warn.push(staleInternal?`internal cache is from engine v${internalRaw.version} (current v${pkg.version}); deep dataset checks skipped until the next collector run`:"internal cache absent; deep dataset checks skipped");
 }else{
   for(const [k,d] of Object.entries(internal.datasets||{})){
     const dot=Date.parse(d?.observed_at||"");
