@@ -8,13 +8,19 @@
   - динамические пороги для циклических рядов, механические — только там,
     где у показателя есть экономический ноль/паритет;
   - вердикт задаёт иерархия гейтов, числовые баллы вторичны;
-  - переход обычного режима требует двух последовательных снимков;
+  - переход в сторону риска-off требует двух последовательных снимков; апгрейд режима
+    дополнительно должен продержаться 48 часов (асимметричный гистерезис);
   - аварийный override применяется сразу.
 */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.7.3";
+const VERSION = "2.8.0";
+// Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
+// Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
+// headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
+// immediate; being late INTO a positive regime costs little (positive regimes persisted for months).
+const UPGRADE_HOLD_H = 48;
 const OUT = process.env.OUT || "docs/snapshot.json";
 const STATE = process.env.STATE || ".state/cache.json";
 // The live candidate is written to temporary paths and only copied into docs/ after it passes
@@ -671,7 +677,10 @@ async function collect(){
 function metric(def){return{
   id:def.id,block:def.block,family:def.family,name:def.name,horizon:def.horizon||"medium",role:def.role||"confirming",method:def.method||"derived",
   strategic:def.strategic!==false,tactical:!!def.tactical,vote:def.vote!==false,value_num:finite(def.value_num)?Number(def.value_num):null,
-  value:def.value??(finite(def.value_num)?String(def.value_num):"—"),unit:def.unit||"",delta:def.delta||"",note:def.note||"",score:finite(def.score)?clamp(roundSym(def.score),-2,2):null,
+  // Quantize to HALF-steps, matching componentScore. The previous roundSym() here re-rounded the
+  // deliberate half-step lattice back to integers (+0.5 -> +1), silently amplifying weak family
+  // signals; reconstruction showed the amplification changed the headline verdict on ~14% of days.
+  value:def.value??(finite(def.value_num)?String(def.value_num):"—"),unit:def.unit||"",delta:def.delta||"",note:def.note||"",score:finite(def.score)?clamp(Math.round(Number(def.score)*2)/2,-2,2):null,
   source:def.source||"",source_url:def.source_url||SOURCE_URLS[def.source]||"",source_urls:uniqueHttps(def.source_urls?.length?def.source_urls:[def.source_url||SOURCE_URLS[def.source]]),observed_at:def.observed_at||null,stale:!!def.stale,series:(def.series||[]).slice(-180)
 };}
 function cmSeries(id){return series(data("coinmetrics")?.[id]||[]);}
@@ -718,7 +727,11 @@ function buildMetrics(){
   const hy4Series=trailingChangeSeries(hy,28,{difference:true,scale:100}),hy4=last(hy4Series)?.v,hy4Pct=percentileRank(hy4Series.slice(-750).map(x=>x.v),hy4);
   const vixCommonT=vix.length&&vxv.length?Math.min(last(vix).t,last(vxv).t):null,vixPoint=finite(vixCommonT)?nearestAtOrBefore(vix,vixCommonT):null,vxvPoint=finite(vixCommonT)?nearestAtOrBefore(vxv,vixCommonT):null,vixRatio=vixPoint&&vxvPoint?vixPoint.v/vxvPoint.v:null;
   const absMoves=dgs10.slice(1).map((p,i)=>({t:p.t,v:Math.abs(p.v-dgs10[i].v)*100}));const rateVolSeries=rollingMean(absMoves,20),rateVol=last(rateVolSeries)?.v,rateVolPct=percentileRank(rateVolSeries.slice(-750).map(x=>x.v),rateVol);
-  const stressScore=componentScore([lowGood(hy4Pct),customScore(vixRatio,[[v=>v<.90,1],[v=>v<1,0],[v=>v<1.10,-1],[()=>true,-2]]),finite(rateVolPct)?lowGood(rateVolPct):null]);
+  // HY spread momentum keeps its symmetric vote (spread compression is genuine risk appetite), but the
+  // two calm-state components are penalty-only: VIX contango and bottom-percentile rate volatility are
+  // complacency, not a tailwind (reconstruction: the "positive" stress state had WORSE forward returns
+  // than the neutral one, +3.8% vs +7.3% fwd 30d).
+  const stressScore=componentScore([lowGood(hy4Pct),customScore(vixRatio,[[v=>v<1,0],[v=>v<1.10,-1],[()=>true,-2]]),finite(rateVolPct)?Math.min(lowGood(rateVolPct),0):null]);
   add({id:"system_stress",block:"macro",family:"stress",name:"Кредит и системный стресс",horizon:"short",role:"leading",method:"mixed",tactical:true,value_num:stressScore,value:finite(stressScore)?(stressScore>=1?"спокойно":stressScore<=-1?"напряжение":"нейтрально"):"—",delta:finite(hy4)&&finite(vixRatio)?`HY ${hy4.toFixed(0)} б.п. · VIX/VIX3M ${vixRatio.toFixed(2)}`:"",note:"Семейный вывод из импульса HY, термструктуры VIX и реализованной волатильности 10Y UST. Последняя — прозрачная бесплатная замена MOVE, но не сам MOVE.",score:stressScore,source:"FRED",source_url:fredSeriesUrl("BAMLH0A0HYM2"),source_urls:fredSeriesUrls(["BAMLH0A0HYM2","VIXCLS","VXVCLS","DGS10"]),...sourceMetaMany(["fred_BAMLH0A0HYM2","fred_VIXCLS","fred_VXVCLS","fred_DGS10"]),series:hy});
 
   const ndx=fred("NASDAQ100"),btcByDay=new Map(price.map(x=>[dayKey(x.t),x.v])),commonNdx=ndx.map(x=>({t:x.t,n:x.v,b:btcByDay.get(dayKey(x.t))})).filter(x=>finite(x.b)),btcCommonR=commonNdx.slice(1).map((x,i)=>Math.log(x.b/commonNdx[i].b)),ndxCommonR=commonNdx.slice(1).map((x,i)=>Math.log(x.n/commonNdx[i].n)),c60=corr(btcCommonR.slice(-60),ndxCommonR.slice(-60));
@@ -735,7 +748,7 @@ function buildMetrics(){
   const etf5Btc=last(f5Btc)?.v,etf20Btc=last(f20Btc)?.v;
   // Economic zero: a net 20-day BTC OUTFLOW cannot score positive, even if historically outflows were larger.
   let etfScore=componentScore([finite(etf5Btc)?highGood(p5):null,finite(etf20Btc)?highGood(p20):null]);if(finite(etf20Btc)&&etf20Btc<0&&finite(etfScore))etfScore=Math.min(etfScore,0);
-  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?"устойчивый отток":"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
+  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?(finite(etf20Btc)&&etf20Btc<0?"устойчивый отток":"слабый приток"):"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос.",score:etfScore,source:`The Block · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(SOURCE_URLS.theblock,datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
   add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf});
   add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf5s});
   add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:"The Block",source_url:SOURCE_URLS.theblock,...sourceMeta("etf"),series:etf20s});
@@ -744,13 +757,17 @@ function buildMetrics(){
   const st30Pct=percentileRank(st30Series.slice(-1460).map(x=>x.v),st30),st90Pct=percentileRank(st90Series.slice(-1460).map(x=>x.v),st90);
   // Economic zero: contracting stablecoin supply (negative 90-day change) cannot score positive.
   let stableScore=componentScore([highGood(st30Pct),highGood(st90Pct)]);if(finite(st90)&&st90<0&&finite(stableScore))stableScore=Math.min(stableScore,0);
-  add({id:"stablecoin_regime",block:"demand",family:"stablecoins",name:"Стейблкоин-ликвидность",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:stableScore,value:finite(stableScore)?(stableScore>=1?"расширение":stableScore<=-1?"сжатие":"стабильно"):"—",delta:finite(st30)&&finite(st90)?`30д ${st30.toFixed(1)}% · 90д ${st90.toFixed(1)}%`:"",note:"30- и 90-дневное изменение совокупного предложения сравнивается с собственной историей. Это доступная внутренняя ликвидность, а не немедленный bid.",score:stableScore,source:"defillama",...sourceMeta("stablecoins"),series:stable});
+  add({id:"stablecoin_regime",block:"demand",family:"stablecoins",name:"Стейблкоин-ликвидность",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:stableScore,value:finite(stableScore)?(stableScore>=1?"расширение":stableScore<=-1?(finite(st90)&&st90<0?"сжатие":"замедление"):"стабильно"):"—",delta:finite(st30)&&finite(st90)?`30д ${st30.toFixed(1)}% · 90д ${st90.toFixed(1)}%`:"",note:"30- и 90-дневное изменение совокупного предложения сравнивается с собственной историей. Это доступная внутренняя ликвидность, а не немедленный bid.",score:stableScore,source:"defillama",...sourceMeta("stablecoins"),series:stable});
 
   const inflow=cmSeries("FlowInExNtv"),outflow=cmSeries("FlowOutExNtv"),reserve=cmSeries("SplyExNtv"),netflow=[];
   const outMap=new Map(outflow.map(x=>[dayKey(x.t),x.v]));for(const p of inflow)if(finite(outMap.get(dayKey(p.t))))netflow.push({t:p.t,v:p.v-outMap.get(dayKey(p.t))});
   const nf7=last(rollingSum(netflow,7))?.v,nf30=last(rollingSum(netflow,30))?.v,res90=reserve.length?pct(last(reserve).v,priorByDays(reserve,90)?.v):null;
   const nfHist=rollingSum(netflow,7),nfPct=percentileRank(nfHist.slice(-1460).map(x=>x.v),nf7),res90Series=trailingChangeSeries(reserve,90),resPct=percentileRank(res90Series.slice(-1460).map(x=>x.v),res90);
-  const exchangeScore=componentScore([finite(nfPct)?lowGood(nfPct):null,finite(resPct)?lowGood(resPct):null]);
+  // Economic zero, like the ETF/stablecoin/liquidity siblings: a positive 7d netflow TO exchanges or a
+  // growing 90d exchange reserve cannot vote positive just because history had even bigger inflows.
+  const nfComp=finite(nfPct)?(finite(nf7)&&nf7>0?Math.min(lowGood(nfPct),0):lowGood(nfPct)):null;
+  const resComp=finite(resPct)?(finite(res90)&&res90>0?Math.min(lowGood(resPct),0):lowGood(resPct)):null;
+  const exchangeScore=componentScore([nfComp,resComp]);
   add({id:"exchange_supply",block:"demand",family:"exchange_supply",name:"Биржевое предложение BTC",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:exchangeScore,value:finite(exchangeScore)?(exchangeScore>=1?"сокращается":exchangeScore<=-1?"растёт":"сбалансировано"):"—",delta:finite(nf7)&&finite(res90)?`netflow 7д ${nf7>=0?"+":""}${formatCompact(nf7,0)} BTC · резерв 90д ${res90.toFixed(1)}%`:"",note:"Бесплатные exchange-метрики Coin Metrics. Адресная классификация может пересматриваться; показатель используется только как семейный режим, а не точный прогноз продаж.",score:exchangeScore,source:"coinmetrics",...sourceMeta("coinmetrics"),series:reserve});
   add({id:"exchange_netflow_30d",block:"demand",family:"exchange_supply",name:"Exchange netflow · 30 дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:nf30,value:finite(nf30)?`${nf30>=0?"+":""}${formatCompact(nf30,0)} BTC`:"—",note:"Положительное значение означает чистый приток на размеченные биржевые адреса.",score:null,source:"coinmetrics",...sourceMeta("coinmetrics"),series:rollingSum(netflow,30)});
 
@@ -771,12 +788,14 @@ function buildMetrics(){
   // allowed to manufacture optimism (see the valuation gate in candidateRegimes).
   const mvrvChoice=chooseWholeSeries("CapMVRVCur","MVRV",{fallbackSource:"bitcoin-data.com",fallbackUrls:[SOURCE_URLS.bitcoindata]}),mvrv=mvrvChoice.series,mvrvNow=last(mvrv)?.v,mvrvPct=percentileRank(sliceDays(mvrv,4*365).map(x=>x.v),mvrvNow),mvrv90=mvrv.length?pct(last(mvrv).v,priorByDays(mvrv,90)?.v):null;
   const ma200=price.length>=200?mean(price.slice(-200).map(x=>x.v)):null,trendAbove=priceLast&&ma200?priceLast>ma200:false;
-  // Penalty-only in the DIRECTIONAL score: MVRV is a valuation stock, not a leading directional signal
-  // (backtest: cheap-MVRV did not predict higher forward returns over the testable window). It can WARN
-  // when the cycle is stretched (high percentile -> negative), but low/mid valuation scores 0, not +1.
-  // The percentile is still shown as the valuation read, and it still gates optimism (see valuation gate).
-  let mvrvScore=null;if(finite(mvrvPct)){mvrvScore=mvrvPct>=95?-2:mvrvPct>=82?-1:0;}
-  add({id:"mvrv_cycle",block:"cycle",family:"valuation",name:"MVRV · динамический цикл",horizon:"medium",role:"confirming",method:"dynamic",tactical:false,value_num:mvrvPct,value:finite(mvrvPct)?`${mvrvPct.toFixed(0)}-й перцентиль 4 лет`:"нет данных оценки",delta:finite(mvrvNow)&&finite(mvrv90)?`MVRV ${mvrvNow.toFixed(2)} · Δ90д ${mvrv90.toFixed(1)}%`:"",note:"Оценка (valuation), а не направление. Верхние перцентили = большая накопленная прибыль и риск дистрибуции → карта голосует ОТРИЦАТЕЛЬНО (предупреждение) и не даёт направлению стать конструктивным. Низкая/средняя оценка = 0: дешёвый MVRV сам по себе не предсказывал рост (проверено на реконструкции), поэтому положительного directional-голоса он не даёт. Coin Metrics первым; bitcoin-data.com/BGeometrics — открытый keyless MVRV fallback. Истории разных методологий не сшиваются.",score:mvrvScore,source:mvrvChoice.source||"Coin Metrics / bitcoin-data.com",source_url:mvrvChoice.urls[0],source_urls:mvrvChoice.urls,...sourceMetaMany(mvrvChoice.keys),series:mvrv});
+  // Mostly penalty: MVRV is a valuation stock, not a leading directional signal. It WARNS when the
+  // cycle is stretched (>=82nd/95th percentile -> negative), while ordinary low/mid valuation scores 0.
+  // The one exception is the DEEP-capitulation tail: on the 2019-2026 reconstruction (Coin Metrics
+  // history), days with MVRV <=10th percentile were followed by +27.7% mean 90d forward return
+  // (hit 0.65, n=129 overlapping days across the 2019/2020/2022 bottoms) — so the extreme tail gets a
+  // cautious +1. The 10th-82nd band stays 0, and the valuation gate on optimism is unchanged.
+  let mvrvScore=null;if(finite(mvrvPct)){mvrvScore=mvrvPct>=95?-2:mvrvPct>=82?-1:mvrvPct<=10?1:0;}
+  add({id:"mvrv_cycle",block:"cycle",family:"valuation",name:"MVRV · динамический цикл",horizon:"medium",role:"confirming",method:"dynamic",tactical:false,value_num:mvrvPct,value:finite(mvrvPct)?`${mvrvPct.toFixed(0)}-й перцентиль 4 лет`:"нет данных оценки",delta:finite(mvrvNow)&&finite(mvrv90)?`MVRV ${mvrvNow.toFixed(2)} · Δ90д ${mvrv90.toFixed(1)}%`:"",note:"Оценка (valuation), а не направление. Верхние перцентили = большая накопленная прибыль и риск дистрибуции → карта голосует ОТРИЦАТЕЛЬНО (предупреждение) и не даёт направлению стать конструктивным. Средняя оценка = 0. Исключение — глубокая капитуляция: ≤10-го перцентиля исторически предшествовала сильным форвардным доходностям (реконструкция 2019–2026: +27.7% в среднем за 90д), поэтому крайний нижний хвост получает осторожный +1. Coin Metrics первым; bitcoin-data.com/BGeometrics — открытый keyless MVRV fallback. Истории разных методологий не сшиваются.",score:mvrvScore,source:mvrvChoice.source||"Coin Metrics / bitcoin-data.com",source_url:mvrvChoice.urls[0],source_urls:mvrvChoice.urls,...sourceMetaMany(mvrvChoice.keys),series:mvrv});
 
   // Network security uses mempool.space first and Blockchain.com hashrate/difficulty as an independent fallback:
   // US-reachable and independent of any commercial vendor. It is the always-available cycle leg.
@@ -817,14 +836,19 @@ function buildMetrics(){
 
   // IV. Плечо и волатильность
   const der=data("derivatives")||{},fund=der.funding||[],weightedRows=fund.filter(x=>finite(x.rate8h)&&finite(x.oiUsd)&&Number(x.oiUsd)>0),oiTotal=sumOrNull(weightedRows.map(x=>x.oiUsd)),weightedFunding=oiTotal?sum(weightedRows.map(x=>x.rate8h*x.oiUsd))/oiTotal:median(fund.map(x=>x.rate8h)),fundPct=finite(weightedFunding)?weightedFunding*100:null,basis=num(der.basis);
-  const carryScore=componentScore([customScore(fundPct,[[v=>v>.05,-2],[v=>v>.02,-1],[v=>v>-.02,1],[v=>v>-.05,0],[()=>true,-1]]),customScore(basis,[[v=>v<0,-1],[v=>v<3,0],[v=>v<12,1],[v=>v<20,0],[v=>v<30,-1],[()=>true,-2]])]);
-  add({id:"carry_regime",block:"leverage",family:"carry",name:"Funding и фьючерсный carry",horizon:"short",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:carryScore,value:finite(carryScore)?(carryScore>=1?"сбалансировано":carryScore<=-1?"перегрето / стресс":"смешанно"):"—",delta:finite(fundPct)&&finite(basis)?`funding ${fundPct>=0?"+":""}${fundPct.toFixed(3)}%/8ч · basis ${basis.toFixed(1)}% (${der.basisSource||"—"})`:"",note:"Funding нормируется к 8 часам и агрегируется с весом USD OI. Annualized basis берётся с ближайшего сопоставимого датированного фьючерса Deribit, а при его отсутствии — Kraken Futures. Умеренное контанго нормально.",score:carryScore,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
+  // Penalty-only, like the whole leverage block: funding near zero and single-digit contango are the
+  // NORMAL market state, not evidence of support — they score 0. README already describes this block
+  // as "уточняет хрупкость"; a fragility qualifier must not manufacture standing optimism.
+  const carryScore=componentScore([customScore(fundPct,[[v=>v>.05,-2],[v=>v>.02,-1],[v=>v>-.02,0],[v=>v>-.05,0],[()=>true,-1]]),customScore(basis,[[v=>v<0,-1],[v=>v<3,0],[v=>v<12,0],[v=>v<20,0],[v=>v<30,-1],[()=>true,-2]])]);
+  add({id:"carry_regime",block:"leverage",family:"carry",name:"Funding и фьючерсный carry",horizon:"short",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:carryScore,value:finite(carryScore)?(carryScore<=-1?"перегрето / стресс":carryScore<0?"напряжение":"спокойно"):"—",delta:finite(fundPct)&&finite(basis)?`funding ${fundPct>=0?"+":""}${fundPct.toFixed(3)}%/8ч · basis ${basis.toFixed(1)}% (${der.basisSource||"—"})`:"",note:"Funding нормируется к 8 часам и агрегируется с весом USD OI. Annualized basis берётся с ближайшего сопоставимого датированного фьючерса Deribit, а при его отсутствии — Kraken Futures. Голосует только штрафом: умеренное контанго и funding около нуля — нормальное состояние рынка (0), а не подтверждение здоровья.",score:carryScore,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
   add({id:"funding",block:"leverage",family:"carry",name:"Агрегированный funding",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:fundPct,value:finite(fundPct)?`${fundPct>=0?"+":""}${fundPct.toFixed(3)}% / 8ч`:"—",delta:`площадки ${fund.length}`,note:"Компонент семейства. Отрицательный экстремум — не автоматически бычий сигнал, а потенциальное топливо short squeeze.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
 
   const currentOiByVenue=Object.fromEntries(weightedRows.map(x=>[x.venue,Number(x.oiUsd)])),currentVenues=Object.keys(currentOiByVenue),hist=(previous?.history||[]).slice().sort((a,b)=>Date.parse(a.t)-Date.parse(b.t)),oiSeries=hist.map(h=>{const t=Date.parse(h.t),by=h.raw?.oi_by_venue,vals=currentVenues.map(k=>by?.[k]);return currentVenues.length>=2&&vals.every(finite)?{t,v:sum(vals)}:null;}).filter(Boolean);if(finite(oiTotal))oiSeries.push({t:NOW,v:oiTotal});
   const priorOi=(days)=>{const target=NOW-days*DAY;let found=null;for(const h of hist){const t=Date.parse(h.t);if(t<=target&&h.raw?.oi_by_venue)found=h;else if(t>target)break;}return found?.raw?.oi_by_venue||null;};
   const oi7=percentChangeCommonVenues(currentOiByVenue,priorOi(7));
-  let oiScore=null,oiText="история накапливается";if(finite(oi7)&&finite(p7)){if(p7<-5&&oi7>3){oiScore=-2;oiText="цена ↓, OI ↑";}else if(p7>3&&oi7>15){oiScore=-1;oiText="рост на быстром наборе OI";}else if(p7<-5&&oi7<-8){oiScore=1;oiText="очистка OI на падении";}else if(Math.abs(oi7)<8){oiScore=1;oiText="OI стабилен";}else{oiScore=0;oiText="смешанная динамика";}}
+  // "OI стабилен" is the ordinary state, not evidence of health — it scores 0 (the old +1 was a
+  // standing positive in a calm market). Deleveraging-on-decline keeps its genuine +1.
+  let oiScore=null,oiText="история накапливается";if(finite(oi7)&&finite(p7)){if(p7<-5&&oi7>3){oiScore=-2;oiText="цена ↓, OI ↑";}else if(p7>3&&oi7>15){oiScore=-1;oiText="рост на быстром наборе OI";}else if(p7<-5&&oi7<-8){oiScore=1;oiText="очистка OI на падении";}else if(Math.abs(oi7)<8){oiScore=0;oiText="OI стабилен";}else{oiScore=0;oiText="смешанная динамика";}}
   add({id:"oi_quality",block:"leverage",family:"oi",name:"Качество движения · цена × OI",horizon:"short",role:"leading",method:"derived",strategic:false,tactical:true,value_num:oiScore,value:oiText,delta:finite(oi7)&&finite(p7)?`цена 7д ${p7.toFixed(1)}% · OI ${oi7.toFixed(1)}%`:finite(oiTotal)?`OI ${formatCompact(oiTotal,1)} $`:"",note:"История OI накапливается самим проектом. Падение со сбросом OI — очистка; падение с ростом OI — наращивание риска.",score:oiScore,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives"),series:oiSeries});
 
   // Realized volatility is derived from the price series alone. It is the one leverage-block input
@@ -833,15 +857,18 @@ function buildMetrics(){
   const rv30=annualizedVol(price,30),rv30Series=[];
   for(let i=30;i<price.length;i++){const w=price.slice(i-30,i+1),v=annualizedVol(w,30);if(finite(v))rv30Series.push({t:price[i].t,v});}
   const rvPct=percentileRank(rv30Series.slice(-730).map(x=>x.v),rv30);
-  const rvScore=!finite(rvPct)?null:rvPct>=95?-2:rvPct>=85?-1:rvPct<=8?-1:1;
-  add({id:"realized_volatility",block:"leverage",family:"realized_vol",name:"Реализованная волатильность · 30 дней",horizon:"short",role:"leading",method:"dynamic",strategic:false,tactical:true,value_num:rv30,value:finite(rv30)?`${rv30.toFixed(1)}%`:"—",delta:finite(rvPct)?`${rvPct.toFixed(0)}-й перцентиль 2 лет`:"",note:"Годовая реализованная волатильность по дневным ценам. Считается из собственного ценового ряда и потому доступна даже когда все биржи деривативов недоступны с IP раннера — это опора тактического гейта. Экстремумы в обе стороны означают хрупкость: перегрев или сжатую пружину.",score:rvScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase_candles,source_urls:datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain),...sourceMeta("market"),series:rv30Series});
+  // Penalty-only: "normal volatility" is the absence of fragility, not evidence of support, and the
+  // old standing +1 sat on ~80% of all days inside the largest tactical weight (reconstruction: the
+  // leverage block averaged +26 with a NEGATIVE 30-90d rank correlation to forward returns).
+  const rvScore=!finite(rvPct)?null:rvPct>=95?-2:rvPct>=85?-1:rvPct<=8?-1:0;
+  add({id:"realized_volatility",block:"leverage",family:"realized_vol",name:"Реализованная волатильность · 30 дней",horizon:"short",role:"leading",method:"dynamic",strategic:false,tactical:true,value_num:rv30,value:finite(rv30)?`${rv30.toFixed(1)}%`:"—",delta:finite(rvPct)?`${rvPct.toFixed(0)}-й перцентиль 2 лет`:"",note:"Годовая реализованная волатильность по дневным ценам. Считается из собственного ценового ряда и потому доступна даже когда все биржи деривативов недоступны с IP раннера — это опора тактического гейта. Голосует только штрафом: экстремумы в обе стороны означают хрупкость (перегрев или сжатую пружину), а нормальная волатильность — это отсутствие угрозы, а не аргумент за покупку, поэтому она даёт 0.",score:rvScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase_candles,source_urls:datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain),...sourceMeta("market"),series:rv30Series});
 
   const dvolS=series(der.dvolSeries||[]),dvol=num(der.dvol),dvolPct=percentileRank(sliceDays(dvolS,2*365).map(x=>x.v),dvol),skew=num(der.skew),vrp=finite(dvol)&&finite(rv30)?dvol-rv30:null;
-  // Skew no longer hands out a free +1 for "normal": an ordinary put-call spread is not evidence of
-  // health, it is merely the absence of evidence. Only genuine put stress or an unusual call bid
-  // moves the score.
-  const volScore=componentScore([finite(dvolPct)?(dvolPct>=95?-2:dvolPct>=85?-1:dvolPct<=8?-1:1):null,customScore(skew,[[v=>v>20,-2],[v=>v>10,-1],[v=>v>-8,0],[()=>true,-1]])]);
-  add({id:"options_vol",block:"leverage",family:"volatility",name:"Опционная волатильность и skew",horizon:"short",role:"leading",method:"dynamic",strategic:false,tactical:true,value_num:volScore,value:finite(volScore)?(volScore>=1?"сбалансировано":volScore<=-1?"напряжение / сжатая пружина":"смешанно"):"—",delta:finite(dvol)&&finite(skew)?`DVOL ${dvol.toFixed(1)} · put-call IV ${skew>=0?"+":""}${skew.toFixed(1)}`:"",note:"DVOL оценивается по двухлетнему перцентилю. Skew — прозрачная OTM put-call IV-прокси близкой экспирации, не dealer GEX и не точный 25-delta risk reversal.",score:volScore,source:"deribit",...sourceMeta("derivatives"),series:dvolS});
+  // Neither skew NOR the DVOL percentile hands out a free +1 for "normal": an ordinary reading is
+  // the absence of evidence, not health (same rule as realized volatility above). Only genuine
+  // stress or a coiled-spring extreme moves the score.
+  const volScore=componentScore([finite(dvolPct)?(dvolPct>=95?-2:dvolPct>=85?-1:dvolPct<=8?-1:0):null,customScore(skew,[[v=>v>20,-2],[v=>v>10,-1],[v=>v>-8,0],[()=>true,-1]])]);
+  add({id:"options_vol",block:"leverage",family:"volatility",name:"Опционная волатильность и skew",horizon:"short",role:"leading",method:"dynamic",strategic:false,tactical:true,value_num:volScore,value:finite(volScore)?(volScore<=-1?"напряжение / сжатая пружина":volScore<0?"лёгкое напряжение":"спокойно"):"—",delta:finite(dvol)&&finite(skew)?`DVOL ${dvol.toFixed(1)} · put-call IV ${skew>=0?"+":""}${skew.toFixed(1)}`:"",note:"DVOL оценивается по двухлетнему перцентилю. Skew — прозрачная OTM put-call IV-прокси близкой экспирации, не dealer GEX и не точный 25-delta risk reversal.",score:volScore,source:"deribit",...sourceMeta("derivatives"),series:dvolS});
   add({id:"vol_risk_premium",block:"leverage",family:"volatility",name:"IV − реализованная волатильность",horizon:"short",role:"context",method:"derived",strategic:false,tactical:false,vote:false,value_num:vrp,value:finite(vrp)?`${vrp>=0?"+":""}${vrp.toFixed(1)} vol`:"—",delta:finite(rv30)?`RV30 ${rv30.toFixed(1)}`:"",note:"Контекст цены страховки; не получает отдельный голос.",score:null,source:"deribit",...sourceMeta("derivatives")});
 
   // V. Качество цены
@@ -852,7 +879,7 @@ function buildMetrics(){
   add({id:"spot_integrity",block:"market",family:"integrity",name:"Синхронность спотовых площадок",horizon:"fast",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:disp,value:finite(disp)?`${disp.toFixed(0)} б.п.`:"—",delta:`USD ${finite(usdDisp)?usdDisp.toFixed(0):"—"} · USDT ${finite(usdtDisp)?usdtDisp.toFixed(0):"—"} б.п.`,note:"USD-площадки (Coinbase/Kraken/Bitstamp/Gemini) и USDT-площадки (OKX/Kraken/Coinbase) сравниваются только внутри одинаковой валюты котирования. Положительный голос требует обеих полных пар; одна доступная группа может только предупредить о расхождении.",score:integrityScore,source:"Coinbase · Kraken · Bitstamp · Gemini · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot,...sourceMeta("spot")});
 
   const vol=marketSeries("volume"),volCh=changeOfAverage(vol,30,30);let volumeScore=null,volumeText="—";
-  if(finite(volCh)&&finite(p30)){if(p30>5&&volCh>10){volumeScore=1;volumeText="рост подтверждён объёмом";}else if(p30<-5&&volCh>15){volumeScore=-1;volumeText="продажи подтверждены объёмом";}else if(Math.abs(p30)<5){volumeScore=0;volumeText="боковой режим";}else{volumeScore=0;volumeText="движение без сильного подтверждения";}}
+  if(finite(volCh)&&finite(p30)){if(p30>5&&volCh>10){volumeScore=1;volumeText="рост подтверждён объёмом";}else if(p30<-5&&volCh>10){volumeScore=-1;volumeText="продажи подтверждены объёмом";}else if(Math.abs(p30)<5){volumeScore=0;volumeText="боковой режим";}else{volumeScore=0;volumeText="движение без сильного подтверждения";}}
   add({id:"volume_confirmation",block:"market",family:"volume",name:"Подтверждение движения спот-объёмом",horizon:"short",role:"confirming",method:"derived",strategic:false,tactical:true,value_num:volumeScore,value:volumeText,delta:finite(p30)&&finite(volCh)?`цена 30д ${p30.toFixed(1)}% · объём ${volCh.toFixed(1)}%`:"",note:"Primary — дневной Coinbase BTC-USD volume в USD; fallback — Blockchain.com exchange trade volume, также USD/day, но с иным набором площадок. Выбирается целая история одного источника. Это не CVD и не попытка определить агрессора сделки.",score:volumeScore,source:datasetSource("market","market price"),source_url:datasets.market?.source_url||SOURCE_URLS.coinbase_candles,source_urls:datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain),...sourceMeta("market"),series:vol});
 
   const pegs=data("pegs")||{},completePeg=["USDT","USDC"].every(k=>finite(pegs[k]));
@@ -919,10 +946,20 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   const criticalTactical=["demand","market"].every(k=>blocks[k].tactical.coverage>=CRITICAL_MIN[k])&&!missingT.length;
   if(hardOverride)return{strategic:"emergency",tactical:"emergency",criticalStrategic,criticalTactical,missingS,missingT};
   const M=band(blocks.macro.strategic.score),D=band(blocks.demand.strategic.score),C=band(blocks.cycle.strategic.score);
+  // The negative ladder is anchored on DEMAND (the thesis block): a lone adverse macro or cycle
+  // block downgrades only to "transition". Reconstruction 2019-2026: the old rule ("any single
+  // adverse block => deteriorating") kept the panel in deteriorating 36% of all days — days that
+  // averaged +19.7% forward 180d return, i.e. the warning carried no information and bled upside
+  // (most of 2023 and half of 2024 sat in deteriorating while price tripled). Demand-adverse days
+  // and 2+-adverse days did discriminate (defensive: 90d hit-rate 0.40-0.41). Extreme macro stress
+  // is not lost: the macro_shock detector below caps the verdict on exactly those days (fired days
+  // averaged -16.4% forward 90d).
+  const adverseCount=[M,D,C].filter(x=>x==="adverse").length;
   let strategic="transition";
   if(!criticalStrategic)strategic="insufficient";
-  else if((D==="adverse"&&C==="adverse")||(M==="adverse"&&D==="adverse"))strategic="defensive";
-  else if([M,D,C].filter(x=>x==="adverse").length>=1)strategic="deteriorating";
+  else if(adverseCount>=2)strategic="defensive";
+  else if(D==="adverse")strategic="deteriorating";
+  else if(adverseCount>=1)strategic="transition";
   else if(D==="supportive"&&C==="supportive"&&M!=="adverse")strategic="constructive";
   else if(D==="supportive"&&M==="supportive")strategic="constructive";
   else if(M==="supportive"&&C==="supportive"&&D==="neutral")strategic="unconfirmed_positive";
@@ -938,39 +975,73 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   const mvrvScoreV=getM(metrics,"mvrv_cycle")?.score;
   if((!valuationAvailable||(finite(mvrvScoreV)&&mvrvScoreV<=-1))&&["constructive","unconfirmed_positive"].includes(strategic))strategic="transition";
 
+  // Two detectors earn VERDICT power (they were the only ones whose states discriminated forward
+  // returns in the 2019-2026 reconstruction; both keep their anchor+confirmation structure):
+  //  - macro_shock fired (all three macro families stressed at once): fired days averaged -5.7% fwd
+  //    30d / -16.4% fwd 90d — the verdict may not stay optimistic, it is capped at "deteriorating".
+  //  - recovery good (cheap MVRV anchor + >=2 stabilizations): those days averaged +10.1% fwd 30d
+  //    with hit-rate 0.82 — a defensive/deteriorating verdict is lifted to "transition" so the
+  //    accumulate window after a capitulation is not reported as "stay defensive".
+  const shockState=detectors.find(x=>x.id==="macro_shock")?.state,recoveryState=detectors.find(x=>x.id==="recovery")?.state,distState=detectors.find(x=>x.id==="distribution")?.state;
+  if(shockState==="fired"&&["constructive","unconfirmed_positive","transition"].includes(strategic))strategic="deteriorating";
+  // Distribution fired = expensive valuation + exchange supply returning + broken trend: the panel
+  // may not stay optimistic while holders demonstrably sell into strength.
+  if(distState==="fired"&&["constructive","unconfirmed_positive","transition"].includes(strategic))strategic="deteriorating";
+  if(recoveryState==="good"&&shockState!=="fired"&&["defensive","deteriorating"].includes(strategic))strategic="transition";
+
   const L=blocks.leverage.tactical.score,Q=fastDemand(metrics),K=blocks.market.tactical.score;
   const levDet=detectors.find(x=>x.id==="leverage")?.state,demandDet=detectors.find(x=>x.id==="demand_break")?.state;
   let tactical="balanced";
   if(!criticalTactical)tactical="insufficient";
   else if(levDet==="fired"&&demandDet==="fired")tactical="deleveraging";
+  // A confirmed squeeze setup (crowded-short anchor + stabilizing spot/ETF) outranks the generic
+  // "fragile" label: the same |funding| extreme that reads as fragility is squeeze fuel when the
+  // shorts are the crowded side. Checked BEFORE fragile so it is not shadowed.
+  else if(detectors.find(x=>x.id==="short_squeeze")?.state==="good")tactical="short_squeeze";
+  // A confirmed marginal-demand break with calm leverage is NOT "balanced": spot-led downside gets
+  // its own state — deleveraging logic does not apply when there is no leverage to flush.
+  else if(demandDet==="fired")tactical="demand_break";
   else if(L!=null&&L<=-35&&Q!=null&&Q<=0)tactical="fragile";
   else if(L!=null&&L<=-35&&Q!=null&&Q>0)tactical="overheated_supported";
-  else if(L!=null&&L>=15&&Q!=null&&Q>=15&&K>=-20)tactical="spot_led";
-  else if(detectors.find(x=>x.id==="short_squeeze")?.state==="good")tactical="short_squeeze";
+  // The leverage block is penalty-only, so "spot-led" requires strong fast demand while
+  // leverage is merely NOT warning (L >= -10), instead of the old unreachable L >= +15.
+  else if(L!=null&&L>=-10&&Q!=null&&Q>=15&&K>=-20)tactical="spot_led";
   return{strategic,tactical,criticalStrategic,criticalTactical,missingS,missingT,valuationAvailable};
 }
 
 const STRATEGIC_TEXT={constructive:"КОНСТРУКТИВНЫЙ СРЕДНЕСРОЧНЫЙ РЕЖИМ",unconfirmed_positive:"ПОЛОЖИТЕЛЬНО, НО СПРОС НЕ ПОДТВЕРДИЛ",transition:"ПЕРЕХОДНЫЙ СРЕДНЕСРОЧНЫЙ РЕЖИМ",deteriorating:"СРЕДНЕСРОЧНЫЙ РЕЖИМ УХУДШАЕТСЯ",defensive:"ЗАЩИТНЫЙ СРЕДНЕСРОЧНЫЙ РЕЖИМ",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
-const TACTICAL_TEXT={spot_led:"СПОТ-ВЕДОМАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",balanced:"СБАЛАНСИРОВАННАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",overheated_supported:"БЫЧИЙ ФОН, НО ПЛЕЧО ПЕРЕГРЕТО",fragile:"ХРУПКАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",deleveraging:"ДЕЛЕВЕРИДЖ · ТАКТИЧЕСКАЯ ЗАЩИТА",short_squeeze:"УСЛОВИЯ ДЛЯ SHORT SQUEEZE",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
-function severity(x){return{constructive:2,unconfirmed_positive:1,transition:0,deteriorating:-1,defensive:-2,spot_led:2,balanced:0,overheated_supported:-1,fragile:-1,deleveraging:-2,short_squeeze:1,insufficient:0,emergency:-3}[x]??0;}
+const TACTICAL_TEXT={spot_led:"СПОТ-ВЕДОМАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",balanced:"СБАЛАНСИРОВАННАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",demand_break:"СЛОМ МАРЖИНАЛЬНОГО СПРОСА",overheated_supported:"БЫЧИЙ ФОН, НО ПЛЕЧО ПЕРЕГРЕТО",fragile:"ХРУПКАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",deleveraging:"ДЕЛЕВЕРИДЖ · ТАКТИЧЕСКАЯ ЗАЩИТА",short_squeeze:"УСЛОВИЯ ДЛЯ SHORT SQUEEZE",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
+function severity(x){return{constructive:2,unconfirmed_positive:1,transition:0,deteriorating:-1,defensive:-2,spot_led:2,balanced:0,overheated_supported:-1,fragile:-1,demand_break:-1,deleveraging:-2,short_squeeze:1,insufficient:0,emergency:-3}[x]??0;}
 function stabilize(candidate,type,hard){
-  if(hard||candidate==="insufficient"||candidate==="emergency"||!previous||previous.mock||previous.regime?.[type]==="insufficient")return{state:candidate,candidate,count:1};
+  if(hard||candidate==="insufficient"||candidate==="emergency"||!previous||previous.mock||previous.regime?.[type]==="insufficient")return{state:candidate,candidate,count:1,since:iso(NOW)};
   const meta=previous.regime_meta?.[type]||{},count=meta.candidate===candidate?(meta.count||0)+1:1,prev=previous.regime?.[type]||candidate;
-  return{state:count>=2?candidate:prev,candidate,count};
+  const since=meta.candidate===candidate&&meta.since?meta.since:iso(NOW);
+  // ASYMMETRIC hysteresis. Risk-off (severity falls) still confirms after two consecutive snapshots
+  // (~2h) — the cost of a late exit is large. Risk-on (severity rises) additionally requires the
+  // candidate to persist UPGRADE_HOLD_H hours: reconstruction showed upgrades that could not hold
+  // for two days were mostly band-edge noise, and positive regimes worth acting on lasted months.
+  // Recovering from "emergency" is exempt — once integrity is restored the panel must not sit in
+  // emergency for two extra days.
+  const upgrade=severity(candidate)>severity(prev)&&prev!=="emergency";
+  const heldLongEnough=NOW-Date.parse(since)>=UPGRADE_HOLD_H*HOUR;
+  return{state:count>=2&&(!upgrade||heldLongEnough)?candidate:prev,candidate,count,since};
 }
 function behaviors(s,t){
   const medium={constructive:"Базовая экспозиция режимно оправдана; добавления лучше делать ступенчато и не игнорировать тактический перегрев.",unconfirmed_positive:"Не наращивать экспозицию агрессивно: макро и цикл поддерживают рынок, но реальный маржинальный спрос недостаточен.",transition:"Сохранять умеренную экспозицию и ждать согласования потоков, макро и структуры предложения.",deteriorating:"Сократить риск новых добавлений, повысить запас ликвидности и требовать восстановления спроса перед увеличением позиции.",defensive:"Приоритет — сохранение капитала; увеличение экспозиции только после разворота потоков и восстановления ценовых опор.",insufficient:"Не делать вывод из панели: критические блоки покрыты недостаточно.",emergency:"Приоритет — контроль контрагентского и ликвидностного риска; обычный скоринг временно недействителен."}[s];
-  const short={spot_led:"Краткосрочные добавления допустимы после обычных откатов, пока ETF/спот и чистое плечо подтверждают движение.",balanced:"Не форсировать вход: структура нейтральна, решения лучше привязывать к среднесрочному режиму.",overheated_supported:"Среднесрочную позицию не путать с новым входом: избегать погони за ценой и ждать очистки funding/OI.",fragile:"Новые добавления отложить; рынок уязвим к каскаду даже без изменения среднесрочной картины.",deleveraging:"Тактически защитный режим: дождаться сброса OI, стабилизации funding и возвращения спот-поддержки.",short_squeeze:"Возможен резкий отскок, но он не является подтверждением нового среднесрочного бычьего режима.",insufficient:"Краткосрочный вывод недоступен из-за неполных данных.",emergency:"Не полагаться на обычные котировки и сигналы до восстановления паритета и синхронности площадок."}[t];
+  const short={spot_led:"Краткосрочные добавления допустимы после обычных откатов, пока ETF/спот и чистое плечо подтверждают движение.",balanced:"Не форсировать вход: структура нейтральна, решения лучше привязывать к среднесрочному режиму.",overheated_supported:"Среднесрочную позицию не путать с новым входом: избегать погони за ценой и ждать очистки funding/OI.",fragile:"Новые добавления отложить; рынок уязвим к каскаду даже без изменения среднесрочной картины.",demand_break:"Маржинальный спрос сломан при спокойном плече: не покупать откаты и не ждать «очистки» — падению без плеча нечего очищать; дождаться стабилизации ETF-потоков и спот-премии.",deleveraging:"Тактически защитный режим: дождаться сброса OI, стабилизации funding и возвращения спот-поддержки.",short_squeeze:"Возможен резкий отскок, но он не является подтверждением нового среднесрочного бычьего режима.",insufficient:"Краткосрочный вывод недоступен из-за неполных данных.",emergency:"Не полагаться на обычные котировки и сигналы до восстановления паритета и синхронности площадок."}[t];
   return{medium,short};
 }
-function phase(s,t){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";return"Фаза перехода · сигналы не согласованы";}
+function phase(s,t,detectors){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(detectors?.find(x=>x.id==="recovery")?.state==="good"&&["transition","deteriorating","defensive"].includes(s))return"Фаза 0 · капитуляция позади? восстановление подтверждается потоками";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";return"Фаза перехода · сигналы не согласованы";}
 
 function compute(){
   const metrics=buildMetrics(),blocks={};
   for(const [k,b] of Object.entries(BLOCKS))blocks[k]={...b,strategic:familyStats(metrics,k,"strategic"),tactical:familyStats(metrics,k,"tactical")};
   const {detectors,hardOverride}=buildDetectors(metrics);
   let strategicRaw=0,sw=0,tacticalRaw=0,tw=0;
-  for(const [k,b] of Object.entries(blocks)){if(b.strategic.score!=null&&b.strategicWeight){const w=b.strategicWeight*b.strategic.coverage;strategicRaw+=b.strategic.score*w;sw+=w;}if(b.tactical.score!=null&&b.tacticalWeight){const w=b.tacticalWeight*b.tactical.coverage;tacticalRaw+=b.tactical.score*w;tw+=w;}}
+  // Coverage damping applies to POSITIVE block scores only. Damping a negative score would mean
+  // "the less data we have, the milder the warning" — the exact false-optimism the model promises
+  // never to produce. Warnings enter at full block weight; optimism must earn its coverage.
+  for(const [k,b] of Object.entries(blocks)){if(b.strategic.score!=null&&b.strategicWeight){const w=b.strategicWeight*(b.strategic.score>0?b.strategic.coverage:1);strategicRaw+=b.strategic.score*w;sw+=w;}if(b.tactical.score!=null&&b.tacticalWeight){const w=b.tacticalWeight*(b.tactical.score>0?b.tactical.coverage:1);tacticalRaw+=b.tactical.score*w;tw+=w;}}
   // Divide by the FIXED total weight, not by the sum of available weights: a missing block then contributes
   // 0 and pulls the aggregate toward neutral (with confidence falling via coverage), instead of the remaining
   // blocks silently gaining outsized relative weight.
@@ -989,19 +1060,20 @@ function compute(){
   const price=referencePrice(),history=(previous?.history||[]).filter(h=>NOW-Date.parse(h.t)<730*DAY);
   const oiByVenue=Object.fromEntries((data("derivatives")?.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
   const raw={oi_usd:sumOrNull(Object.values(oiByVenue)),oi_by_venue:oiByVenue,premium_bps:getM(metrics,"us_spot_premium")?.value_num,stable_supply:last(series(data("stablecoins")||[]))?.v,etf_20d:getM(metrics,"etf_20d")?.value_num};
-  history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical),regime,raw});
+  history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,raw});
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
     schema:2,version:VERSION,generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
-    regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,
+    regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,
     sources:sourceStates,history,datasets,
     methodology:{
       indicator_scale:"−2…+2; числовые баллы вторичны относительно гейтов",
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
       mechanical_metrics:"stablecoin peg, funding, basis, spreads and price-to-moving-average relations use economic/mechanical thresholds",
-      regime_logic:"strategic = Macro × Demand × Cycle; tactical = Fast demand × Market integrity × Realized volatility; leverage confirms fragility but is not required",
-      hysteresis:"ordinary transition requires two consecutive snapshots; hard override is immediate",
+      regime_logic:"strategic = Macro × Demand × Cycle, negative ladder anchored on Demand (lone adverse macro/cycle => transition; demand adverse => deteriorating; two adverse => defensive); tactical = Fast demand × Market integrity × Realized volatility; leverage is penalty-only fragility evidence",
+      hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h; hard override is immediate",
+      detector_power:"macro_shock fired caps the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; both keep anchor+confirmation structure",
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),
       tactical_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.tacticalWeight])),
