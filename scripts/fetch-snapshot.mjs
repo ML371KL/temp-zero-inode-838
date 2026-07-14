@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.8.0";
+const VERSION = "2.8.1";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -119,14 +119,18 @@ const CM_OPTIONAL_METRICS = [...CM_METRICS];
 // the independent daily price history. It never substitutes for realised cap, MVRV or labelled
 // on-chain data. The dashboard uses market cap only for context, not as a unique causal signal.
 const HALVING_T = Date.UTC(2024, 3, 20), HALVING_SUPPLY = 19_687_500;
-const estimatedSupply = t => { const d = (Number(t) - HALVING_T) / 86_400_000; return d >= 0 ? HALVING_SUPPLY + 450 * d : HALVING_SUPPLY + 900 * d; };
+// Next halving ≈ 17 апреля 2028 (блок 1 050 000; дата — оценка по 10-минутным блокам). Модель supply
+// используется только для контекстной капитализации, но после смены эпохи она не должна тихо
+// завышать эмиссию вдвое: +450 BTC/день до H2028, +225 после.
+const HALVING2_T = Date.UTC(2028, 3, 17), HALVING2_SUPPLY = HALVING_SUPPLY + 450 * ((HALVING2_T - HALVING_T) / 86_400_000);
+const estimatedSupply = t => { const x = Number(t); if (x >= HALVING2_T) return HALVING2_SUPPLY + 225 * ((x - HALVING2_T) / 86_400_000); const d = (x - HALVING_T) / 86_400_000; return d >= 0 ? HALVING_SUPPLY + 450 * d : HALVING_SUPPLY + 900 * d; };
 
 // Canonical units for every provider path. A provider is rejected rather than silently rescaled
 // when its latest observation cannot be mapped unambiguously into a physically plausible band.
 const SERIES_CONTRACT = {
   price:           { unit:"USD/BTC",        lo:1e3,   hi:1e7,   scales:[1] },
   volume:          { unit:"USD/day",        lo:1e6,   hi:1e13,  scales:[1] },
-  marketCap:       { unit:"USD",            lo:1e11,  hi:1e14,  scales:[1] },
+  marketCap:       { unit:"USD",            lo:2e10,  hi:1e14,  scales:[1] },
   mvrv:            { unit:"ratio",          lo:.3,    hi:8,     scales:[1] },
   hashrate:        { unit:"H/s",            lo:2e20,  hi:5e21,  scales:[1,1e3,1e6,1e9,1e12,1e18], historyLo:5e19 },
   difficulty:      { unit:"dimensionless",  lo:1e13,  hi:1e16,  scales:[1,1e12], historyLo:1e12 },
@@ -154,7 +158,6 @@ function crossCheck(name,a,b,tolerance){if(!finite(a)||!finite(b))return null;co
 const finite = v => v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v));
 const num = v => finite(v) ? Number(v) : null;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const roundSym = v => Number(v)>=0 ? Math.floor(Number(v)+0.5) : Math.ceil(Number(v)-0.5);
 const sanePrice = v => finite(v) && Number(v)>1_000 && Number(v)<10_000_000;
 const mean = a => a.length ? a.reduce((s, v) => s + Number(v), 0) / a.length : null;
 const sum = a => a.filter(finite).reduce((s, v) => s + Number(v), 0);
@@ -202,7 +205,7 @@ async function request(url,{text=false,tries=3,headers={}}={}){
   let err;
   for(let i=0;i<tries;i++){
     try{
-      const r=await fetch(url,{headers:{"User-Agent":"btc-21m-dashboard/2.7.2","Accept":text?"text/plain,text/html,*/*":"application/json,*/*",...headers},signal:AbortSignal.timeout(25_000)});
+      const r=await fetch(url,{headers:{"User-Agent":"btc-21m-dashboard/"+VERSION,"Accept":text?"text/plain,text/html,*/*":"application/json,*/*",...headers},signal:AbortSignal.timeout(25_000)});
       if(!r.ok){
         const wait=(r.status===429||r.status>=500)?retryAfterMs(r.headers.get("retry-after")):null;
         if(wait!==null&&wait>0)await sleep(wait);
@@ -227,7 +230,7 @@ async function deribitRequest(url){const j=await request(url);if(j?.error)throw 
 async function bybitRequest(url){const j=await request(url);if(j?.retCode!==undefined&&Number(j.retCode)!==0)throw new Error(`Bybit ${j.retCode}: ${j.retMsg||"API error"}`);return j;}
 // Hyperliquid is a decentralised perp exchange: its public /info endpoint is POST-only and, being
 // crypto-native, is never geo-blocked from datacentre/CI IPs (unlike Bybit/OKX). Used for BTC funding + OI.
-async function hyperliquidRequest(body,tries=2){let err;for(let i=0;i<tries;i++){try{const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/2.7.3"},body:JSON.stringify(body),signal:AbortSignal.timeout(25_000)});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();if(j==null)throw new Error("empty response");return j;}catch(e){err=e;if(i<tries-1)await sleep(700);}}throw err;}
+async function hyperliquidRequest(body,tries=2){let err;for(let i=0;i<tries;i++){try{const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/"+VERSION},body:JSON.stringify(body),signal:AbortSignal.timeout(25_000)});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();if(j==null)throw new Error("empty response");return j;}catch(e){err=e;if(i<tries-1)await sleep(700);}}throw err;}
 async function okxRequest(url){
   const candidates=[
     String(url).replace("https://www.okx.com","https://openapi.okx.com"),
@@ -310,7 +313,7 @@ async function fetchFredSeries(id,cfg){let apiError=null;try{if(!FRED_KEY)throw 
 function stripHtml(s){return String(s||"").replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/&nbsp;|&#160;/gi," ").replace(/&amp;/gi,"&").replace(/&minus;|&#8722;/gi,"-").replace(/\s+/g," ").trim();}
 function parseFlowNumber(s){const t=stripHtml(s).replace(/[$,%*]/g,"").replace(/,/g,"").trim();if(!t||/^[-—–]$/.test(t))return 0;const neg=/^\(.*\)$/.test(t),n=Number(t.replace(/[()]/g,""));return finite(n)?(neg?-n:n):null;}
 function parseFarside(html){const rows=[];for(const row of html.match(/<tr[\s\S]*?<\/tr>/gi)||[]){const cells=(row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi)||[]).map(stripHtml);if(cells.length<3||!/^\d{1,2}\s+[A-Za-z]{3}\s+20\d{2}$/.test(cells[0]))continue;const fundCells=cells.slice(1,-1),allDash=fundCells.length>0&&fundCells.every(x=>!x||/^[-—–]$/.test(x.trim()));const v=parseFlowNumber(cells[cells.length-1]),t=Date.parse(cells[0]+" 00:00:00 UTC");if(allDash&&Number(v)===0)continue;if(finite(v)&&finite(t))rows.push({t,v:Number(v)*1e6});}return [...new Map(rows.map(x=>[x.t,x])).values()].sort((a,b)=>a.t-b.t);}
-function validateEtfSeries(rows,maxAge=5*DAY){
+function validateEtfSeries(rows,maxAge=7*DAY){
   if(!Array.isArray(rows)||rows.length<100)return false;
   let prev=-Infinity;
   for(const row of rows){
@@ -382,7 +385,7 @@ function parseCftc(rows){return (rows||[]).map(r=>({
   levLong:num(r.lev_money_positions_long??r.lev_money_positions_long_all),
   levShort:num(r.lev_money_positions_short??r.lev_money_positions_short_all),
 })).filter(r=>finite(r.t)&&finite(r.oi)).sort((a,b)=>a.t-b.t);}
-function parseBlockchainChart(j,{scale=1,minPoints=30,expectedUnit=null}={}){if(j?.status&&j.status!=="ok")throw new Error(`Blockchain chart status ${j.status}`);if(expectedUnit&&j?.unit&&String(j.unit).toLowerCase()!==String(expectedUnit).toLowerCase())throw new Error(`Blockchain chart unit ${j.unit}, expected ${expectedUnit}`);const a=(j?.values||[]).map(x=>({t:Number(x.x)*1000,v:Number(x.y)*scale})).filter(x=>finite(x.t)&&finite(x.v)).sort((x,y)=>x.t-y.t);if(a.length<minPoints)throw new Error(`Blockchain chart too short: ${a.length}`);return a;}
+function parseBlockchainChart(j,{scale=1,minPoints=30,expectedUnit=null}={}){if(j?.status&&j.status!=="ok")throw new Error(`Blockchain chart status ${j.status}`);if(expectedUnit&&j?.unit&&!String(j.unit).toLowerCase().includes(String(expectedUnit).toLowerCase()))throw new Error(`Blockchain chart unit ${j.unit}, expected ${expectedUnit}`);const a=(j?.values||[]).map(x=>({t:Number(x.x)*1000,v:Number(x.y)*scale})).filter(x=>finite(x.t)&&finite(x.v)).sort((x,y)=>x.t-y.t);if(a.length<minPoints)throw new Error(`Blockchain chart too short: ${a.length}`);return a;}
 async function fetchBlockchainChart(name,timespan,{scale=1,minPoints=30,expectedUnit=null}={}){const u=`https://api.blockchain.info/charts/${name}?timespan=${encodeURIComponent(timespan)}&format=json&sampled=false`;return parseBlockchainChart(await request(u,{tries:2}),{scale,minPoints,expectedUnit});}
 function validateBlockchainOnchainData(data,maxAge=4*DAY){const errors=[],dates=[];for(const[k,a]of Object.entries(data||{})){const t=Number(last(a)?.t),age=NOW-t;if(!Array.isArray(a)||a.length<180||!Number.isFinite(t)||age< -HOUR||age>maxAge){data[k]=[];errors.push(`series unavailable/stale: ${k}`);}else dates.push(t);}if(!dates.length)throw new Error(errors.join("; ")||"no Blockchain on-chain series");return{observed_at:iso(Math.min(...dates)),partial:errors.length>0,errors};}
 // Keyless realized-cap MVRV ratio (BGeometrics / bitcoin-data.com). blockchain.info publishes no MVRV
@@ -592,9 +595,11 @@ async function fetchDerivatives(){
     {venue:"Deribit",rate8h:num(der.funding_8h),oiUsd:num(der.open_interest),intervalHours:8},
     {venue:"Hyperliquid",rate8h:finite(hlCtx.funding)?Number(hlCtx.funding)*8:null,oiUsd:finite(hlCtx.openInterest)&&finite(hlCtx.markPx)?Number(hlCtx.openInterest)*Number(hlCtx.markPx):null,intervalHours:1},
     {venue:"OKX",rate8h:finite(okf.fundingRate)?Number(okf.fundingRate)*8/okHours:null,oiUsd:num(oko.oiUsd),intervalHours:okHours},
-    // Kraken PI_XBTUSD fundingRate is hourly; the inverse contract is quoted in $1 contracts,
+    // Kraken PI_XBTUSD fundingRate is the ABSOLUTE hourly rate of the inverse contract (BTC per
+    // 1 USD notional); the relative hourly rate is fundingRate * markPrice (verified live:
+    // -5.8e-11 * 64682 = -3.8e-6/h ~= -0.003%/8h). The inverse contract is quoted in $1 contracts,
     // therefore openInterest is directly comparable to USD notional from the other venues.
-    {venue:"Kraken Futures",rate8h:kf.result==="success"&&finite(kf.ticker?.fundingRate)?Number(kf.ticker.fundingRate)*8:null,oiUsd:kf.result==="success"?num(kf.ticker?.openInterest):null,intervalHours:1},
+    {venue:"Kraken Futures",rate8h:kf.result==="success"&&finite(kf.ticker?.fundingRate)&&finite(kf.ticker?.markPrice)?Number(kf.ticker.fundingRate)*Number(kf.ticker.markPrice)*8:null,oiUsd:kf.result==="success"?num(kf.ticker?.openInterest):null,intervalHours:1},
   ].filter(x=>finite(x.rate8h)&&Math.abs(Number(x.rate8h))<.05&&(!finite(x.oiUsd)||(Number(x.oiUsd)>1e6&&Number(x.oiUsd)<1e12)));
   const dated=futures.map(x=>({...x,expiry:expiryFromName(x.instrument_name),oiUsd:num(x.open_interest),volumeUsd:num(x.volume_usd)})).filter(x=>x.expiry>NOW+20*DAY&&x.expiry<NOW+100*DAY&&finite(x.mark_price)).sort((a,b)=>a.expiry-b.expiry);
   const liquid=dated.filter(x=>(x.oiUsd||0)>=50e6||(x.volumeUsd||0)>=1e6),q=(liquid.length?liquid:dated)[0];
@@ -665,7 +670,8 @@ async function collect(){
     // MVRV/flows/activity/miners and nothing else.
     loadDataset("coinmetrics","coinmetrics",4*DAY,fetchCoinMetrics,x=>CM_METRICS.some(k=>x?.[k]?.length>=180),{maxObservedAge:4*DAY}),
     loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY}),
-    loadDataset("etf","theblock",5*DAY,fetchEtfFlows,x=>validateEtfSeries(x,5*DAY),{maxObservedAge:5*DAY}),
+    // 7 days: publication lag (1-2d) + a long US-holiday weekend must not zero out the family.
+    loadDataset("etf","theblock",7*DAY,fetchEtfFlows,x=>validateEtfSeries(x,7*DAY),{maxObservedAge:7*DAY}),
     loadDataset("stablecoins","defillama",4*DAY,async()=>{const s=normalizeStableHistory(await request("https://stablecoins.llama.fi/stablecoincharts/all"));return{data:s,observed_at:s.length?iso(last(s).t):iso(NOW)};},x=>x?.length>100,{maxObservedAge:4*DAY}),
     loadDataset("pegs","defillama",18*HOUR,fetchPegs,x=>[x?.USDT,x?.USDC].some(v=>finite(v)&&Number(v)>.01&&Number(v)<5),{maxObservedAge:18*HOUR}),
     loadDataset("cftc","cftc",15*DAY,fetchCftc,x=>x?.length>20,{maxObservedAge:15*DAY}),
@@ -844,7 +850,9 @@ function buildMetrics(){
   add({id:"funding",block:"leverage",family:"carry",name:"Агрегированный funding",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:fundPct,value:finite(fundPct)?`${fundPct>=0?"+":""}${fundPct.toFixed(3)}% / 8ч`:"—",delta:`площадки ${fund.length}`,note:"Компонент семейства. Отрицательный экстремум — не автоматически бычий сигнал, а потенциальное топливо short squeeze.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
 
   const currentOiByVenue=Object.fromEntries(weightedRows.map(x=>[x.venue,Number(x.oiUsd)])),currentVenues=Object.keys(currentOiByVenue),hist=(previous?.history||[]).slice().sort((a,b)=>Date.parse(a.t)-Date.parse(b.t)),oiSeries=hist.map(h=>{const t=Date.parse(h.t),by=h.raw?.oi_by_venue,vals=currentVenues.map(k=>by?.[k]);return currentVenues.length>=2&&vals.every(finite)?{t,v:sum(vals)}:null;}).filter(Boolean);if(finite(oiTotal))oiSeries.push({t:NOW,v:oiTotal});
-  const priorOi=(days)=>{const target=NOW-days*DAY;let found=null;for(const h of hist){const t=Date.parse(h.t);if(t<=target&&h.raw?.oi_by_venue)found=h;else if(t>target)break;}return found?.raw?.oi_by_venue||null;};
+  // The baseline must actually be ~N days old: after a multi-day publishing gap an arbitrarily
+  // old entry would silently masquerade as the "7d" comparison, so allow at most 3 days of slack.
+  const priorOi=(days)=>{const target=NOW-days*DAY;let found=null,foundT=null;for(const h of hist){const t=Date.parse(h.t);if(t<=target&&h.raw?.oi_by_venue){found=h;foundT=t;}else if(t>target)break;}return found&&target-foundT<=3*DAY?found.raw.oi_by_venue:null;};
   const oi7=percentChangeCommonVenues(currentOiByVenue,priorOi(7));
   // "OI стабилен" is the ordinary state, not evidence of health — it scores 0 (the old +1 was a
   // standing positive in a calm market). Deleveraging-on-decline keeps its genuine +1.
@@ -1013,18 +1021,23 @@ const STRATEGIC_TEXT={constructive:"КОНСТРУКТИВНЫЙ СРЕДНЕС�
 const TACTICAL_TEXT={spot_led:"СПОТ-ВЕДОМАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",balanced:"СБАЛАНСИРОВАННАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",demand_break:"СЛОМ МАРЖИНАЛЬНОГО СПРОСА",overheated_supported:"БЫЧИЙ ФОН, НО ПЛЕЧО ПЕРЕГРЕТО",fragile:"ХРУПКАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",deleveraging:"ДЕЛЕВЕРИДЖ · ТАКТИЧЕСКАЯ ЗАЩИТА",short_squeeze:"УСЛОВИЯ ДЛЯ SHORT SQUEEZE",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
 function severity(x){return{constructive:2,unconfirmed_positive:1,transition:0,deteriorating:-1,defensive:-2,spot_led:2,balanced:0,overheated_supported:-1,fragile:-1,demand_break:-1,deleveraging:-2,short_squeeze:1,insufficient:0,emergency:-3}[x]??0;}
 function stabilize(candidate,type,hard){
-  if(hard||candidate==="insufficient"||candidate==="emergency"||!previous||previous.mock||previous.regime?.[type]==="insufficient")return{state:candidate,candidate,count:1,since:iso(NOW)};
+  if(hard||candidate==="insufficient"||candidate==="emergency"||!previous||previous.mock)return{state:candidate,candidate,count:1,since:iso(NOW)};
   const meta=previous.regime_meta?.[type]||{},count=meta.candidate===candidate?(meta.count||0)+1:1,prev=previous.regime?.[type]||candidate;
   const since=meta.candidate===candidate&&meta.since?meta.since:iso(NOW);
-  // ASYMMETRIC hysteresis. Risk-off (severity falls) still confirms after two consecutive snapshots
-  // (~2h) — the cost of a late exit is large. Risk-on (severity rises) additionally requires the
-  // candidate to persist UPGRADE_HOLD_H hours: reconstruction showed upgrades that could not hold
-  // for two days were mostly band-edge noise, and positive regimes worth acting on lasted months.
-  // Recovering from "emergency" is exempt — once integrity is restored the panel must not sit in
-  // emergency for two extra days.
-  const upgrade=severity(candidate)>severity(prev)&&prev!=="emergency";
+  // ASYMMETRIC hysteresis. Risk-off (severity falls) confirms after two consecutive snapshots of
+  // ANY lower-severity candidate — a market alternating between "deteriorating" and "defensive"
+  // is still deteriorating, so the downgrade streak is tracked across differing candidates.
+  // Risk-on (severity rises) additionally requires the candidate to persist UPGRADE_HOLD_H hours:
+  // reconstruction showed upgrades that could not hold for two days were mostly band-edge noise.
+  // Exiting "insufficient"/"emergency" is exempt from the hold (the panel must not sit in a
+  // degraded state once data returns) but still needs the 2-snapshot confirmation — a single
+  // outage snapshot no longer resets the hysteresis entirely.
+  const sevPrev=severity(prev),worse=severity(candidate)<sevPrev;
+  const downStreak=worse?(meta.downStreak||0)+1:0;
+  const upgrade=severity(candidate)>sevPrev&&prev!=="emergency"&&prev!=="insufficient";
   const heldLongEnough=NOW-Date.parse(since)>=UPGRADE_HOLD_H*HOUR;
-  return{state:count>=2&&(!upgrade||heldLongEnough)?candidate:prev,candidate,count,since};
+  const adopt=(count>=2&&(!upgrade||heldLongEnough))||(worse&&downStreak>=2);
+  return{state:adopt?candidate:prev,candidate,count,since,downStreak};
 }
 function behaviors(s,t){
   const medium={constructive:"Базовая экспозиция режимно оправдана; добавления лучше делать ступенчато и не игнорировать тактический перегрев.",unconfirmed_positive:"Не наращивать экспозицию агрессивно: макро и цикл поддерживают рынок, но реальный маржинальный спрос недостаточен.",transition:"Сохранять умеренную экспозицию и ждать согласования потоков, макро и структуры предложения.",deteriorating:"Сократить риск новых добавлений, повысить запас ликвидности и требовать восстановления спроса перед увеличением позиции.",defensive:"Приоритет — сохранение капитала; увеличение экспозиции только после разворота потоков и восстановления ценовых опор.",insufficient:"Не делать вывод из панели: критические блоки покрыты недостаточно.",emergency:"Приоритет — контроль контрагентского и ликвидностного риска; обычный скоринг временно недействителен."}[s];
@@ -1057,7 +1070,14 @@ function compute(){
   const onchainIds=["mvrv_cycle","exchange_supply","network_activity","miner_regime"],onchainAvailable=onchainIds.filter(id=>getM(metrics,id)?.score!=null).length;
   scores.onchain_coverage=onchainAvailable/onchainIds.length;scores.onchain_status=onchainAvailable===4?"full":onchainAvailable>=2?"partial":"minimal";
   const factors={strategic:metrics.filter(x=>x.vote&&x.strategic&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value})),tactical:metrics.filter(x=>x.vote&&x.tactical&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value}))};
-  const price=referencePrice(),history=(previous?.history||[]).filter(h=>NOW-Date.parse(h.t)<730*DAY);
+  const price=referencePrice();
+  // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
+  // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
+  // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.
+  const rawHistory=(previous?.history||[]).filter(h=>NOW-Date.parse(h.t)<730*DAY);
+  const recentCut=NOW-14*DAY,byDayHist=new Map();
+  for(const h of rawHistory){const t=Date.parse(h.t);if(t>=recentCut)continue;byDayHist.set(dayKey(t),h);}
+  const history=[...byDayHist.values(),...rawHistory.filter(h=>Date.parse(h.t)>=recentCut)].sort((a,b)=>Date.parse(a.t)-Date.parse(b.t)).slice(-4500);
   const oiByVenue=Object.fromEntries((data("derivatives")?.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
   const raw={oi_usd:sumOrNull(Object.values(oiByVenue)),oi_by_venue:oiByVenue,premium_bps:getM(metrics,"us_spot_premium")?.value_num,stable_supply:last(series(data("stablecoins")||[]))?.v,etf_20d:getM(metrics,"etf_20d")?.value_num};
   history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,raw});
@@ -1081,7 +1101,7 @@ function compute(){
   };
 }
 
-export { request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, roundSym, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});

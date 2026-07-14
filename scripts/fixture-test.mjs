@@ -18,7 +18,7 @@ const fixtures=new Map([
   ["https://api.hyperliquid.xyz/info",[{universe:[{name:"BTC"}]},[{funding:"0.0000125",openInterest:"30000",markPx:"100000"}]]],
   ["https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP",{data:[{fundingRate:"0.00008",fundingTime:String(now-8*3600e3),nextFundingTime:String(now),ts:String(now-300)}]}],
   ["https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP",{data:[{oiUsd:"3000000000",ts:String(now-250)}]}],
-  ["https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{fundingRate:"0.00001",openInterest:"1500000000"}}],
+  ["https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"50000",openInterest:"1500000000"}}],
   ["https://futures.kraken.com/derivatives/api/v3/tickers?contractType=futures_inverse",{result:"success",tickers:[]}],
   ["https://api.exchange.coinbase.com/products/BTC-USD/ticker",{price:"100050",time:new Date(now-200).toISOString()}],
   ["https://api.kraken.com/0/public/Ticker?pair=XBTUSD",{result:{XXBTZUSD:{c:["100000","1"]}}}],
@@ -63,7 +63,7 @@ try{
   assert.equal(d.data.funding.find(x=>x.venue==="Hyperliquid").rate8h,0.0001,"hourly Hyperliquid funding normalized to 8h");
   assert.equal(d.data.funding.find(x=>x.venue==="Hyperliquid").oiUsd,3_000_000_000,"Hyperliquid OI = openInterest(BTC) × markPx (USD)");
   assert.equal(d.data.funding.find(x=>x.venue==="Deribit").oiUsd,1_200_000_000,"Deribit OI remains USD, no price multiplication");
-  assert.equal(d.data.funding.find(x=>x.venue==="Kraken Futures").rate8h,0.00008,"hourly Kraken funding normalized to 8h");
+  assert.equal(d.data.funding.find(x=>x.venue==="Kraken Futures").rate8h,0.0001,"absolute inverse-contract Kraken funding converted via markPrice and normalized to 8h");
   assert.ok(d.data.basis>20&&d.data.basis<30,"annualized dated-future basis");
   assert.equal(d.data.skew,7,"OTM put-call IV proxy");
   assert.ok(Date.parse(d.observed_at)<=now&&Date.parse(d.observed_at)>=now-1000,"exchange observation time propagated");

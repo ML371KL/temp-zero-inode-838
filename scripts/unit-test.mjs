@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, roundSym, percentChangeCommonVenues, classifyIntegrity,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -52,10 +52,6 @@ const pr=percentileRank([1,2,3,4,5,...Array.from({length:30},(_,i)=>i+6)],18);
 ok(pr>45&&pr<55,"percentile rank sanity");
 eq(percentileRank(Array(40).fill(5),5),50,"percentile ties use mid-rank");
 
-// Symmetric rounding must not produce a bullish bias around zero.
-eq(roundSym(.5),1,"positive half rounds away from zero");
-eq(roundSym(-.5),-1,"negative half rounds away from zero");
-eq(roundSym(-.49),0,"sub-half negative rounds to zero");
 
 // Canonical-unit contracts: equivalent providers must land in the same unit and impossible values are rejected.
 const DAY=864e5,NOW=Date.now(),ser=(n,v)=>Array.from({length:n},(_,i)=>({t:NOW-(n-1-i)*DAY,v}));
@@ -143,6 +139,9 @@ eq(quoteDispersion({okx:100000,bybit:null,kraken_usdt:null,coinbase_usdt:null},"
 // Deterministic issuance model backing the emergency market-cap reconstruction.
 ok(Math.abs(estimatedSupply(Date.UTC(2024,3,20))-19_687_500)<1,"supply anchored at the 2024 halving");
 ok(Math.abs(estimatedSupply(Date.UTC(2025,0,1))/19_804_167-1)<0.002,"supply model within 0.2% of Coin Metrics SplyCur");
+// The issuance epoch must step down at the (estimated) 2028 halving instead of drifting at 2x.
+{const d0=estimatedSupply(Date.UTC(2028,3,18))-estimatedSupply(Date.UTC(2028,3,17));ok(Math.abs(d0-225)<1,"post-2028 issuance is 225 BTC/day");}
+{const d1=estimatedSupply(Date.UTC(2027,0,2))-estimatedSupply(Date.UTC(2027,0,1));ok(Math.abs(d1-450)<1,"pre-2028 issuance is 450 BTC/day");}
 
 const src=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
 const selfSrc=readFileSync(new URL("./self-test.mjs",import.meta.url),"utf8");
@@ -156,7 +155,9 @@ ok(!src.includes('sort:"time"'),"unnecessary Coin Metrics time-sort increases qu
 ok(src.includes("const CM_HOSTS = CM_KEY"),"paid Coin Metrics host must be conditional on CM_API_KEY");
 ok(src.includes("api.exchange.coinbase.com/products/BTC-USD/candles"),"independent price history missing");
 ok(src.includes("get-product-candles"),"Coinbase history must link to candle documentation");
-ok(src.includes('User-Agent":"btc-21m-dashboard/2.7.2"'),"collector User-Agent/version stale");
+// The UA must be derived from VERSION, not a hand-updated literal that silently goes stale.
+ok(src.includes('User-Agent":"btc-21m-dashboard/"+VERSION'),"collector User-Agent must derive from VERSION");
+ok(!/btc-21m-dashboard\/\d/.test(src),"no hardcoded UA version literal");
 ok(src.includes("nonRetryable"),"permanent 4xx retry guard missing");
 ok(src.includes("Fast demand × Market integrity × Realized volatility"),"methodology text does not match tactical gate");
 ok(src.includes("mempool.space/api/v1/mining/hashrate"),"vendor-independent hashrate source missing");

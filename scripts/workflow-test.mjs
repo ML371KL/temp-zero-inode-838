@@ -9,7 +9,7 @@ assert.match(y,/path:\s*\.state\/cache\.json/,"state cache path missing");
 assert.match(y,/restore-keys:[\s\S]*btc21m-state-/,"rolling state restore key missing");
 assert.match(y,/node-version:\s*24/);
 assert.match(y,/package-manager-cache:\s*false/,"automatic package-manager cache must stay disabled");
-assert.match(y,/timeout-minutes:\s*20/);
+assert.match(y,/timeout-minutes:\s*30/,"job timeout must stay bounded (30m covers the worst-case retry budget across ~40 network calls)");
 // FRED_KEY is OPTIONAL (the collector has a keyless fredgraph.csv fallback): the workflow must not
 // hard-gate on it, or a keyless deployment — the project's headline promise — would fail CI.
 assert.doesNotMatch(y,/::error::[^\n]*FRED_KEY/,"FRED_KEY must stay optional — no hard secret gate");
@@ -48,7 +48,10 @@ assert.match(html,/SNAP\.version/,"UI version is not tied to snapshot version");
 // No literal version may be baked into the markup: it silently desynchronises from package.json.
 const baked=[...html.matchAll(/v\d+\.\d+\.\d+/g)].map(x=>x[0]);
 assert.deepEqual(baked,[],`hardcoded version in markup: ${baked.join(", ")}`);
-assert.match(html,/value="openai\/gpt-4o-mini"/,"default OpenRouter model must be an explicit valid slug");
+assert.match(html,/value="anthropic\/claude-fable-5"/,"default OpenRouter model must be an explicit valid slug");
+// The AI answer must stream: a fixed-timeout non-streaming request dies on reasoning models.
+assert.match(html,/"stream":?\s*true|stream:\s*true/,"OpenRouter request must use streaming");
+assert.match(html,/id="aiRemember"/,"opt-in remember-on-device checkbox missing");
 assert.match(html,/"X-OpenRouter-Title"/,"OpenRouter attribution should use the current X-OpenRouter-Title header");
 // The site MUST be deployed by the workflow itself. GitHub does not rebuild a "Deploy from a branch"
 // Pages site for commits pushed with the GITHUB_TOKEN — the run would be green, the data would land

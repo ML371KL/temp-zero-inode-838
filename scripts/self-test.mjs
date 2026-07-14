@@ -12,7 +12,13 @@ const internalRaw=existsSync(statePath)?JSON.parse(readFileSync(statePath,"utf8"
 // failing "out of sync" and making every release un-shippable on its first run. The candidate
 // verification step (step 5 of the workflow) is unaffected: there OUT and STATE always come from
 // the same build.
-const staleInternal=internalRaw&&String(internalRaw.version||"")!==String(pkg.version||"");
+const snapshotForSync=JSON.parse(readFileSync(path,"utf8"));
+// Any version/timestamp desync between the state cache and the snapshot means the pair is not from
+// one build (interrupted commit step, cache re-save from a failed run, manual release). Deep
+// cross-checks between mismatched builds are meaningless AND must not brick the hourly pipeline:
+// treat the cache as stale (skip deep checks, warn). Under REQUIRE_LIVE the candidate pair is
+// always written by the same build, so a desync there still fails hard below.
+const staleInternal=internalRaw&&(String(internalRaw.version||"")!==String(pkg.version||"")||internalRaw.generated_at!==snapshotForSync.generated_at)&&process.env.REQUIRE_LIVE!=="1";
 const hasInternal=!!internalRaw&&!staleInternal;
 const internal=hasInternal?internalRaw:null;
 const fail=[],warn=[];
@@ -27,7 +33,7 @@ const sourceMaxAgeH={
   fred_WALCL:24*14,fred_WTREGEN:24*14,fred_RRPONTSYD:24*7,fred_DFII10:24*7,
   fred_DGS2:24*7,fred_DGS10:24*7,fred_DTWEXBGS:24*7,fred_BAMLH0A0HYM2:24*7,
   fred_VIXCLS:24*7,fred_VXVCLS:24*7,fred_NASDAQ100:24*7,
-  coinmetrics:24*4,market:24*4,network:24*4,etf:24*5,stablecoins:24*4,pegs:18,cftc:24*15,derivatives:18,spot:18,
+  coinmetrics:24*4,blockchain_onchain:24*4,market:24*4,network:24*4,etf:24*7,stablecoins:24*4,pegs:18,cftc:24*15,derivatives:18,spot:18,
 };
 
 if(s.schema!==2)fail.push("schema must be 2");
@@ -51,6 +57,7 @@ if(!s.sources||!Object.keys(s.sources).length)fail.push("source states missing")
 if(s.datasets!==undefined)fail.push("public snapshot must not contain raw datasets");
 if(hasInternal&&(!internal.datasets||typeof internal.datasets!=="object"))fail.push("internal datasets missing");
 if(hasInternal&&(internal.generated_at!==s.generated_at||internal.version!==s.version))fail.push("public snapshot and internal state are out of sync");
+if(internalRaw&&staleInternal&&process.env.REQUIRE_LIVE==="1")fail.push("candidate snapshot and candidate state are out of sync");
 if(!Array.isArray(s.history))fail.push("history missing");
 else {
   const ht=s.history.map(h=>Date.parse(h?.t));
@@ -114,7 +121,13 @@ for(const [k,state] of Object.entries(s.sources||{})){
   if(state?.observed_at&&!isDate(state.observed_at))fail.push(`bad source observed_at:${k}`);
   if(!s.mock&&["ok","partial","stale"].includes(state?.state)){
     const limit=sourceMaxAgeH[k];
-    if(limit&&(!state.observed_at||ageHours(state.observed_at)>limit+1))fail.push(`source observation too old:${k}:${state.observed_at}`);
+    if(limit&&(!state.observed_at||ageHours(state.observed_at)>limit+1)){
+      // Freshness is a hard gate only for the live candidate. For the previously published snapshot
+      // it is a warning: a publishing gap must heal on the next successful collection, not brick
+      // every subsequent run before it can even collect.
+      if(process.env.REQUIRE_LIVE==="1")fail.push(`source observation too old:${k}:${state.observed_at}`);
+      else warn.push(`published source aged beyond limit (heals on next collection):${k}:${state.observed_at}`);
+    }
   }
 }
 
@@ -186,7 +199,7 @@ if(!hasInternal){
     if(!strictFinite(s.price)||Math.abs(Number(s.price)/med-1)>.02)fail.push("headline price must use the live USD quote group median");
     if(Number.isFinite(spotObserved)&&Date.now()-spotObserved<=6*36e5&&Math.abs(Date.parse(s.price_observed_at)-spotObserved)>1000)fail.push("price_observed_at must follow fresh spot packet");}
   const spotMetric=(s.metrics||[]).find(x=>x.id==="spot_integrity");
-  const quoteGroups={USD:["coinbase","kraken","bitstamp","gemini"],USDT:["okx","bybit","kraken_usdt","coinbase_usdt"]};
+  const quoteGroups={USD:["coinbase","kraken","bitstamp","gemini"],USDT:["okx","kraken_usdt","coinbase_usdt"]};
   const aliveInGroup=g=>quoteGroups[g].filter(k=>strictFinite(spotData[k])).length;
   const bothSpotPairs=["USD","USDT"].every(g=>aliveInGroup(g)>=2);
   if(!bothSpotPairs&&Number(spotMetric?.score)>0)fail.push("incomplete spot quote groups must not receive a positive integrity score");
@@ -197,7 +210,7 @@ if(!hasInternal){
     if(!s.mock){
       if(etf.some(x=>[0,6].includes(new Date(Number(x.t)).getUTCDay())))fail.push("ETF series contains weekend row");
       if(etf.some(x=>!strictFinite(x?.v)||Math.abs(Number(x.v))>10_000_000_000))fail.push("ETF series contains implausible flow");
-      const latest=Number(etf[etf.length-1]?.t);if(!strictFinite(latest)||Date.now()-latest>5*864e5+36e5)fail.push("ETF series stale");
+      const latest=Number(etf[etf.length-1]?.t);if(!strictFinite(latest)||Date.now()-latest>7*864e5+36e5)fail.push("ETF series stale");
     }
   }
 

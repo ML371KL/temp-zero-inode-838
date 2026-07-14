@@ -16,7 +16,7 @@ globalThis.fetch=async input=>{const u=String(input);
   if(mode==="onchain"){if(u.includes("bitcoin-data.com/v1/mvrv"))return json(Array.from({length:700},(_,i)=>({unixTs:Math.floor((NOW-(699-i)*DAY)/1000),mvrv:1.2+i/10000})));for(const name of ["n-unique-addresses","n-transactions","miners-revenue"])if(u.includes(`/charts/${name}`))return json(blockchain(name,700,name==="miners-revenue"?"USD":""));}
   if(mode==="etf"){if(u.includes("theblock.co"))return json({chart:{jsonFile:{Frequency:"Daily",Series:{"Total Net Flow":{Data:Array.from({length:200},(_,i)=>({Timestamp:Math.floor((NOW-(199-i)*DAY)/1000),Result:i%7===0?-2e8:1.2e8}))}}}}});}
   if(mode==="cftc"){if(u.includes(".json?"))return json({},503);if(u.includes(".csv?"))return text(cftcCsv());}
-  if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:"FI_XBTUSD_260925",tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"0.00001",openInterest:"2000000000"}});return json({},503);}
+  if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:"FI_XBTUSD_260925",tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"40000",openInterest:"2000000000"}});return json({},503);}
   throw new Error(`unexpected ${mode} URL ${u}`);
 };
 try{
@@ -29,6 +29,6 @@ try{
   mode="onchain";const o=await fetchBlockchainOnchain();assert.equal(o.data.MVRV.length,700);assert.equal(o.data.AdrActCnt.length,700);assert.equal(o.data.TxCnt.length,700);assert.equal(o.data.MinerRevUSD.length,700);
   mode="etf";const e=await fetchEtfFlows();assert.equal(e.source,"The Block");assert.ok(e.data.length>=100,`etf rows ${e.data.length}`);assert.ok(e.data.every(x=>![0,6].includes(new Date(x.t).getUTCDay())),"etf weekend rows leaked");
   mode="cftc";const c=await fetchCftc();assert.equal(c.partial,true);assert.match(c.source,/CSV/);assert.equal(c.data.length,24);
-  mode="derivatives";const d=await fetchDerivatives();assert.equal(d.partial,true);assert.equal(d.data.funding.length,1);assert.equal(d.data.funding[0].venue,"Kraken Futures");assert.equal(d.data.funding[0].rate8h,.00008);assert.equal(d.data.funding[0].oiUsd,2e9);assert.equal(d.data.basisSource,"Kraken Futures");assert.ok(Number.isFinite(d.data.basis));
+  mode="derivatives";const d=await fetchDerivatives();assert.equal(d.partial,true);assert.equal(d.data.funding.length,1);assert.equal(d.data.funding[0].venue,"Kraken Futures");assert.equal(d.data.funding[0].rate8h,.00008,"absolute Kraken funding * markPrice * 8");assert.equal(d.data.funding[0].oiUsd,2e9);assert.equal(d.data.basisSource,"Kraken Futures");assert.ok(Number.isFinite(d.data.basis));
   console.log("Fallback contract tests OK");
 }finally{globalThis.fetch=originalFetch;globalThis.setTimeout=originalSetTimeout;}

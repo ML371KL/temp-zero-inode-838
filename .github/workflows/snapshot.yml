@@ -25,7 +25,7 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -136,6 +136,11 @@ jobs:
             exit 0
           fi
           git commit -m "BTC snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
-          git fetch origin "$branch"
-          git rebase "origin/$branch"
-          git push origin "HEAD:$branch"
+          # Ретрай против гонки с параллельным ручным пушем: сайт уже развёрнут, и падение этого
+          # шага оставило бы репозиторий и кэш состояния рассинхронизированными до следующего цикла.
+          for attempt in 1 2 3; do
+            git fetch origin "$branch"
+            git rebase "origin/$branch" || { git rebase --abort; sleep $((attempt*5)); continue; }
+            git push origin "HEAD:$branch" && break
+            sleep $((attempt*5))
+          done
