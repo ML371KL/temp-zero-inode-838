@@ -43,6 +43,7 @@ const SOURCE_URLS = {
   deribit: "https://docs.deribit.com/api-reference/market-data/public-get_book_summary_by_currency",
   bybit: "https://bybit-exchange.github.io/docs/v5/market/tickers",
   okx: "https://www.okx.com/docs-v5/en/",
+  hyperliquid: "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint",
   coinbase: "https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker",
   kraken: "https://docs.kraken.com/api-reference/market-data/get-ticker-information",
   kraken_futures: "https://docs.kraken.com/api/docs/futures-api/trading/get-tickers/",
@@ -52,14 +53,14 @@ const SOURCE_URLS = {
   bitcoindata: "https://bitcoin-data.com/",
 };
 const SOURCE_URL_GROUPS = {
-  derivatives: [SOURCE_URLS.deribit, SOURCE_URLS.kraken_futures, SOURCE_URLS.bybit, SOURCE_URLS.okx],
-  spot: [SOURCE_URLS.coinbase, SOURCE_URLS.kraken, SOURCE_URLS.bitstamp, SOURCE_URLS.gemini, SOURCE_URLS.okx, SOURCE_URLS.bybit],
+  derivatives: [SOURCE_URLS.deribit, SOURCE_URLS.kraken_futures, SOURCE_URLS.okx, SOURCE_URLS.hyperliquid],
+  spot: [SOURCE_URLS.coinbase, SOURCE_URLS.kraken, SOURCE_URLS.bitstamp, SOURCE_URLS.gemini, SOURCE_URLS.okx],
 };
 // Venues are grouped by quote currency. USD and USDT are never mixed. Each group carries
 // redundant venues so that a single geo-blocked exchange cannot erase an entire quote group.
 const SPOT_QUOTE_GROUPS = {
   USD: ["coinbase", "kraken", "bitstamp", "gemini"],
-  USDT: ["okx", "bybit", "kraken_usdt", "coinbase_usdt"],
+  USDT: ["okx", "kraken_usdt", "coinbase_usdt"],
 };
 const uniqueHttps = values => [...new Set((values||[]).filter(x=>typeof x==="string"&&/^https:\/\//.test(x)))];
 const fredSeriesUrl = id => `https://fred.stlouisfed.org/series/${encodeURIComponent(id)}`;
@@ -213,6 +214,9 @@ async function request(url,{text=false,tries=3,headers={}}={}){
 async function settled(label,fn){try{return{ok:true,label,value:await fn()};}catch(error){return{ok:false,label,error:String(error?.message||error)}}}
 async function deribitRequest(url){const j=await request(url);if(j?.error)throw new Error(`Deribit ${j.error.code??""} ${j.error.message||"API error"}`.trim());return j;}
 async function bybitRequest(url){const j=await request(url);if(j?.retCode!==undefined&&Number(j.retCode)!==0)throw new Error(`Bybit ${j.retCode}: ${j.retMsg||"API error"}`);return j;}
+// Hyperliquid is a decentralised perp exchange: its public /info endpoint is POST-only and, being
+// crypto-native, is never geo-blocked from datacentre/CI IPs (unlike Bybit/OKX). Used for BTC funding + OI.
+async function hyperliquidRequest(body,tries=2){let err;for(let i=0;i<tries;i++){try{const r=await fetch("https://api.hyperliquid.xyz/info",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/2.7"},body:JSON.stringify(body),signal:AbortSignal.timeout(25_000)});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();if(j==null)throw new Error("empty response");return j;}catch(e){err=e;if(i<tries-1)await sleep(700);}}throw err;}
 async function okxRequest(url){
   const candidates=[
     String(url).replace("https://www.okx.com","https://openapi.okx.com"),
@@ -399,8 +403,8 @@ function makeMock(){
   const stable=mockWalk(1200,145e9,.0005,.003,51);datasets.stablecoins={data:stable,observed_at:iso(last(stable).t),fetched_at:iso(NOW),source:"defillama",source_url:SOURCE_URLS.defillama};sourceStates.stablecoins={state:"mock",source:"defillama",url:SOURCE_URLS.defillama,observed_at:iso(last(stable).t),fetched_at:iso(NOW)};
   datasets.pegs={data:{USDT:0.9997,USDC:1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"defillama",source_url:SOURCE_URLS.defillama};sourceStates.pegs={state:"mock",source:"defillama",url:SOURCE_URLS.defillama,observed_at:iso(NOW),fetched_at:iso(NOW)};
   const cot=Array.from({length:160},(_,i)=>({t:NOW-(159-i)*7*DAY,oi:25000+i*20,assetLong:7500+i*8,assetShort:1800+i*2,levLong:2500+i*3,levShort:11000+i*11}));datasets.cftc={data:cot,observed_at:iso(last(cot).t),fetched_at:iso(NOW),source:"cftc",source_url:SOURCE_URLS.cftc};sourceStates.cftc={state:"mock",source:"cftc",url:SOURCE_URLS.cftc,observed_at:iso(last(cot).t),fetched_at:iso(NOW)};
-  datasets.derivatives={data:{funding:[{venue:"Deribit",rate8h:.00011,oiUsd:1.1e9},{venue:"Bybit",rate8h:.00013,oiUsd:4.8e9},{venue:"OKX",rate8h:.00009,oiUsd:3.1e9}],basis:9.2,dvol:55,dvolSeries:mockWalk(730,52,0,.025,61),skew:4.5,optionExpiry:iso(NOW+35*DAY)},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Deribit · Kraken Futures · Bybit · OKX",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives};sourceStates.derivatives={state:"mock",source:"Deribit · Kraken Futures · Bybit · OKX",url:SOURCE_URLS.deribit,urls:SOURCE_URL_GROUPS.derivatives,observed_at:iso(NOW),fetched_at:iso(NOW)};
-  datasets.spot={data:{coinbase:last(price).v*1.0003,kraken:last(price).v,bitstamp:last(price).v*.9998,okx:last(price).v*.9998,bybit:last(price).v*1.0001,kraken_usdt:last(price).v*.9999,coinbase_usdt:last(price).v*1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Coinbase · Kraken · Bitstamp · OKX · Bybit",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot};sourceStates.spot={state:"mock",source:"Coinbase · Kraken · Bitstamp · OKX · Bybit",url:SOURCE_URLS.coinbase,urls:SOURCE_URL_GROUPS.spot,observed_at:iso(NOW),fetched_at:iso(NOW)};
+  datasets.derivatives={data:{funding:[{venue:"Deribit",rate8h:.00011,oiUsd:1.1e9},{venue:"Hyperliquid",rate8h:.00013,oiUsd:4.8e9},{venue:"OKX",rate8h:.00009,oiUsd:3.1e9}],basis:9.2,dvol:55,dvolSeries:mockWalk(730,52,0,.025,61),skew:4.5,optionExpiry:iso(NOW+35*DAY)},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives};sourceStates.derivatives={state:"mock",source:"Deribit · Kraken Futures · OKX · Hyperliquid",url:SOURCE_URLS.deribit,urls:SOURCE_URL_GROUPS.derivatives,observed_at:iso(NOW),fetched_at:iso(NOW)};
+  datasets.spot={data:{coinbase:last(price).v*1.0003,kraken:last(price).v,bitstamp:last(price).v*.9998,okx:last(price).v*.9998,kraken_usdt:last(price).v*.9999,coinbase_usdt:last(price).v*1.0002},observed_at:iso(NOW),fetched_at:iso(NOW),source:"Coinbase · Kraken · Bitstamp · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot};sourceStates.spot={state:"mock",source:"Coinbase · Kraken · Bitstamp · OKX",url:SOURCE_URLS.coinbase,urls:SOURCE_URL_GROUPS.spot,observed_at:iso(NOW),fetched_at:iso(NOW)};
   for(const [k,d] of Object.entries(datasets)){
     const urls=uniqueHttps(d.source_urls?.length?d.source_urls:[d.source_url]);
     d.source_urls=urls;
@@ -555,7 +559,7 @@ async function fetchDerivatives(){
     settled("deribit options",()=>deribitRequest("https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option")),
     settled("deribit dvol",()=>deribitRequest(`https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=BTC&start_timestamp=${start}&end_timestamp=${NOW}&resolution=1D`)),
     settled("deribit perpetual",()=>deribitRequest("https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL")),
-    settled("bybit ticker",()=>bybitRequest("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT")),
+    settled("hyperliquid",()=>hyperliquidRequest({type:"metaAndAssetCtxs"})),
     settled("okx funding",()=>okxRequest("https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP")),
     settled("okx oi",()=>okxRequest("https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP")),
     settled("kraken futures",()=>request("https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",{tries:2})),
@@ -563,13 +567,12 @@ async function fetchDerivatives(){
   ]);
   const byLabel=Object.fromEntries(tasks.filter(x=>x.ok).map(x=>[x.label,x.value])),errors=tasks.filter(x=>!x.ok).map(x=>`${x.label}: ${x.error}`);
   const futures=byLabel["deribit futures"]?.result||[],options=byLabel["deribit options"]?.result||[],der=byLabel["deribit perpetual"]?.result||{};
-  const by=byLabel["bybit ticker"]?.result?.list?.[0]||{},okf=byLabel["okx funding"]?.data?.[0]||{},oko=byLabel["okx oi"]?.data?.[0]||{},kf=byLabel["kraken futures"]||{};
+  const hl=byLabel["hyperliquid"]||[],hlUni=hl?.[0]?.universe||[],hlIdx=hlUni.findIndex(u=>u?.name==="BTC"),hlCtx=hlIdx>=0?(hl?.[1]?.[hlIdx]||{}):{},okf=byLabel["okx funding"]?.data?.[0]||{},oko=byLabel["okx oi"]?.data?.[0]||{},kf=byLabel["kraken futures"]||{};
   if(byLabel["kraken futures"]&&kf.result!=="success")errors.push(`kraken futures: ${kf.error||kf.result||"business error"}`);
-  const byHours=finite(by.fundingIntervalHour)&&Number(by.fundingIntervalHour)>0?Number(by.fundingIntervalHour):8;
   const okHours=finite(okf.fundingTime)&&finite(okf.nextFundingTime)&&Number(okf.nextFundingTime)>Number(okf.fundingTime)?(Number(okf.nextFundingTime)-Number(okf.fundingTime))/HOUR:8;
   const funding=[
     {venue:"Deribit",rate8h:num(der.funding_8h),oiUsd:num(der.open_interest),intervalHours:8},
-    {venue:"Bybit",rate8h:finite(by.fundingRate)?Number(by.fundingRate)*8/byHours:null,oiUsd:num(by.openInterestValue),intervalHours:byHours},
+    {venue:"Hyperliquid",rate8h:finite(hlCtx.funding)?Number(hlCtx.funding)*8:null,oiUsd:finite(hlCtx.openInterest)&&finite(hlCtx.markPx)?Number(hlCtx.openInterest)*Number(hlCtx.markPx):null,intervalHours:1},
     {venue:"OKX",rate8h:finite(okf.fundingRate)?Number(okf.fundingRate)*8/okHours:null,oiUsd:num(oko.oiUsd),intervalHours:okHours},
     // Kraken PI_XBTUSD fundingRate is hourly; the inverse contract is quoted in $1 contracts,
     // therefore openInterest is directly comparable to USD notional from the other venues.
@@ -587,9 +590,9 @@ async function fetchDerivatives(){
   const ex=opt.length?Math.min(...opt.map(x=>x.expiry)):null,near=opt.filter(x=>x.expiry===ex),under=median(near.map(x=>x.underlying_price));
   const pIv=under?median(near.filter(x=>x.type==="P"&&x.strike/under>.84&&x.strike/under<.94).map(x=>x.mark_iv)):null;
   const cIv=under?median(near.filter(x=>x.type==="C"&&x.strike/under>1.06&&x.strike/under<1.16).map(x=>x.mark_iv)):null;
-  const times=[der.timestamp,byLabel["bybit ticker"]?.time,okf.ts,oko.ts,Date.parse(kf.serverTime||"")].map(Number).filter(t=>Number.isFinite(t)&&t>Date.UTC(2020,0,1)&&t<NOW+HOUR);
+  const times=[der.timestamp,okf.ts,oko.ts,Date.parse(kf.serverTime||"")].map(Number).filter(t=>Number.isFinite(t)&&t>Date.UTC(2020,0,1)&&t<NOW+HOUR);
   const observedAt=times.length?iso(Math.min(...times)):iso(NOW);
-  return {data:{funding,basis,basisSource,dvol:last(dvolSeries)?.v??null,dvolSeries,skew:finite(pIv)&&finite(cIv)?pIv-cIv:null,optionExpiry:ex?iso(ex):null,components:tasks.map(x=>({name:x.label,ok:x.ok}))},observed_at:observedAt,source:"Deribit · Kraken Futures · Bybit · OKX",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,partial:errors.length>0,errors};
+  return {data:{funding,basis,basisSource,dvol:last(dvolSeries)?.v??null,dvolSeries,skew:finite(pIv)&&finite(cIv)?pIv-cIv:null,optionExpiry:ex?iso(ex):null,components:tasks.map(x=>({name:x.label,ok:x.ok}))},observed_at:observedAt,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,partial:errors.length>0,errors};
 }
 async function fetchSpot(){
   const tasks=await Promise.all([
@@ -598,10 +601,9 @@ async function fetchSpot(){
     settled("bitstamp",()=>request("https://www.bitstamp.net/api/v2/ticker/btcusd/")),
     settled("gemini",()=>request("https://api.gemini.com/v1/pubticker/BTCUSD",{tries:2})),
     settled("okx",()=>okxRequest("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT")),
-    settled("bybit",()=>bybitRequest("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT")),
-    // OKX and Bybit are unreachable from most US datacentre ranges. Kraken and Coinbase both list a
-    // USDT book, so the USDT quote group keeps two independent venues even when the offshore
-    // exchanges are geo-blocked. Their failure is free: they are settled tasks like any other.
+    // OKX is often unreachable (HTTP 403) from US datacentre ranges. Kraken and Coinbase both list a
+    // USDT book, so the USDT quote group keeps two independent US-reachable venues even when OKX is
+    // geo-blocked. (Bybit was dropped — it is permanently 403 from CI IPs and added no coverage.)
     settled("kraken_usdt",()=>krakenRequest("https://api.kraken.com/0/public/Ticker?pair=XBTUSDT")),
     settled("coinbase_usdt",()=>request("https://api.exchange.coinbase.com/products/BTC-USDT/ticker")),
   ]);
@@ -613,7 +615,6 @@ async function fetchSpot(){
     bitstamp:num(r.bitstamp?.last),
     gemini:num(r.gemini?.last),
     okx:num(r.okx?.data?.[0]?.last),
-    bybit:num(r.bybit?.result?.list?.[0]?.lastPrice),
     kraken_usdt:num(krUsdtRow?.c?.[0]),
     coinbase_usdt:num(r.coinbase_usdt?.price),
   };
@@ -626,10 +627,9 @@ async function fetchSpot(){
   if(sanePrice(data.coinbase)){const t=Date.parse(r.coinbase?.time||"");if(Number.isFinite(t))times.push(t);}
   if(sanePrice(data.coinbase_usdt)){const t=Date.parse(r.coinbase_usdt?.time||"");if(Number.isFinite(t))times.push(t);}
   if(sanePrice(data.okx)){const t=Number(r.okx?.data?.[0]?.ts);if(Number.isFinite(t))times.push(t);}
-  if(sanePrice(data.bybit)){const t=Number(r.bybit?.time);if(Number.isFinite(t))times.push(t);}
   if(sanePrice(data.gemini)){const t=Number(r.gemini?.timestampms||r.gemini?.timestamp);if(Number.isFinite(t))times.push(t<1e12?t*1000:t);}
   const validTimes=times.filter(t=>t>Date.UTC(2020,0,1)&&t<NOW+HOUR);
-  return {data,observed_at:validTimes.length?iso(Math.min(...validTimes)):iso(NOW),source:"Coinbase · Kraken · Bitstamp · Gemini · OKX · Bybit",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot,partial:errors.length>0,errors};
+  return {data,observed_at:validTimes.length?iso(Math.min(...validTimes)):iso(NOW),source:"Coinbase · Kraken · Bitstamp · Gemini · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot,partial:errors.length>0,errors};
 }
 async function collect(){
   if(MOCK){makeMock();return;}
@@ -792,14 +792,14 @@ function buildMetrics(){
   // IV. Плечо и волатильность
   const der=data("derivatives")||{},fund=der.funding||[],weightedRows=fund.filter(x=>finite(x.rate8h)&&finite(x.oiUsd)&&Number(x.oiUsd)>0),oiTotal=sumOrNull(weightedRows.map(x=>x.oiUsd)),weightedFunding=oiTotal?sum(weightedRows.map(x=>x.rate8h*x.oiUsd))/oiTotal:median(fund.map(x=>x.rate8h)),fundPct=finite(weightedFunding)?weightedFunding*100:null,basis=num(der.basis);
   const carryScore=componentScore([customScore(fundPct,[[v=>v>.05,-2],[v=>v>.02,-1],[v=>v>-.02,1],[v=>v>-.05,0],[()=>true,-1]]),customScore(basis,[[v=>v<0,-1],[v=>v<3,0],[v=>v<12,1],[v=>v<20,0],[v=>v<30,-1],[()=>true,-2]])]);
-  add({id:"carry_regime",block:"leverage",family:"carry",name:"Funding и фьючерсный carry",horizon:"short",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:carryScore,value:finite(carryScore)?(carryScore>=1?"сбалансировано":carryScore<=-1?"перегрето / стресс":"смешанно"):"—",delta:finite(fundPct)&&finite(basis)?`funding ${fundPct>=0?"+":""}${fundPct.toFixed(3)}%/8ч · basis ${basis.toFixed(1)}% (${der.basisSource||"—"})`:"",note:"Funding нормируется к 8 часам и агрегируется с весом USD OI. Annualized basis берётся с ближайшего сопоставимого датированного фьючерса Deribit, а при его отсутствии — Kraken Futures. Умеренное контанго нормально.",score:carryScore,source:"Deribit · Kraken Futures · Bybit · OKX",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
-  add({id:"funding",block:"leverage",family:"carry",name:"Агрегированный funding",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:fundPct,value:finite(fundPct)?`${fundPct>=0?"+":""}${fundPct.toFixed(3)}% / 8ч`:"—",delta:`площадки ${fund.length}`,note:"Компонент семейства. Отрицательный экстремум — не автоматически бычий сигнал, а потенциальное топливо short squeeze.",score:null,source:"Deribit · Kraken Futures · Bybit · OKX",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
+  add({id:"carry_regime",block:"leverage",family:"carry",name:"Funding и фьючерсный carry",horizon:"short",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:carryScore,value:finite(carryScore)?(carryScore>=1?"сбалансировано":carryScore<=-1?"перегрето / стресс":"смешанно"):"—",delta:finite(fundPct)&&finite(basis)?`funding ${fundPct>=0?"+":""}${fundPct.toFixed(3)}%/8ч · basis ${basis.toFixed(1)}% (${der.basisSource||"—"})`:"",note:"Funding нормируется к 8 часам и агрегируется с весом USD OI. Annualized basis берётся с ближайшего сопоставимого датированного фьючерса Deribit, а при его отсутствии — Kraken Futures. Умеренное контанго нормально.",score:carryScore,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
+  add({id:"funding",block:"leverage",family:"carry",name:"Агрегированный funding",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:fundPct,value:finite(fundPct)?`${fundPct>=0?"+":""}${fundPct.toFixed(3)}% / 8ч`:"—",delta:`площадки ${fund.length}`,note:"Компонент семейства. Отрицательный экстремум — не автоматически бычий сигнал, а потенциальное топливо short squeeze.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives")});
 
   const currentOiByVenue=Object.fromEntries(weightedRows.map(x=>[x.venue,Number(x.oiUsd)])),currentVenues=Object.keys(currentOiByVenue),hist=(previous?.history||[]).slice().sort((a,b)=>Date.parse(a.t)-Date.parse(b.t)),oiSeries=hist.map(h=>{const t=Date.parse(h.t),by=h.raw?.oi_by_venue,vals=currentVenues.map(k=>by?.[k]);return currentVenues.length>=2&&vals.every(finite)?{t,v:sum(vals)}:null;}).filter(Boolean);if(finite(oiTotal))oiSeries.push({t:NOW,v:oiTotal});
   const priorOi=(days)=>{const target=NOW-days*DAY;let found=null;for(const h of hist){const t=Date.parse(h.t);if(t<=target&&h.raw?.oi_by_venue)found=h;else if(t>target)break;}return found?.raw?.oi_by_venue||null;};
   const oi7=percentChangeCommonVenues(currentOiByVenue,priorOi(7));
   let oiScore=null,oiText="история накапливается";if(finite(oi7)&&finite(p7)){if(p7<-5&&oi7>3){oiScore=-2;oiText="цена ↓, OI ↑";}else if(p7>3&&oi7>15){oiScore=-1;oiText="рост на быстром наборе OI";}else if(p7<-5&&oi7<-8){oiScore=1;oiText="очистка OI на падении";}else if(Math.abs(oi7)<8){oiScore=1;oiText="OI стабилен";}else{oiScore=0;oiText="смешанная динамика";}}
-  add({id:"oi_quality",block:"leverage",family:"oi",name:"Качество движения · цена × OI",horizon:"short",role:"leading",method:"derived",strategic:false,tactical:true,value_num:oiScore,value:oiText,delta:finite(oi7)&&finite(p7)?`цена 7д ${p7.toFixed(1)}% · OI ${oi7.toFixed(1)}%`:finite(oiTotal)?`OI ${formatCompact(oiTotal,1)} $`:"",note:"История OI накапливается самим проектом. Падение со сбросом OI — очистка; падение с ростом OI — наращивание риска.",score:oiScore,source:"Deribit · Kraken Futures · Bybit · OKX",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives"),series:oiSeries});
+  add({id:"oi_quality",block:"leverage",family:"oi",name:"Качество движения · цена × OI",horizon:"short",role:"leading",method:"derived",strategic:false,tactical:true,value_num:oiScore,value:oiText,delta:finite(oi7)&&finite(p7)?`цена 7д ${p7.toFixed(1)}% · OI ${oi7.toFixed(1)}%`:finite(oiTotal)?`OI ${formatCompact(oiTotal,1)} $`:"",note:"История OI накапливается самим проектом. Падение со сбросом OI — очистка; падение с ростом OI — наращивание риска.",score:oiScore,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,...sourceMeta("derivatives"),series:oiSeries});
 
   // Realized volatility is derived from the price series alone. It is the one leverage-block input
   // that cannot be removed by a geo-block, and it therefore anchors the tactical gate instead of
@@ -821,7 +821,7 @@ function buildMetrics(){
   // V. Качество цены
   const usdDisp=quoteDispersion(spot,"USD"),usdtDisp=quoteDispersion(spot,"USDT"),spreads=[usdDisp,usdtDisp].filter(finite),disp=spreads.length?Math.max(...spreads):null,completeSpotPairs=finite(usdDisp)&&finite(usdtDisp);
   const integrityScore=completeSpotPairs?customScore(disp,[[v=>v<20,1],[v=>v<50,0],[v=>v<100,-1],[()=>true,-2]]):customScore(disp,[[v=>v<50,null],[v=>v<100,-1],[()=>true,-2]]);
-  add({id:"spot_integrity",block:"market",family:"integrity",name:"Синхронность спотовых площадок",horizon:"fast",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:disp,value:finite(disp)?`${disp.toFixed(0)} б.п.`:"—",delta:`USD ${finite(usdDisp)?usdDisp.toFixed(0):"—"} · USDT ${finite(usdtDisp)?usdtDisp.toFixed(0):"—"} б.п.`,note:"USD-площадки (Coinbase/Kraken/Bitstamp/Gemini) и USDT-площадки (OKX/Bybit) сравниваются только внутри одинаковой валюты котирования. Положительный голос требует обеих полных пар; одна доступная группа может только предупредить о расхождении.",score:integrityScore,source:"Coinbase · Kraken · Bitstamp · Gemini · OKX · Bybit",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot,...sourceMeta("spot")});
+  add({id:"spot_integrity",block:"market",family:"integrity",name:"Синхронность спотовых площадок",horizon:"fast",role:"leading",method:"mechanical",strategic:false,tactical:true,value_num:disp,value:finite(disp)?`${disp.toFixed(0)} б.п.`:"—",delta:`USD ${finite(usdDisp)?usdDisp.toFixed(0):"—"} · USDT ${finite(usdtDisp)?usdtDisp.toFixed(0):"—"} б.п.`,note:"USD-площадки (Coinbase/Kraken/Bitstamp/Gemini) и USDT-площадки (OKX/Kraken/Coinbase) сравниваются только внутри одинаковой валюты котирования. Положительный голос требует обеих полных пар; одна доступная группа может только предупредить о расхождении.",score:integrityScore,source:"Coinbase · Kraken · Bitstamp · Gemini · OKX",source_url:SOURCE_URLS.coinbase,source_urls:SOURCE_URL_GROUPS.spot,...sourceMeta("spot")});
 
   const vol=marketSeries("volume"),volCh=changeOfAverage(vol,30,30);let volumeScore=null,volumeText="—";
   if(finite(volCh)&&finite(p30)){if(p30>5&&volCh>10){volumeScore=1;volumeText="рост подтверждён объёмом";}else if(p30<-5&&volCh>15){volumeScore=-1;volumeText="продажи подтверждены объёмом";}else if(Math.abs(p30)<5){volumeScore=0;volumeText="боковой режим";}else{volumeScore=0;volumeText="движение без сильного подтверждения";}}

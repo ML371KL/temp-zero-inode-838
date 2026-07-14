@@ -34,7 +34,7 @@ trigger a GitHub Pages build.»* При источнике «Deploy from a branc
 снимок. Поэтому workflow публикует сайт сам (`upload-pages-artifact` → `deploy-pages`), а коммит
 остаётся только ради истории. `workflow-test` следит, чтобы эти шаги не пропали.
 
-Снимок обновляется раз в 8 часов. Живой кандидат собирается во временные файлы и попадает в `docs/`
+Снимок обновляется раз в час. Живой кандидат собирается во временные файлы и попадает в `docs/`
 только после строгой проверки — на сайте всегда остаётся последний подтверждённый снимок.
 
 ---
@@ -59,8 +59,8 @@ trigger a GitHub Pages build.»* При источнике «Deploy from a branc
 | Доход майнеров | Coin Metrics (эмиссия + комиссии) | blockchain.info (total) | — | — | USD/день |
 | Пеги USDT/USDC | DefiLlama | медиана Kraken/Coinbase/Gemini | — | — | USD за токен |
 | CFTC | Socrata (краткие имена) | Socrata (`_all`) | — | — | контракты |
-| Спот | 3 USD-площадки | 4 USDT-площадки | — | — | USD |
-| Деривативы | Deribit | Bybit, OKX | — | — | USD; funding за 8ч |
+| Спот | 4 USD-площадки | 3 USDT-площадки (OKX + Kraken/Coinbase USDT) | — | — | USD |
+| Деривативы | Deribit | Kraken Futures, OKX, **Hyperliquid** (geo-free) | — | — | USD; funding за 8ч |
 
 ### Ловушка, из-за которой контракт существует
 

@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import assert from "node:assert/strict";
 const y=readFileSync(new URL("../.github/workflows/snapshot.yml",import.meta.url),"utf8");
-assert.match(y,/cron:\s*"23 \*\/8 \* \* \*"/,"8-hour schedule missing");
+assert.match(y,/cron:\s*"23 \* \* \* \*"/,"hourly schedule missing");
 assert.match(y,/actions\/checkout@v6/);
 assert.match(y,/actions\/setup-node@v6/);
 assert.match(y,/actions\/cache@v5/,"internal state must use Actions cache");

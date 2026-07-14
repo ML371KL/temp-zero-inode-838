@@ -15,7 +15,7 @@ const fixtures=new Map([
   ]}],
   [null,{result:{data:[[now-864e5,49,52,48,51],[now,50,53,49,52]]}}],
   ["https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL",{result:{funding_8h:0.0001,open_interest:1_200_000_000,index_price:100_000,timestamp:now-500}}],
-  ["https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT",{time:now-400,result:{list:[{fundingRate:"0.00005",fundingIntervalHour:"4",openInterestValue:"2000000000"}]}}],
+  ["https://api.hyperliquid.xyz/info",[{universe:[{name:"BTC"}]},[{funding:"0.0000125",openInterest:"30000",markPx:"100000"}]]],
   ["https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP",{data:[{fundingRate:"0.00008",fundingTime:String(now-8*3600e3),nextFundingTime:String(now),ts:String(now-300)}]}],
   ["https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP",{data:[{oiUsd:"3000000000",ts:String(now-250)}]}],
   ["https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{fundingRate:"0.00001",openInterest:"1500000000"}}],
@@ -60,7 +60,8 @@ try{
   assert.equal(d.partial,false);
   assert.equal(d.source_urls.length,4,"all derivative source links exposed");
   assert.equal(d.data.funding.length,4);
-  assert.equal(d.data.funding.find(x=>x.venue==="Bybit").rate8h,0.0001,"4h Bybit funding normalized to 8h");
+  assert.equal(d.data.funding.find(x=>x.venue==="Hyperliquid").rate8h,0.0001,"hourly Hyperliquid funding normalized to 8h");
+  assert.equal(d.data.funding.find(x=>x.venue==="Hyperliquid").oiUsd,3_000_000_000,"Hyperliquid OI = openInterest(BTC) × markPx (USD)");
   assert.equal(d.data.funding.find(x=>x.venue==="Deribit").oiUsd,1_200_000_000,"Deribit OI remains USD, no price multiplication");
   assert.equal(d.data.funding.find(x=>x.venue==="Kraken Futures").rate8h,0.00008,"hourly Kraken funding normalized to 8h");
   assert.ok(d.data.basis>20&&d.data.basis<30,"annualized dated-future basis");
@@ -69,8 +70,8 @@ try{
 
   const spot=await fetchSpot();
   assert.equal(spot.partial,false);
-  assert.equal(spot.source_urls.length,6,"all spot source links exposed");
-  assert.deepEqual(spot.data,{coinbase:100050,kraken:100000,bitstamp:100060,gemini:100055,okx:100020,bybit:100010,kraken_usdt:100030,coinbase_usdt:100040});
+  assert.equal(spot.source_urls.length,5,"all spot source links exposed");
+  assert.deepEqual(spot.data,{coinbase:100050,kraken:100000,bitstamp:100060,gemini:100055,okx:100020,kraken_usdt:100030,coinbase_usdt:100040});
   assert.ok(Date.parse(spot.observed_at)<=now&&Date.parse(spot.observed_at)>=now-1000,"spot timestamp propagated");
 
   const pegs=await fetchPegs();
@@ -93,10 +94,10 @@ try{
   const partial=await fetchDerivatives();
   assert.equal(partial.partial,true,"partial derivative packet is marked");
   assert.equal(partial.data.funding.length,4,"funding/OI survives an options failure");
-  forcedFailure="category=spot&symbol=BTCUSDT";
+  forcedFailure="bitstamp.net/api";
   const partialSpot=await fetchSpot();
   assert.equal(partialSpot.partial,true,"partial spot packet is marked");
-  assert.equal(partialSpot.data.coinbase,100050,"complete USD pair survives an offshore venue failure");
+  assert.equal(partialSpot.data.coinbase,100050,"other USD venues survive a single spot venue failure");
   forcedFailure=null;
 
   // HTTP 200 with an impossible secondary quote is rejected before dispersion/override logic.
@@ -111,14 +112,6 @@ try{
   fixtures.set(okxUrl,okxFixture);
 
   // HTTP 200 with venue-level error codes must be treated as a failed component.
-  const bybitDerivUrl="https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT";
-  const bybitDerivFixture=fixtures.get(bybitDerivUrl);
-  fixtures.set(bybitDerivUrl,{retCode:10001,retMsg:"bad request",result:{list:[]}});
-  const businessErrorDeriv=await fetchDerivatives();
-  assert.equal(businessErrorDeriv.partial,true,"Bybit business error marks derivatives partial");
-  assert.equal(businessErrorDeriv.data.funding.some(x=>x.venue==="Bybit"),false,"Bybit business error cannot leak an empty/invalid component");
-  fixtures.set(bybitDerivUrl,bybitDerivFixture);
-
   const okxFundingUrl="https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP";
   const okxFundingFixture=fixtures.get(okxFundingUrl);
   fixtures.set(okxFundingUrl,{code:"51000",msg:"parameter error",data:[]});
@@ -144,15 +137,15 @@ try{
   fixtures.set(krakenUrl,krakenFixture);
   globalThis.setTimeout=originalSetTimeout;
 
-  // US-runner geo-block: both offshore venues disappear. The USDT quote group must survive on the
+  // US-runner geo-block: the offshore venue (OKX) disappears. The USDT quote group must survive on the
   // two US-reachable venues, otherwise spot_integrity loses its vote and the tactical verdict dies.
   globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
   forcedFailure="okx.com";
   const geo=await fetchSpot();
-  assert.equal(geo.partial,true,"geo-blocked venues mark the spot packet partial");
+  assert.equal(geo.partial,true,"geo-blocked venue marks the spot packet partial");
   assert.equal(geo.data.okx,null,"OKX unavailable");
   assert.equal(quoteGroupPrices(geo.data,"USD").length,4,"USD group intact (Coinbase/Kraken/Bitstamp/Gemini)");
-  assert.equal(quoteGroupPrices(geo.data,"USDT").length,3,"USDT group keeps Bybit plus both US venues");
+  assert.equal(quoteGroupPrices(geo.data,"USDT").length,2,"USDT group keeps both US venues (kraken_usdt, coinbase_usdt)");
   assert.ok(Number.isFinite(quoteDispersion(geo.data,"USDT")),"USDT dispersion still computable without OKX");
   forcedFailure=null;
   globalThis.setTimeout=originalSetTimeout;

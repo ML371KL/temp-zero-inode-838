@@ -2,7 +2,7 @@ name: Обновление Bitcoin-снимка
 
 on:
   schedule:
-    - cron: "23 */8 * * *"
+    - cron: "23 * * * *"
   workflow_dispatch:
   push:
     branches: [main]
