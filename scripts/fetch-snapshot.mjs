@@ -919,7 +919,7 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   let tactical="balanced";
   if(!criticalTactical)tactical="insufficient";
   else if(levDet==="fired"&&demandDet==="fired")tactical="deleveraging";
-  else if(L!=null&&L<=-35&&Q!=null&&Q<=-15)tactical="fragile";
+  else if(L!=null&&L<=-35&&Q!=null&&Q<=0)tactical="fragile";
   else if(L!=null&&L<=-35&&Q!=null&&Q>0)tactical="overheated_supported";
   else if(L!=null&&L>=15&&Q!=null&&Q>=15&&K>=-20)tactical="spot_led";
   else if(detectors.find(x=>x.id==="short_squeeze")?.state==="good")tactical="short_squeeze";
