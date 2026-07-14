@@ -1,0 +1,29 @@
+{
+  "downloaded_at": "2026-07-14T12:36:54.438Z",
+  "results": {
+    "fred_WALCL": "ok (1230)",
+    "fred_WTREGEN": "ok (1230)",
+    "fred_RRPONTSYD": "ok (3281)",
+    "fred_DFII10": "ok (5884)",
+    "fred_DGS2": "ok (12523)",
+    "fred_DGS10": "ok (16115)",
+    "fred_DTWEXBGS": "ok (5144)",
+    "fred_BAMLH0A0HYM2": "ok (785)",
+    "fred_VIXCLS": "ok (9227)",
+    "fred_VXVCLS": "ok (4678)",
+    "fred_NASDAQ100": "ok (10211)",
+    "price_coinbase": "ok (4013)",
+    "etf_flows": "ok (625)",
+    "stablecoins": "ok (2636)",
+    "mvrv": "ok (1461)",
+    "bc_hashrate": "ok (6398)",
+    "bc_difficulty": "ok (6398)",
+    "bc_addresses": "ok (6372)",
+    "bc_transactions": "ok (6384)",
+    "bc_miner_revenue": "ok (6387)",
+    "bc_price_all": "ok (6402)",
+    "cftc": "ok (431)",
+    "dvol": "ok (1939)",
+    "coinmetrics": "ok (9)"
+  }
+}

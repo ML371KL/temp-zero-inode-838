@@ -1,0 +1,196 @@
+{
+ "regimes27": {
+  "deteriorating": {
+   "days": 966,
+   "fwd90": 7.7,
+   "hit": 0.51
+  },
+  "transition": {
+   "days": 808,
+   "fwd90": 16.1,
+   "hit": 0.51
+  },
+  "defensive": {
+   "days": 472,
+   "fwd90": 6.1,
+   "hit": 0.52
+  },
+  "constructive": {
+   "days": 166,
+   "fwd90": 36.2,
+   "hit": 0.76
+  },
+  "unconfirmed_positive": {
+   "days": 159,
+   "fwd90": 42.2,
+   "hit": 0.89
+  }
+ },
+ "regimes28": {
+  "deteriorating": {
+   "days": 353,
+   "fwd90": 11.8,
+   "hit": 0.6
+  },
+  "transition": {
+   "days": 1456,
+   "fwd90": 15.2,
+   "hit": 0.54
+  },
+  "defensive": {
+   "days": 562,
+   "fwd90": 0.9,
+   "hit": 0.41
+  },
+  "constructive": {
+   "days": 110,
+   "fwd90": 37.6,
+   "hit": 0.89
+  },
+  "unconfirmed_positive": {
+   "days": 90,
+   "fwd90": 55.3,
+   "hit": 1
+  }
+ },
+ "whipsaw27": {
+  "changesPerYear": 62,
+  "medianDwellDays": 3
+ },
+ "whipsaw28": {
+  "changesPerYear": 33.8,
+  "medianDwellDays": 5
+ },
+ "sim": {
+  "2022": {
+   "hodl": {
+    "total": -65.4,
+    "cagr": -65.4,
+    "vol": 63.8,
+    "sharpe": -1.29,
+    "maxDD": -67,
+    "turnover": 1
+   },
+   "v27": {
+    "total": -24.1,
+    "cagr": -24.1,
+    "vol": 23.9,
+    "sharpe": -1.21,
+    "maxDD": -27,
+    "turnover": 10.2
+   },
+   "v28": {
+    "total": -23.8,
+    "cagr": -23.8,
+    "vol": 17.4,
+    "sharpe": -0.95,
+    "maxDD": -28,
+    "turnover": 9.6
+   }
+  },
+  "full": {
+   "hodl": {
+    "total": 500.7,
+    "cagr": 29,
+    "vol": 61.6,
+    "sharpe": 0.72,
+    "maxDD": -76.7,
+    "turnover": 1
+   },
+   "v27": {
+    "total": 340.2,
+    "cagr": 23.4,
+    "vol": 32.4,
+    "sharpe": 0.92,
+    "maxDD": -55.8,
+    "turnover": 110.4
+   },
+   "v28": {
+    "total": 317.4,
+    "cagr": 22.5,
+    "vol": 31.9,
+    "sharpe": 1,
+    "maxDD": -54.2,
+    "turnover": 71.4
+   }
+  },
+  "2019-2021": {
+   "hodl": {
+    "total": 336.9,
+    "cagr": 80.1,
+    "vol": 76.7,
+    "sharpe": 1.15,
+    "maxDD": -61.4,
+    "turnover": 1
+   },
+   "v27": {
+    "total": 125.7,
+    "cagr": 38.4,
+    "vol": 42.5,
+    "sharpe": 1.03,
+    "maxDD": -40.5,
+    "turnover": 33.2
+   },
+   "v28": {
+    "total": 94.1,
+    "cagr": 30.3,
+    "vol": 42.6,
+    "sharpe": 1.02,
+    "maxDD": -38.9,
+    "turnover": 23.6
+   }
+  },
+  "2023-2024": {
+   "hodl": {
+    "total": 462,
+    "cagr": 136.8,
+    "vol": 48.9,
+    "sharpe": 2.01,
+    "maxDD": -26.2,
+    "turnover": 1
+   },
+   "v27": {
+    "total": 169.1,
+    "cagr": 63.9,
+    "vol": 27.6,
+    "sharpe": 2.14,
+    "maxDD": -20.2,
+    "turnover": 36.7
+   },
+   "v28": {
+    "total": 174.2,
+    "cagr": 65.5,
+    "vol": 27.7,
+    "sharpe": 2.27,
+    "maxDD": -16.8,
+    "turnover": 26.4
+   }
+  },
+  "2025-2026": {
+   "hodl": {
+    "total": -32.7,
+    "cagr": -22.7,
+    "vol": 44.1,
+    "sharpe": -0.35,
+    "maxDD": -53.1,
+    "turnover": 1
+   },
+   "v27": {
+    "total": -7.1,
+    "cagr": -4.7,
+    "vol": 22.2,
+    "sharpe": 0.31,
+    "maxDD": -23.6,
+    "turnover": 32
+   },
+   "v28": {
+    "total": 1.3,
+    "cagr": 0.8,
+    "vol": 22.1,
+    "sharpe": 0.18,
+    "maxDD": -19,
+    "turnover": 13.1
+   }
+  }
+ }
+}
