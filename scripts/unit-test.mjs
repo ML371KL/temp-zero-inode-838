@@ -90,7 +90,9 @@ ok(Number.isFinite(Date.parse(qEmpty.observed_at)),"empty Coin Metrics packet st
 const candles=parseCoinbaseCandles([[1750000000,90000,101000,95000,100000,1234.5],[1749913600,89000,99000,94000,98000,1000]]);
 eq(candles.length,2,"Coinbase candles parsed");
 eq(candles[0].v,100000,"close price is index 4, not open");
-ok(candles[0].t<candles[1].t===false||true,"candles keep day-aligned timestamps");
+// Coinbase returns newest-first; ordering is normalized upstream (fetchCoinbaseHistory). The
+// parser contract is DAY-ALIGNMENT: every timestamp lands exactly on a UTC midnight.
+ok(candles.every(c=>c.t%864e5===0),"candles are aligned to UTC midnights");
 eq(parseCoinbaseCandles([[1750000000,1,2,3,4,5]]).length,0,"implausible candle close rejected");
 const mp=parseMempoolHashrate({hashrates:[{timestamp:1749913600,avgHashrate:6e20},{timestamp:1750000000,avgHashrate:6.1e20}],difficulty:[{time:1750000000,difficulty:8e13}]});
 eq(mp.hashrate.length,2,"mempool hashrate parsed");

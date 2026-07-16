@@ -73,4 +73,18 @@ const requiredDocs=[
 ];
 for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation/source host missing: ${host}`);
 
+
+// Strategy strip: the backtested contract must stay literally in the markup.
+assert.match(html,/PCT=\{emergency:0,defensive:5,deteriorating:20,transition:45,unconfirmed_positive:95,constructive:100\}/,"strip ladder drifted from the backtested 0/5/20/45/95/100");
+assert.match(html,/recovGood&&!shockFired&&t<80/,"recovery overlay must be gated on macro_shock and capped at 80");
+assert.match(html,/mvrvPct<=10&&t<40/,"capitulation floor 40 missing");
+assert.match(html,/mvrvPct>=95&&t>60/,"euphoria cap 60 missing");
+assert.match(html,/ageH>12/,"12h snapshot age gate missing from the strip");
+assert.match(html,/модельная иллюстрация, не персональная рекомендация/,"strip disclaimer missing");
+// mdRender must escape BEFORE inline markdown substitution (XSS ordering).
+const mdIdx=html.indexOf("function mdRender");assert.ok(mdIdx>0,"mdRender missing");
+const mdBody=html.slice(mdIdx,html.indexOf("function",mdIdx+10));
+assert.ok(mdBody.indexOf("esc(")>=0&&mdBody.indexOf("esc(")<mdBody.indexOf("<b>"),"mdRender must escape before markdown substitution");
+// The page must re-render periodically so freshness captions and the 12h gate stay honest.
+assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-render missing");
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);

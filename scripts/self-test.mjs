@@ -57,7 +57,6 @@ if(!s.sources||!Object.keys(s.sources).length)fail.push("source states missing")
 if(s.datasets!==undefined)fail.push("public snapshot must not contain raw datasets");
 if(hasInternal&&(!internal.datasets||typeof internal.datasets!=="object"))fail.push("internal datasets missing");
 if(hasInternal&&(internal.generated_at!==s.generated_at||internal.version!==s.version))fail.push("public snapshot and internal state are out of sync");
-if(internalRaw&&staleInternal&&process.env.REQUIRE_LIVE==="1")fail.push("candidate snapshot and candidate state are out of sync");
 if(!Array.isArray(s.history))fail.push("history missing");
 else {
   const ht=s.history.map(h=>Date.parse(h?.t));

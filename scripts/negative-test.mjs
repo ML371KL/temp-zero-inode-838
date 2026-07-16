@@ -43,4 +43,18 @@ try{
   expectFail("optimism without valuation",(x,state)=>{x.scores.valuation_available=false;x.regime.strategic="constructive"},/optimistic verdict issued without valuation/i);
   expectFail("stale optional Coin Metrics series retained",(x,state)=>{const a=state.datasets.coinmetrics.data.CapMVRVCur;a[a.length-1].t=Date.now()-10*864e5},/Coin Metrics optional series retained while stale:CapMVRVCur/i);
 } finally {try{unlinkSync(path)}catch{}try{unlinkSync(statePath)}catch{}try{unlinkSync(generatedBasePath)}catch{}try{unlinkSync(generatedStatePath)}catch{}}
+
+// stabilize(): a stale optimistic anchor must never outrank today's candidate. Craft a previous
+// state that sat in an outage with anchor=constructive while the mock candidate is defensive:
+// the published regime must follow the candidate (risk-off is fast), not the resurrected anchor.
+{
+  const prevPath=join(tmpdir(),`btc21m-anchor-prev-${process.pid}.json`),outPath=join(tmpdir(),`btc21m-anchor-out-${process.pid}.json`),statePath2=join(tmpdir(),`btc21m-anchor-state-${process.pid}.json`);
+  const old=new Date(Date.now()-3*3600e3).toISOString();
+  writeFileSync(prevPath,JSON.stringify({mock:false,version:"0.0.0",generated_at:old,regime:{strategic:"insufficient",tactical:"insufficient"},regime_meta:{strategic:{candidate:"insufficient",count:3,since:old,anchor:"constructive",downStreak:0},tactical:{candidate:"insufficient",count:3,since:old,anchor:"balanced",downStreak:0}},history:[]}));
+  const r=spawnSync(process.execPath,[fileURLToPath(new URL("./fetch-snapshot.mjs",import.meta.url))],{encoding:"utf8",env:{...process.env,MOCK:"1",OUT:outPath,STATE:statePath2,PREVIOUS_STATE:prevPath,PREVIOUS_PUBLIC:prevPath}});
+  if(r.status!==0)throw new Error(`anchor scenario build failed:\n${r.stdout||""}${r.stderr||""}`);
+  const snap=JSON.parse(readFileSync(outPath,"utf8"));
+  if(snap.regime.strategic==="constructive")throw new Error(`stale optimistic anchor resurrected: published ${snap.regime.strategic} while candidate was ${snap.regime_meta.strategic.candidate}`);
+  try{unlinkSync(prevPath)}catch{}try{unlinkSync(outPath)}catch{}try{unlinkSync(statePath2)}catch{}
+}
 console.log("Negative validation tests OK");
