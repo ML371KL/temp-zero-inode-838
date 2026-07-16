@@ -31,7 +31,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       # fetch-depth: 1. Публикация делает rebase на свежий tip ветки — полная история не нужна,
-      # а полный клон дорожает каждый день, потому что snapshot.json переписывается трижды в сутки.
+      # а полный клон дорожает каждый день: snapshot.json переписывается десятки раз в сутки.
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
@@ -136,11 +136,18 @@ jobs:
             exit 0
           fi
           git commit -m "BTC snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
-          # Ретрай против гонки с параллельным ручным пушем: сайт уже развёрнут, и падение этого
-          # шага оставило бы репозиторий и кэш состояния рассинхронизированными до следующего цикла.
+          # Ретрай против гонки с параллельным ручным пушем. Каждый сбойный путь внутри цикла
+          # обёрнут (set -e не должен убивать шаг на полпути), а полный провал трёх попыток
+          # обязан покраснеть: молчаливая дивергенция «сайт обновлён — репозиторий нет» хуже
+          # красного прогона (self-test теперь переживает рассинхрон, но скрывать его нельзя).
+          pushed=0
           for attempt in 1 2 3; do
-            git fetch origin "$branch"
-            git rebase "origin/$branch" || { git rebase --abort; sleep $((attempt*5)); continue; }
-            git push origin "HEAD:$branch" && break
+            git fetch origin "$branch" || { sleep $((attempt*5)); continue; }
+            git rebase "origin/$branch" || { git rebase --abort || true; sleep $((attempt*5)); continue; }
+            if git push origin "HEAD:$branch"; then pushed=1; break; fi
             sleep $((attempt*5))
           done
+          if [ "$pushed" != "1" ]; then
+            echo "::error::snapshot commit was not pushed after 3 attempts"
+            exit 1
+          fi

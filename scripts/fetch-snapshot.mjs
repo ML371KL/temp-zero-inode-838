@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.8.2";
+const VERSION = "2.8.3";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -1050,14 +1050,19 @@ function stabilize(candidate,type,hard){
   // would let the first snapshot back adopt an upgrade instantly.
   const heldLongEnough=NOW-Date.parse(since)>=UPGRADE_HOLD_H*HOUR&&count>=UPGRADE_MIN_SNAPSHOTS;
   const adopt=(count>=2&&(!upgrade||heldLongEnough))||(worse&&downStreak>=2);
-  return{state:adopt?candidate:prev,candidate,count,since,downStreak,anchor:["insufficient","emergency"].includes(adopt?candidate:prev)?anchor:(adopt?candidate:prev)};
+  // While an upgrade out of a DEGRADED state is being held, publish the anchor (the last real
+  // regime): data has recovered, so the headline must not keep saying «НЕДОСТАТОЧНО ДАННЫХ» for
+  // two more days — but the better candidate still earns its hold before being adopted.
+  const held=!adopt&&["insufficient","emergency"].includes(prev)&&anchor?anchor:prev;
+  const state=adopt?candidate:held;
+  return{state,candidate,count,since,downStreak,anchor:["insufficient","emergency"].includes(state)?anchor:state};
 }
 function behaviors(s,t){
   const medium={constructive:"Базовая экспозиция режимно оправдана; добавления лучше делать ступенчато и не игнорировать тактический перегрев.",unconfirmed_positive:"Не наращивать экспозицию агрессивно: макро и цикл поддерживают рынок, но реальный маржинальный спрос недостаточен.",transition:"Сохранять умеренную экспозицию и ждать согласования потоков, макро и структуры предложения.",deteriorating:"Сократить риск новых добавлений, повысить запас ликвидности и требовать восстановления спроса перед увеличением позиции.",defensive:"Приоритет — сохранение капитала; увеличение экспозиции только после разворота потоков и восстановления ценовых опор.",insufficient:"Не делать вывод из панели: критические блоки покрыты недостаточно.",emergency:"Приоритет — контроль контрагентского и ликвидностного риска; обычный скоринг временно недействителен."}[s];
   const short={spot_led:"Краткосрочные добавления допустимы после обычных откатов, пока ETF/спот и чистое плечо подтверждают движение.",balanced:"Не форсировать вход: структура нейтральна, решения лучше привязывать к среднесрочному режиму.",overheated_supported:"Среднесрочную позицию не путать с новым входом: избегать погони за ценой и ждать очистки funding/OI.",fragile:"Новые добавления отложить; рынок уязвим к каскаду даже без изменения среднесрочной картины.",demand_break:"Маржинальный спрос сломан при спокойном плече: не покупать откаты и не ждать «очистки» — падению без плеча нечего очищать; дождаться стабилизации ETF-потоков и спот-премии.",deleveraging:"Тактически защитный режим: дождаться сброса OI, стабилизации funding и возвращения спот-поддержки.",short_squeeze:"Возможен резкий отскок, но он не является подтверждением нового среднесрочного бычьего режима.",insufficient:"Краткосрочный вывод недоступен из-за неполных данных.",emergency:"Не полагаться на обычные котировки и сигналы до восстановления паритета и синхронности площадок."}[t];
   return{medium,short};
 }
-function phase(s,t,detectors){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(detectors?.find(x=>x.id==="recovery")?.state==="good"&&["transition","deteriorating","defensive"].includes(s))return"Фаза 0 · капитуляция позади? восстановление подтверждается потоками";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["balanced","short_squeeze"].includes(t))return"Фаза 1 · конструктивный режим, тактика нейтральна";if(["transition","unconfirmed_positive"].includes(s)&&t==="spot_led")return"Фаза 1 → · спот ведёт, среднесрок ещё не подтвердил";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";return"Фаза перехода · сигналы не согласованы";}
+function phase(s,t,detectors){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(detectors?.find(x=>x.id==="recovery")?.state==="good"&&["transition","deteriorating","defensive"].includes(s))return"Фаза 0 · капитуляция позади? восстановление подтверждается потоками";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["balanced","short_squeeze"].includes(t))return"Фаза 1 · конструктивный режим, тактика нейтральна";if(["transition","unconfirmed_positive"].includes(s)&&t==="spot_led")return"Фаза 1 → · спот ведёт, среднесрок ещё не подтвердил";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging","demand_break"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";return"Фаза перехода · сигналы не согласованы";}
 
 function compute(){
   const metrics=buildMetrics(),blocks={};
@@ -1105,8 +1110,8 @@ function compute(){
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
       mechanical_metrics:"stablecoin peg, funding, basis, spreads and price-to-moving-average relations use economic/mechanical thresholds",
       regime_logic:"strategic = Macro × Demand × Cycle, negative ladder anchored on Demand (lone adverse macro/cycle => transition; demand adverse => deteriorating; two adverse => defensive); tactical = Fast demand × Market integrity × Realized volatility; leverage is penalty-only fragility evidence",
-      hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h; hard override is immediate",
-      detector_power:"macro_shock fired caps the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; both keep anchor+confirmation structure",
+      hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h AND at least 12 observed snapshots; hard override is immediate",
+      detector_power:"macro_shock or distribution fired cap the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; all three keep anchor+confirmation structure",
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),
       tactical_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.tacticalWeight])),

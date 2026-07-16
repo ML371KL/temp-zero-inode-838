@@ -104,7 +104,7 @@ for(const m of s.metrics||[]){
 if(families.size!==20)fail.push(`voting families must be 20:${families.size}`);
 
 for(const d of s.detectors||[]){
-  if(!d.id||!d.name||!["calm","watch","fired","positive","good"].includes(d.state))fail.push(`bad detector:${d.id}`);
+  if(!d.id||!d.name||!["calm","watch","fired","good"].includes(d.state))fail.push(`bad detector:${d.id}`);
 }
 
 for(const [k,state] of Object.entries(s.sources||{})){
