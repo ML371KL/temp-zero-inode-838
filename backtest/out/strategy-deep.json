@@ -1,0 +1,658 @@
+{
+ "regimeDays": {
+  "transition": {
+   "days": 2560,
+   "fwd90": 33.1,
+   "hit": 0.61
+  },
+  "deteriorating": {
+   "days": 877,
+   "fwd90": 60.2,
+   "hit": 0.58
+  },
+  "constructive": {
+   "days": 235,
+   "fwd90": 77.9,
+   "hit": 0.88
+  },
+  "defensive": {
+   "days": 1180,
+   "fwd90": 6.6,
+   "hit": 0.43
+  },
+  "unconfirmed_positive": {
+   "days": 91,
+   "fwd90": 54.5,
+   "hit": 0.99
+  }
+ },
+ "variants": {
+  "hodl": {
+   "2022": {
+    "total": -65.4,
+    "cagr": -65.4,
+    "vol": 63.8,
+    "sharpe": -1.29,
+    "maxDD": -67,
+    "changesPerYear": 0
+   },
+   "full 2013-2026": {
+    "total": 467773,
+    "cagr": 86.6,
+    "vol": 75.9,
+    "sharpe": 1.2,
+    "maxDD": -84.9,
+    "changesPerYear": 0
+   },
+   "2013-2016": {
+    "total": 7067.7,
+    "cagr": 190.8,
+    "vol": 90.2,
+    "sharpe": 1.64,
+    "maxDD": -84.9,
+    "changesPerYear": 0
+   },
+   "2017-2018": {
+    "total": 271.8,
+    "cagr": 92.8,
+    "vol": 89.5,
+    "sharpe": 1.19,
+    "maxDD": -83.8,
+    "changesPerYear": 0
+   },
+   "2019-2021": {
+    "total": 1107.8,
+    "cagr": 129.3,
+    "vol": 76,
+    "sharpe": 1.5,
+    "maxDD": -62.4,
+    "changesPerYear": 0
+   },
+   "2023-2024": {
+    "total": 462,
+    "cagr": 136.8,
+    "vol": 48.9,
+    "sharpe": 2.01,
+    "maxDD": -26.2,
+    "changesPerYear": 0
+   },
+   "2025-2026": {
+    "total": -32.7,
+    "cagr": -22.7,
+    "vol": 44.1,
+    "sharpe": -0.35,
+    "maxDD": -53.1,
+    "changesPerYear": 0
+   }
+  },
+  "origNoOvl": {
+   "2022": {
+    "total": -18,
+    "cagr": -18,
+    "vol": 14.5,
+    "sharpe": -0.63,
+    "maxDD": -21,
+    "changesPerYear": 26
+   },
+   "full 2013-2026": {
+    "total": 12827.9,
+    "cagr": 43.2,
+    "vol": 28.7,
+    "sharpe": 1.61,
+    "maxDD": -48.3,
+    "changesPerYear": 38.6
+   },
+   "2013-2016": {
+    "total": 448.1,
+    "cagr": 53,
+    "vol": 28.9,
+    "sharpe": 1.89,
+    "maxDD": -47,
+    "changesPerYear": 48.2
+   },
+   "2017-2018": {
+    "total": 172.9,
+    "cagr": 65.2,
+    "vol": 30.1,
+    "sharpe": 1.97,
+    "maxDD": -27,
+    "changesPerYear": 40
+   },
+   "2019-2021": {
+    "total": 287.7,
+    "cagr": 57,
+    "vol": 36.7,
+    "sharpe": 1.55,
+    "maxDD": -36.4,
+    "changesPerYear": 29
+   },
+   "2023-2024": {
+    "total": 140.3,
+    "cagr": 54.9,
+    "vol": 24,
+    "sharpe": 2.35,
+    "maxDD": -14.1,
+    "changesPerYear": 50.9
+   },
+   "2025-2026": {
+    "total": 8.2,
+    "cagr": 5.3,
+    "vol": 19.3,
+    "sharpe": 0.48,
+    "maxDD": -18.7,
+    "changesPerYear": 22.2
+   }
+  },
+  "origOvl": {
+   "2022": {
+    "total": -8.1,
+    "cagr": -8.1,
+    "vol": 18.4,
+    "sharpe": -0.46,
+    "maxDD": -18.2,
+    "changesPerYear": 47
+   },
+   "full 2013-2026": {
+    "total": 20377.3,
+    "cagr": 48.1,
+    "vol": 30.1,
+    "sharpe": 1.6,
+    "maxDD": -46.4,
+    "changesPerYear": 44.5
+   },
+   "2013-2016": {
+    "total": 541.1,
+    "cagr": 59.1,
+    "vol": 31.1,
+    "sharpe": 1.62,
+    "maxDD": -45.4,
+    "changesPerYear": 56.5
+   },
+   "2017-2018": {
+    "total": 172.2,
+    "cagr": 65,
+    "vol": 30.8,
+    "sharpe": 2.1,
+    "maxDD": -29.1,
+    "changesPerYear": 44
+   },
+   "2019-2021": {
+    "total": 333.6,
+    "cagr": 63,
+    "vol": 37.6,
+    "sharpe": 1.65,
+    "maxDD": -36.4,
+    "changesPerYear": 31.6
+   },
+   "2023-2024": {
+    "total": 155.1,
+    "cagr": 59.6,
+    "vol": 25.3,
+    "sharpe": 2.46,
+    "maxDD": -14.1,
+    "changesPerYear": 52.9
+   },
+   "2025-2026": {
+    "total": 10.4,
+    "cagr": 6.7,
+    "vol": 19.7,
+    "sharpe": 0.55,
+    "maxDD": -18.7,
+    "changesPerYear": 25.4
+   }
+  },
+  "deployed": {
+   "2022": {
+    "total": -7.8,
+    "cagr": -7.8,
+    "vol": 18.4,
+    "sharpe": -0.44,
+    "maxDD": -18.2,
+    "changesPerYear": 47
+   },
+   "full 2013-2026": {
+    "total": 17380.4,
+    "cagr": 46.4,
+    "vol": 29.4,
+    "sharpe": 1.6,
+    "maxDD": -46.2,
+    "changesPerYear": 44.5
+   },
+   "2013-2016": {
+    "total": 438.9,
+    "cagr": 52.3,
+    "vol": 29.4,
+    "sharpe": 1.57,
+    "maxDD": -45,
+    "changesPerYear": 56.5
+   },
+   "2017-2018": {
+    "total": 161.8,
+    "cagr": 61.8,
+    "vol": 29.8,
+    "sharpe": 2.09,
+    "maxDD": -27,
+    "changesPerYear": 44
+   },
+   "2019-2021": {
+    "total": 352.8,
+    "cagr": 65.4,
+    "vol": 37.2,
+    "sharpe": 1.7,
+    "maxDD": -36,
+    "changesPerYear": 31.6
+   },
+   "2023-2024": {
+    "total": 153.9,
+    "cagr": 59.2,
+    "vol": 26.3,
+    "sharpe": 2.43,
+    "maxDD": -13.8,
+    "changesPerYear": 52.9
+   },
+   "2025-2026": {
+    "total": 11.7,
+    "cagr": 7.5,
+    "vol": 19.7,
+    "sharpe": 0.62,
+    "maxDD": -19.1,
+    "changesPerYear": 25.4
+   }
+  },
+  "deployedNoOvl": {
+   "2022": {
+    "total": -17.7,
+    "cagr": -17.7,
+    "vol": 14.5,
+    "sharpe": -0.6,
+    "maxDD": -20.4,
+    "changesPerYear": 26
+   },
+   "full 2013-2026": {
+    "total": 10933,
+    "cagr": 41.5,
+    "vol": 28,
+    "sharpe": 1.61,
+    "maxDD": -47.7,
+    "changesPerYear": 38.6
+   },
+   "2013-2016": {
+    "total": 361,
+    "cagr": 46.5,
+    "vol": 27,
+    "sharpe": 1.86,
+    "maxDD": -46.6,
+    "changesPerYear": 48.2
+   },
+   "2017-2018": {
+    "total": 162.4,
+    "cagr": 62,
+    "vol": 29,
+    "sharpe": 1.96,
+    "maxDD": -24.8,
+    "changesPerYear": 40
+   },
+   "2019-2021": {
+    "total": 305.2,
+    "cagr": 59.4,
+    "vol": 36.3,
+    "sharpe": 1.58,
+    "maxDD": -36,
+    "changesPerYear": 29
+   },
+   "2023-2024": {
+    "total": 139.1,
+    "cagr": 54.5,
+    "vol": 25,
+    "sharpe": 2.33,
+    "maxDD": -13.8,
+    "changesPerYear": 50.9
+   },
+   "2025-2026": {
+    "total": 9.5,
+    "cagr": 6.1,
+    "vol": 19.3,
+    "sharpe": 0.55,
+    "maxDD": -19.1,
+    "changesPerYear": 22.2
+   }
+  }
+ },
+ "grid": {
+  "topBySharpe": [
+   {
+    "unc": 1,
+    "tra": 0.45,
+    "det": 0.2,
+    "def": 0,
+    "sharpe": 1.66,
+    "cagr": 43.4,
+    "maxDD": -41.8,
+    "minEraSharpe": -0.02
+   },
+   {
+    "unc": 0.9,
+    "tra": 0.45,
+    "det": 0.2,
+    "def": 0,
+    "sharpe": 1.65,
+    "cagr": 43.1,
+    "maxDD": -41.8,
+    "minEraSharpe": -0.02
+   },
+   {
+    "unc": 0.9,
+    "tra": 0.45,
+    "det": 0.3,
+    "def": 0,
+    "sharpe": 1.65,
+    "cagr": 47.5,
+    "maxDD": -42.3,
+    "minEraSharpe": -0.06
+   },
+   {
+    "unc": 1,
+    "tra": 0.45,
+    "det": 0.3,
+    "def": 0,
+    "sharpe": 1.65,
+    "cagr": 47.8,
+    "maxDD": -42.3,
+    "minEraSharpe": -0.06
+   },
+   {
+    "unc": 0.7,
+    "tra": 0.45,
+    "det": 0.2,
+    "def": 0,
+    "sharpe": 1.64,
+    "cagr": 42.3,
+    "maxDD": -41.8,
+    "minEraSharpe": -0.02
+   },
+   {
+    "unc": 0.8,
+    "tra": 0.45,
+    "det": 0.2,
+    "def": 0,
+    "sharpe": 1.64,
+    "cagr": 42.7,
+    "maxDD": -41.8,
+    "minEraSharpe": -0.02
+   },
+   {
+    "unc": 0.8,
+    "tra": 0.45,
+    "det": 0.3,
+    "def": 0,
+    "sharpe": 1.64,
+    "cagr": 47.1,
+    "maxDD": -42.3,
+    "minEraSharpe": -0.06
+   },
+   {
+    "unc": 1,
+    "tra": 0.55,
+    "det": 0.3,
+    "def": 0,
+    "sharpe": 1.64,
+    "cagr": 52,
+    "maxDD": -48.2,
+    "minEraSharpe": -0.07
+   }
+  ],
+  "topByRobustness": [
+   {
+    "unc": 0.9,
+    "tra": 0.45,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.61,
+    "cagr": 38.5,
+    "maxDD": -41.3,
+    "minEraSharpe": 0.03
+   },
+   {
+    "unc": 1,
+    "tra": 0.45,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.61,
+    "cagr": 38.8,
+    "maxDD": -41.3,
+    "minEraSharpe": 0.03
+   },
+   {
+    "unc": 0.8,
+    "tra": 0.45,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.6,
+    "cagr": 38.1,
+    "maxDD": -41.3,
+    "minEraSharpe": 0.03
+   },
+   {
+    "unc": 0.7,
+    "tra": 0.45,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.59,
+    "cagr": 37.8,
+    "maxDD": -41.3,
+    "minEraSharpe": 0.03
+   },
+   {
+    "unc": 0.9,
+    "tra": 0.55,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.58,
+    "cagr": 42.4,
+    "maxDD": -47.3,
+    "minEraSharpe": 0.01
+   },
+   {
+    "unc": 1,
+    "tra": 0.55,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.58,
+    "cagr": 42.8,
+    "maxDD": -47.3,
+    "minEraSharpe": 0.01
+   },
+   {
+    "unc": 0.8,
+    "tra": 0.55,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.57,
+    "cagr": 42,
+    "maxDD": -47.3,
+    "minEraSharpe": 0.01
+   },
+   {
+    "unc": 0.7,
+    "tra": 0.55,
+    "det": 0.1,
+    "def": 0,
+    "sharpe": 1.56,
+    "cagr": 41.7,
+    "maxDD": -47.3,
+    "minEraSharpe": 0.01
+   }
+  ],
+  "deployedRank": {
+   "sharpe": 1.6,
+   "beatenBy": 31,
+   "of": 192
+  }
+ },
+ "overlays": {
+  "none": {
+   "2022": -17.7,
+   "full": {
+    "total": 10933,
+    "sharpe": 1.61,
+    "maxDD": -47.7
+   },
+   "2013-2016": 361,
+   "2017-2018": 162.4,
+   "2019-2021": 305.2,
+   "2023-2024": 139.1,
+   "2025-2026": 9.5
+  },
+  "recov": {
+   "2022": -17.7,
+   "full": {
+    "total": 12597.2,
+    "sharpe": 1.6,
+    "maxDD": -47.7
+   },
+   "2013-2016": 372.9,
+   "2017-2018": 162.4,
+   "2019-2021": 323.7,
+   "2023-2024": 151.4,
+   "2025-2026": 11.7
+  },
+  "cheap": {
+   "2022": -7.8,
+   "full": {
+    "total": 15089.3,
+    "sharpe": 1.61,
+    "maxDD": -46.6
+   },
+   "2013-2016": 425.3,
+   "2017-2018": 161.8,
+   "2019-2021": 333,
+   "2023-2024": 141.5,
+   "2025-2026": 9.5
+  },
+  "cap": {
+   "2022": -17.7,
+   "full": {
+    "total": 10933,
+    "sharpe": 1.61,
+    "maxDD": -47.7
+   },
+   "2013-2016": 361,
+   "2017-2018": 162.4,
+   "2019-2021": 305.2,
+   "2023-2024": 139.1,
+   "2025-2026": 9.5
+  },
+  "all": {
+   "2022": -7.8,
+   "full": {
+    "total": 17380.4,
+    "sharpe": 1.6,
+    "maxDD": -46.2
+   },
+   "2013-2016": 438.9,
+   "2017-2018": 161.8,
+   "2019-2021": 352.8,
+   "2023-2024": 153.9,
+   "2025-2026": 11.7
+  },
+  "cheap50": {
+   "2022": -4.2,
+   "full": {
+    "total": 16704.3,
+    "sharpe": 1.6,
+    "maxDD": -47
+   },
+   "2013-2016": 446.7,
+   "2017-2018": 161.3,
+   "2019-2021": 342,
+   "2023-2024": 142.6,
+   "2025-2026": 9.5
+  },
+  "cheap30": {
+   "2022": -11.2,
+   "full": {
+    "total": 13580.1,
+    "sharpe": 1.62,
+    "maxDD": -46.5
+   },
+   "2013-2016": 404,
+   "2017-2018": 162.2,
+   "2019-2021": 324,
+   "2023-2024": 140.3,
+   "2025-2026": 9.5
+  },
+  "recov60": {
+   "2022": -17.7,
+   "full": {
+    "total": 11659.7,
+    "sharpe": 1.6,
+    "maxDD": -47.7
+   },
+   "2013-2016": 370.2,
+   "2017-2018": 162.4,
+   "2019-2021": 311.3,
+   "2023-2024": 144.5,
+   "2025-2026": 10.2
+  },
+  "recov80": {
+   "2022": -17.7,
+   "full": {
+    "total": 13591.4,
+    "sharpe": 1.6,
+    "maxDD": -47.7
+   },
+   "2013-2016": 375.5,
+   "2017-2018": 162.4,
+   "2019-2021": 336.3,
+   "2023-2024": 158.4,
+   "2025-2026": 13.2
+  },
+  "cap50": {
+   "2022": -17.7,
+   "full": {
+    "total": 10536,
+    "sharpe": 1.61,
+    "maxDD": -47.6
+   },
+   "2013-2016": 361,
+   "2017-2018": 158,
+   "2019-2021": 297.3,
+   "2023-2024": 139.1,
+   "2025-2026": 9.5
+  },
+  "cap75": {
+   "2022": -17.7,
+   "full": {
+    "total": 10933,
+    "sharpe": 1.61,
+    "maxDD": -47.7
+   },
+   "2013-2016": 361,
+   "2017-2018": 162.4,
+   "2019-2021": 305.2,
+   "2023-2024": 139.1,
+   "2025-2026": 9.5
+  }
+ },
+ "expCapBinding": {
+  "days": 0,
+  "episodes": []
+ },
+ "cheapFloorBinding": {
+  "days": 188,
+  "episodes": [
+   "2014-10-04",
+   "2014-10-29",
+   "2014-11-01",
+   "2014-11-03",
+   "2014-12-18",
+   "2014-12-30",
+   "2015-01-13",
+   "2015-01-20",
+   "2015-02-01",
+   "2015-04-09",
+   "2015-05-06",
+   "2015-05-18"
+  ]
+ }
+}

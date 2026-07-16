@@ -87,7 +87,7 @@ const priceCb = load("price_coinbase") || [];
 const bcPrice = load("bc_price_all") || [];
 const etf = load("etf_flows") || [];
 const stable = load("stablecoins") || [];
-const CM_EARLY = load("coinmetrics") || {};
+const CM_EARLY = load("coinmetrics_deep") || load("coinmetrics") || {};
 // Engine prefers Coin Metrics MVRV; bitcoin-data.com free tier only serves the last 4 years.
 const mvrv = (CM_EARLY.CapMVRVCur || []).length >= 500 ? CM_EARLY.CapMVRVCur : (load("mvrv") || []);
 const hash = load("bc_hashrate") || [];
@@ -97,7 +97,7 @@ const txs = load("bc_transactions") || [];
 const minerRev = load("bc_miner_revenue") || [];
 const cftc = load("cftc") || [];
 const dvolS = load("dvol") || [];
-const CM = load("coinmetrics") || {};
+const CM = load("coinmetrics_deep") || load("coinmetrics") || {};
 
 // price: Coinbase primary (2015+), extended backward with blockchain.info for MA warmup only
 const cbStart = priceCb.length ? priceCb[0].t : Infinity;
@@ -367,12 +367,24 @@ function computeAt(t, { relaxEtfGate = false } = {}) {
 }
 
 // ---- run over evaluation grid ----
-const startT = Date.UTC(2018, 0, 1);
+const startT = Date.UTC(2012, 0, 1);
 const evalDates = price.filter(p => p.t >= startT).map(p => p.t);
 const rows = [];
 for (const t of evalDates) {
   const strict = computeAt(t);
   const relaxed = computeAt(t, { relaxEtfGate: true });
+  // Era view: families that did not yet EXIST as products are excluded from expected coverage,
+  // reconstructing "the panel as it could have been built in that era".
+  const eraDemand = ["exchange_supply"];
+  if (t >= Date.UTC(2018, 5, 1)) eraDemand.push("institutional");
+  if (t >= Date.UTC(2019, 8, 1)) eraDemand.push("stablecoins");
+  if (t >= Date.UTC(2024, 2, 1)) eraDemand.push("etf");
+  const s_ = strict.families;
+  const demandCovEra = eraDemand.filter(f => finite(s_[f])).length / eraDemand.length;
+  const macroCov = strict.blocks.macro.strategic.coverage, cycleCov = strict.blocks.cycle.strategic.coverage;
+  const reqOk = [["liquidity"], ["conditions"], ["stablecoins", "exchange_supply"], ["trend"], ["network"], ...(eraDemand.includes("etf") ? [["etf"]] : [])]
+    .every(g => g.some(f => finite(s_[f])));
+  const insufficientEra = !(macroCov >= 0.6 && demandCovEra >= 0.5 && cycleCov >= 0.4 && reqOk);
   const { _raw, ...famOnly } = strict.families;
   rows.push({
     date: dayKey(t), t, price: price[idxAtOrBefore(price, t)].v,
@@ -382,6 +394,7 @@ for (const t of evalDates) {
     covS: Object.fromEntries(Object.entries(strict.blocks).map(([k, b]) => [k, b.strategic.coverage])),
     strategicScore: strict.strategicScore, tacticalScore: strict.tacticalScore,
     bands: strict.bands, regimeStrict: strict.strategic, regimeRelaxed: relaxed.strategic,
+    insufficientEra, demandCovEra,
     detectors: strict.detectors,
   });
 }
