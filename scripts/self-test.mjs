@@ -29,9 +29,12 @@ const sorted=a=>(a||[]).every((x,i)=>i===0||Number(x.t)>=Number(a[i-1].t));
 const last=a=>a?.length?a[a.length-1]:null;
 const requiredBlocks=["macro","demand","cycle","leverage","market"];
 const allowedSourceStates=new Set(["ok","partial","stale","fail","mock"]);
+// ВНИМАНИЕ: пороги обязаны совпадать с FRED_SERIES[*].ttl в коллекторе — unit-test это проверяет.
+// Рассинхрон не «мягкая» ошибка: коллектор примет наблюдение, self-test под REQUIRE_LIVE отвергнет
+// кандидата, и сайт замрёт на прошлом снимке до конца недели.
 const sourceMaxAgeH={
   fred_WALCL:24*14,fred_WTREGEN:24*14,fred_RRPONTSYD:24*7,fred_DFII10:24*7,
-  fred_DGS2:24*7,fred_DGS10:24*7,fred_DTWEXBGS:24*7,fred_BAMLH0A0HYM2:24*7,
+  fred_DGS2:24*7,fred_DGS10:24*7,fred_DTWEXBGS:24*14,fred_BAMLH0A0HYM2:24*7,
   fred_VIXCLS:24*7,fred_VXVCLS:24*7,fred_NASDAQ100:24*7,
   coinmetrics:24*4,blockchain_onchain:24*4,market:24*4,network:24*4,etf:24*7,stablecoins:24*4,pegs:18,cftc:24*15,derivatives:18,spot:18,
 };

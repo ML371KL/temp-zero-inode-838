@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -192,6 +192,51 @@ ok(src.includes("oi_by_venue"),"venue-specific OI history missing");
 ok(src.includes("function atomicJson")&&src.includes("renameSync(temp,path)"),"snapshot write is not atomic");
 
 ok(src.includes("report_date_as_yyyy_mm_dd desc"),"CFTC latest-first query missing");
+
+
+// ---- Политика свежести: календарь публикации ↔ порог ↔ гейт публикации ----
+// Баг v2.8.4: DTWEXBGS (дневные точки, НЕДЕЛЬНЫЙ пакет H.10) стоял с дневным порогом 7 дней и
+// краснел 57% времени. Обе таблицы при этом согласовывались друг с другом — поэтому проверять надо
+// не только их совпадение, но и связь порога с реальным календарём публикации.
+const DAY_H=24;
+for(const [id,cfg] of Object.entries(FRED_SERIES)){
+  ok(["daily","weekly-batch"].includes(cfg.release),`FRED ${id}: не объявлен календарь публикации (release)`);
+  const ttlH=cfg.ttl/36e5;
+  if(cfg.release==="daily")ok(ttlH<=7*DAY_H,`FRED ${id}: дневной релиз, порог ${ttlH/24}д — должен быть ≤7д`);
+  // weekly-batch: последняя точка штатно доживает до 11д20ч (праздничный перенос) → нужен ≥12д,
+  // но не более 21д, иначе тихо замёрзший ряд будет считаться валидным больше трёх недель.
+  if(cfg.release==="weekly-batch")ok(ttlH>=12*DAY_H&&ttlH<=21*DAY_H,`FRED ${id}: недельный пакет, порог ${ttlH/24}д — должен быть 12–21д`);
+}
+// Пороги коллектора и гейта публикации обязаны совпадать по ВСЕМ источникам.
+{
+  const st=readFileSync(new URL("./self-test.mjs",import.meta.url),"utf8");
+  const src=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
+  const toH=(n,u)=>Number(n)*(u==="DAY"?24:1);
+  const coll={};
+  for(const [id,cfg] of Object.entries(FRED_SERIES))coll["fred_"+id]=cfg.ttl/36e5;
+  const re=/loadDataset\("(\w+)","[^"]+",\s*([\d.]+)\s*\*\s*(DAY|HOUR)/g;let m;
+  while((m=re.exec(src))){
+    const tail=src.slice(m.index,m.index+600),mo=tail.match(/maxObservedAge:\s*([\d.]+)\s*\*\s*(DAY|HOUR)/);
+    coll[m[1]]=mo?toH(mo[1],mo[2]):toH(m[2],m[3]);
+  }
+  const block=st.match(/const sourceMaxAgeH=\{([\s\S]*?)\n\};/)[1],gate={};
+  for(const g of block.matchAll(/(\w+):\s*(\d+)\s*\*\s*(\d+)/g))gate[g[1]]=Number(g[2])*Number(g[3]);
+  for(const g of block.matchAll(/(\w+):\s*(\d+)(?!\s*\*)/g))if(!(g[1] in gate))gate[g[1]]=Number(g[2]);
+  ok(Object.keys(coll).length>=20,`матрица порогов не разобрана: ${Object.keys(coll).length} источников`);
+  for(const [k,c] of Object.entries(coll)){
+    ok(gate[k]!==undefined,`источник ${k} есть в коллекторе, но не в sourceMaxAgeH — проверка возраста не сработает`);
+    if(gate[k]!==undefined)ok(c<=gate[k],`РАССИНХРОН ${k}: коллектор ${c}ч > гейт ${gate[k]}ч → кандидат будет отвергнут, сайт замрёт`);
+  }
+}
+// ---- Неполная семья предупреждает, но не поддерживает ----
+eq(componentScore([2,0]),1,"полная семья считается как прежде");
+eq(componentScore([2,null]),0,"1 из 2 ног: положительный голос срезается до 0");
+eq(componentScore([-2,null]),-2,"предупреждение неполной семьи сохраняется полностью");
+eq(componentScore([2,null,0]),1,"2 из 3 ног — потеряна не половина, кэпа нет");
+eq(componentScore([2,null,null]),0,"1 из 3 ног: положительный голос срезается");
+eq(componentScore([-1,null,null]),-1,"1 из 3 ног: предупреждение проходит");
+eq(componentScore([null,null]),null,"нет ни одной ноги — нет голоса, а не 0");
+eq(componentScore([2,2]),2,"полная семья: максимум достижим");
 
 if(fail.length){console.error("Unit tests failed:\n- "+fail.join("\n- "));process.exit(1)}
 

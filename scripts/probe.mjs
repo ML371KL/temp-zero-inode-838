@@ -50,3 +50,22 @@ const checks=[
 const results=[];for(const [n,u,i,o] of checks)results.push(await probe(n,u,i,o));
 console.log("STATE CRIT HTTP    MS HOST                         NAME · CONTRACT");for(const x of results)console.log(`${x.ok?'OK  ':'FAIL'}  ${x.critical?'YES ':' no '} ${String(x.status).padEnd(4)} ${String(x.ms).padStart(5)} ${x.host.padEnd(28)} ${x.name} · ${x.note}`);
 const cf=results.filter(x=>x.critical&&!x.ok),of=results.filter(x=>!x.critical&&!x.ok);console.log(`\nCritical failures: ${cf.length}${cf.length?' · '+cf.map(x=>x.name).join(', '):''}`);console.log(`Optional/fallback failures: ${of.length}${of.length?' · '+of.map(x=>x.name).join(', '):''}`);console.log('Probe is diagnostic; candidate validation and TTL remain authoritative.');
+
+// Дрейф календаря публикации: единственная проверка, которая ловит расхождение порога с РЕАЛЬНОСТЬЮ
+// (совпадение двух таблиц между собой этого не ловит — обе могут быть одинаково неправы).
+// Диагностика: печатает запас до порога по каждому FRED-ряду; ничего не блокирует.
+try{
+  const { FRED_SERIES } = await import("./fetch-snapshot.mjs");
+  const rows=[];
+  for(const [id,cfg] of Object.entries(FRED_SERIES)){
+    try{
+      const r=await fetch(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${id}`,{headers:{"User-Agent":"btc-21m-dashboard/"+PKG_VERSION},signal:AbortSignal.timeout(20_000)});
+      const lines=(await r.text()).trim().split(/\r?\n/).slice(1).map(l=>l.split(","));
+      const last=lines.filter(c=>c[1]&&c[1].trim()).pop();
+      const ageH=(Date.now()-Date.parse(last[0]+"T00:00:00Z"))/36e5, ttlH=cfg.ttl/36e5;
+      const used=ageH/ttlH*100;
+      rows.push(`${id.padEnd(13)} ${cfg.release.padEnd(13)} возраст ${(ageH/24).toFixed(1)}д / порог ${(ttlH/24).toFixed(0)}д = ${used.toFixed(0)}%${used>70?"  ⚠ приближается к порогу":""}`);
+    }catch(e){rows.push(`${id.padEnd(13)} диагностика недоступна: ${String(e.message||e).slice(0,40)}`);}
+  }
+  console.log("\nЗапас свежести FRED (диагностика, не блокирует):\n"+rows.join("\n"));
+}catch(e){console.log("\nдиагностика календаря пропущена: "+String(e.message||e).slice(0,60));}

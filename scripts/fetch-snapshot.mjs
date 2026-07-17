@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.8.4";
+const VERSION = "2.8.5";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -90,18 +90,27 @@ const BLOCKS = {
 // for display: the tactical gate no longer depends on the leverage block at all.
 const CRITICAL_MIN = { macro: 0.60, demand: 0.60, cycle: 0.40, leverage: 0.25, market: 0.50 };
 
+// release — фактический КАЛЕНДАРЬ ПУБЛИКАЦИИ, а не частота точек внутри ряда. Именно он задаёт
+// максимально допустимый возраст последнего наблюдения (ttl служит и сроком кэша, и maxObservedAge):
+//   "daily"        — новая точка каждый рабочий день (H.15, CBOE, NY Fed, Nasdaq, ICE) → 7 дней;
+//   "weekly-batch" — дневные значения приходят ОДНИМ пакетом раз в неделю (H.4.1 по четвергам,
+//                    H.10 по понедельникам; при федеральном празднике — следующий рабочий день).
+//                    Возраст последней точки штатно доходит до 11 дней 20 часов (проверено на
+//                    2023–2026: максимум 11.8 дня, ноябрь 2023) → 14 дней с запасом ~2 дня.
+// unit-test держит связь release ↔ ttl и совпадение с sourceMaxAgeH в self-test: рассинхрон этих
+// двух таблиц молча отвергал бы валидного кандидата с пятницы по понедельник.
 const FRED_SERIES = {
-  WALCL: { limit: 260, ttl: 14 * DAY },
-  WTREGEN: { limit: 260, ttl: 14 * DAY },
-  RRPONTSYD: { limit: 1800, ttl: 7 * DAY },
-  DFII10: { limit: 1200, ttl: 7 * DAY },
-  DGS2: { limit: 1200, ttl: 7 * DAY },
-  DGS10: { limit: 1200, ttl: 7 * DAY },
-  DTWEXBGS: { limit: 1200, ttl: 7 * DAY },
-  BAMLH0A0HYM2: { limit: 1200, ttl: 7 * DAY },
-  VIXCLS: { limit: 1200, ttl: 7 * DAY },
-  VXVCLS: { limit: 1200, ttl: 7 * DAY },
-  NASDAQ100: { limit: 1200, ttl: 7 * DAY },
+  WALCL: { limit: 260, ttl: 14 * DAY, release: "weekly-batch" },
+  WTREGEN: { limit: 260, ttl: 14 * DAY, release: "weekly-batch" },
+  RRPONTSYD: { limit: 1800, ttl: 7 * DAY, release: "daily" },
+  DFII10: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  DGS2: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  DGS10: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  DTWEXBGS: { limit: 1200, ttl: 14 * DAY, release: "weekly-batch" },
+  BAMLH0A0HYM2: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  VIXCLS: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  VXVCLS: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  NASDAQ100: { limit: 1200, ttl: 7 * DAY, release: "daily" },
 };
 
 const CM_METRICS = [
@@ -705,7 +714,14 @@ function datasetUrls(key,...fallback){return uniqueHttps(datasets[key]?.source_u
 function links(...values){return uniqueHttps(values.flat());}
 // Round the component mean to the nearest 0.5 rather than to a whole number: integer rounding
 // amplifies a weak signal (mean +0.5 -> +1). Half-steps keep [-2,-1.5,-1,-0.5,0,+0.5,+1,+1.5,+2].
-function componentScore(parts){const a=parts.filter(finite).map(Number);return a.length?clamp(Math.round(mean(a)*2)/2,-2,2):null;}
+// Семья, потерявшая ПОЛОВИНУ И БОЛЕЕ своих ног, вправе ПРЕДУПРЕЖДАТЬ, но не ПОДДЕРЖИВАТЬ:
+// выживший компонент не голосует «всё хорошо» полным весом за отсутствующие данные. Тот же принцип,
+// что у гейта оценки (нет MVRV → нельзя быть конструктивным) и у spot_integrity (неполные пары
+// предупреждают, но не успокаивают). Штрафных семей (carry, network, options_vol) не касается: их
+// балл и так ≤0. Проверено на реконструкции 2013–2026: срабатываний ноль — это страховка от тихой
+// смерти отдельного ряда, а не изменение поведения. Семья при этом НЕ обнуляется: null отдал бы
+// одному ряду право погасить обязательную семью и весь среднесрочный вердикт.
+function componentScore(parts){const a=parts.filter(finite).map(Number);if(!a.length)return null;const s=clamp(Math.round(mean(a)*2)/2,-2,2);return a.length*2<=parts.length&&s>0?0:s;}
 function highGood(p){return !finite(p)?null:p>=90?2:p>=65?1:p>=35?0:p>=10?-1:-2;}
 function lowGood(p){return !finite(p)?null:p<=10?2:p<=35?1:p<=65?0:p<=90?-1:-2;}
 
@@ -729,8 +745,14 @@ function buildMetrics(){
   const real=fred("DFII10"),usd=fred("DTWEXBGS"),two=fred("DGS2");
   const real4Series=trailingChangeSeries(real,28,{difference:true,scale:100}),usd4Series=trailingChangeSeries(usd,28),real4=last(real4Series)?.v,usd4=last(usd4Series)?.v,two4=two.length?(last(two).v-priorByDays(two,28)?.v)*100:null;
   const real4Pct=percentileRank(real4Series.slice(-750).map(x=>x.v),real4),usd4Pct=percentileRank(usd4Series.slice(-750).map(x=>x.v),usd4);
+  // Неполная семья вправе ПРЕДУПРЕЖДАТЬ, но не ПОДДЕРЖИВАТЬ. Обе ноги (реальная ставка и доллар)
+  // симметричны и могут дать +2 в одиночку, поэтому при пропаже одной из них выживший компонент
+  // ограничивается нулём: отсутствие данных не должно превращаться в голос «смягчение». Тот же
+  // приём, что у гейта оценки (нет MVRV → нельзя быть конструктивным) и у spot_integrity.
+  // Семья при этом НЕ обнуляется: financial_conditions — обязательная семья без OR-партнёра, и
+  // null отдал бы одной серии FRED право погасить весь среднесрочный вердикт.
   const conditionsScore=componentScore([lowGood(real4Pct),lowGood(usd4Pct)]);
-  add({id:"financial_conditions",block:"macro",family:"conditions",name:"Реальные ставки и доллар",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:conditionsScore,value:finite(conditionsScore)?(conditionsScore>=1?"смягчение":conditionsScore<=-1?"ужесточение":"смешанно"):"—",delta:finite(real4)&&finite(usd4)?`TIPS ${real4.toFixed(0)} б.п. · USD ${usd4.toFixed(1)}%`:"",note:"4-недельные изменения реальной доходности и широкого доллара нормируются на собственную историю. Их рост повышает альтернативную стоимость BTC и сжимает глобальные условия.",score:conditionsScore,source:"FRED",source_url:fredSeriesUrl("DFII10"),source_urls:fredSeriesUrls(["DFII10","DTWEXBGS"]),...sourceMetaMany(["fred_DFII10","fred_DTWEXBGS"]),series:real4Series});
+  add({id:"financial_conditions",block:"macro",family:"conditions",name:"Реальные ставки и доллар",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:conditionsScore,value:finite(conditionsScore)?(conditionsScore>=1?"смягчение":conditionsScore<=-1?"ужесточение":"смешанно"):"—",delta:finite(real4)&&finite(usd4)?`TIPS ${real4.toFixed(0)} б.п. · USD ${usd4.toFixed(1)}%`:"",note:"4-недельные изменения реальной доходности и широкого доллара нормируются на собственную историю. Их рост повышает альтернативную стоимость BTC и сжимает глобальные условия. Дневные значения широкого доллара публикуются пакетом раз в неделю по понедельникам (релиз ФРС H.10; при федеральном празднике — в следующий рабочий день), поэтому наблюдение штатно старше загрузки на 3–11 дней — это календарь источника, а не сбой. Если одна из двух ног недоступна, семья может только предупреждать: голос ограничивается нулём.",score:conditionsScore,source:"FRED",source_url:fredSeriesUrl("DFII10"),source_urls:fredSeriesUrls(["DFII10","DTWEXBGS"]),...sourceMetaMany(["fred_DFII10","fred_DTWEXBGS"]),series:real4Series});
   add({id:"two_year",block:"macro",family:"conditions",name:"2Y UST · репрайсинг 4 недели",horizon:"short",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:two4,value:finite(two4)?`${two4>=0?"+":""}${two4.toFixed(0)} б.п.`:"—",delta:two.length?`${last(two).v.toFixed(2)}%`:"",note:"Контекст ожиданий политики. Резкое падение доходности может означать как смягчение, так и страх рецессии, поэтому не голосует отдельно.",score:null,source:"fred",...sourceMeta("fred_DGS2"),series:two});
 
   const hy=fred("BAMLH0A0HYM2"),vix=fred("VIXCLS"),vxv=fred("VXVCLS"),dgs10=fred("DGS10");
@@ -741,6 +763,9 @@ function buildMetrics(){
   // two calm-state components are penalty-only: VIX contango and bottom-percentile rate volatility are
   // complacency, not a tailwind (reconstruction: the "positive" stress state had WORSE forward returns
   // than the neutral one, +3.8% vs +7.3% fwd 30d).
+  // HY-нога симметрична (может дать +2 в одиночку), VIX-структура и волатильность ставок — только
+  // штраф. Если HY выпал, семья и так не может стать положительной; если выпали остальные — кэп
+  // не даёт одинокой HY-ноге проголосовать «спокойно» полным весом.
   const stressScore=componentScore([lowGood(hy4Pct),customScore(vixRatio,[[v=>v<1,0],[v=>v<1.10,-1],[()=>true,-2]]),finite(rateVolPct)?Math.min(lowGood(rateVolPct),0):null]);
   add({id:"system_stress",block:"macro",family:"stress",name:"Кредит и системный стресс",horizon:"short",role:"leading",method:"mixed",tactical:true,value_num:stressScore,value:finite(stressScore)?(stressScore>=1?"спокойно":stressScore<=-1?"напряжение":"нейтрально"):"—",delta:finite(hy4)&&finite(vixRatio)?`HY ${hy4.toFixed(0)} б.п. · VIX/VIX3M ${vixRatio.toFixed(2)}`:"",note:"Семейный вывод из импульса HY, термструктуры VIX и реализованной волатильности 10Y UST. Последняя — прозрачная бесплатная замена MOVE, но не сам MOVE.",score:stressScore,source:"FRED",source_url:fredSeriesUrl("BAMLH0A0HYM2"),source_urls:fredSeriesUrls(["BAMLH0A0HYM2","VIXCLS","VXVCLS","DGS10"]),...sourceMetaMany(["fred_BAMLH0A0HYM2","fred_VIXCLS","fred_VXVCLS","fred_DGS10"]),series:hy});
 
@@ -1105,6 +1130,7 @@ function compute(){
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
       mechanical_metrics:"stablecoin peg, funding, basis, spreads and price-to-moving-average relations use economic/mechanical thresholds",
       regime_logic:"strategic = Macro × Demand × Cycle, negative ladder anchored on Demand (lone adverse macro/cycle => transition; demand adverse => deteriorating; two adverse => defensive); tactical = Fast demand × Market integrity × Realized volatility; leverage is penalty-only fragility evidence",
+      family_completeness:"a family that lost half or more of its inputs may warn but not support: its positive vote is capped at 0 (the family is never nulled — that would let one series switch off a required family)",
       hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h AND at least 12 observed snapshots; hard override is immediate",
       detector_power:"macro_shock or distribution fired cap the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; all three keep anchor+confirmation structure",
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
@@ -1114,7 +1140,7 @@ function compute(){
   };
 }
 
-export { request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
