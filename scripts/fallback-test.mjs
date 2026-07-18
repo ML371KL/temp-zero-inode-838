@@ -1,26 +1,50 @@
 import assert from "node:assert/strict";
-import {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives,fetchEtfFlows} from "./fetch-snapshot.mjs";
+// ГЕРМЕТИЧНОСТЬ. Сборщик при загрузке подхватывает прошлый снимок из .state/cache.json или
+// docs/snapshot.json. Для контрактного набора это чужое состояние: оно приносит в тесты живые
+// данные и делает результат зависящим от того, что лежит в рабочей копии. Отводим оба пути в
+// несуществующие файлы ДО импорта модуля — поэтому импорт динамический.
+process.env.PREVIOUS_STATE=".state/__test_absent__.json";
+process.env.PREVIOUS_PUBLIC=".state/__test_absent__.json";
+const {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives,fetchEtfFlows}=await import("./fetch-snapshot.mjs");
 const NOW=Date.now(),DAY=864e5;
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json"}}),text=(body,status=200)=>new Response(body,{status,headers:{"content-type":"text/plain"}});
 const originalFetch=globalThis.fetch,originalSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
 let mode="";
 const blockchain=(name,n=1500,unit="")=>({status:"ok",name,unit,period:"day",values:Array.from({length:n},(_,i)=>({x:Math.floor((NOW-(n-1-i)*DAY)/1000),y:name==="hash-rate"?600_000_000+i*1000:name==="difficulty"?80e12+i*1e9:name==="mvrv"?1.2+i/10000:name==="n-unique-addresses"?700000+i:name==="n-transactions"?300000+i:name==="miners-revenue"?30e6+i*1000:name==="trade-volume"?5e9+i*1e6:50000+i}))});
-// График ETF, последняя точка которого отстоит на `lagDays` дней от сегодня. Значение зависит от
-// КАЛЕНДАРНОГО дня, а не от счётчика: два зеркала одного провайдера обязаны совпадать на общих днях
-// (в реальности они байт-в-байт идентичны на 628 пересекающихся днях), и фикстура моделирует это.
-function etfChart(lagDays){
-  const rows=[];
-  for(let i=260;i>=0;i--){const t=NOW-(i+lagDays)*DAY;if([0,6].includes(new Date(t).getUTCDay()))continue;
-    const dayIdx=Math.floor(t/DAY);rows.push({Timestamp:Math.floor(t/1000),Result:dayIdx%7===0?-2e8:1.2e8});}
+// КАЛЕНДАРЬ ФИКСТУР. Отсчёт ведётся ТОРГОВЫМИ днями от последнего дня, чья каноническая метка
+// (полдень UTC) уже наступила. Прежняя арифметика «сегодня минус N суток» делала набор зависимым
+// от дня недели: в выходные хвост схлопывался, а в будни свежий день оказывался незакрытым, и
+// тесты были зелёными ровно по субботам. Здесь такой зависимости нет по построению.
+const CANON_HOUR=12*3600e3;
+function tradingDays(count,lagTradingDays=0){
+  const out=[];
+  let idx=Math.floor((NOW-CANON_HOUR)/DAY);
+  for(let skipped=0;out.length<count;idx--){
+    const t=idx*DAY;
+    if([0,6].includes(new Date(t).getUTCDay()))continue;
+    if(skipped<lagTradingDays){skipped++;continue;}
+    out.unshift(t);
+  }
+  return out; // полуночи торговых дней, по возрастанию
+}
+// Значение зависит от КАЛЕНДАРНОГО дня, а не от счётчика: два зеркала одного провайдера обязаны
+// совпадать на общих днях (в реальности они байт-в-байт идентичны на 628 пересекающихся днях).
+const dayValue=t=>Math.floor(t/DAY)%7===0?-2e8:1.2e8;
+// Канон The Block: метка — полдень UTC.
+function etfChart(lagTradingDays){
+  const rows=tradingDays(260,lagTradingDays).map(t=>({Timestamp:Math.floor((t+CANON_HOUR)/1000),Result:dayValue(t)}));
   return {chart:{jsonFile:{Frequency:"Daily",Series:{"Total Net Flow":{Data:rows}}}}};
 }
-// Тот же календарь и те же значения, что у etfChart, но в соглашении SosoValue: дата вместо
-// метки времени (то есть полночь UTC против полудня у канона).
-function sosoRows(lagDays){
-  const rows=[];
-  for(let i=260;i>=0;i--){const t=NOW-(i+lagDays)*DAY;if([0,6].includes(new Date(t).getUTCDay()))continue;
-    const dayIdx=Math.floor(t/DAY);rows.push({date:new Date(t).toISOString().slice(0,10),totalNetInflow:dayIdx%7===0?-2e8:1.2e8});}
-  return rows;
+// Тот же календарь и те же значения, но в соглашении SosoValue: дата вместо метки времени.
+function sosoRows(lagTradingDays){
+  return tradingDays(260,lagTradingDays).map(t=>({date:new Date(t).toISOString().slice(0,10),totalNetInflow:dayValue(t)}));
+}
+// Срок квартального контракта обязан отсчитываться от текущего момента. Зашитая дата истечения —
+// мина замедленного действия: набор зеленеет ровно до дня экспирации, а потом краснеет без единой
+// правки кода (символ 260925 обрушил бы CI около 20.09.2026).
+function quarterAhead(){
+  const d=new Date(NOW+90*DAY),p=n=>String(n).padStart(2,"0");
+  return `${p(d.getUTCFullYear()%100)}${p(d.getUTCMonth()+1)}${p(d.getUTCDate())}`;
 }
 function farsideHtml(){
   const rows=[];
@@ -40,19 +64,19 @@ globalThis.fetch=async input=>{const u=String(input);
   if(mode==="onchain"){if(u.includes("bitcoin-data.com/v1/mvrv"))return json(Array.from({length:700},(_,i)=>({unixTs:Math.floor((NOW-(699-i)*DAY)/1000),mvrv:1.2+i/10000})));for(const name of ["n-unique-addresses","n-transactions","miners-revenue"])if(u.includes(`/charts/${name}`))return json(blockchain(name,700,name==="miners-revenue"?"USD":""));}
   if(mode==="etf"){if(u.includes("theblock.co"))return json(etfChart(0));if(u.includes("tbstat.com"))return json({},503);}
   // Зеркало свежее основного API ровно на один торговый день — реальная и постоянная ситуация.
-  if(mode==="etf_mirror_fresher"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com"))return json(etfChart(0));}
+  if(mode==="etf_mirror_fresher"){if(u.includes("theblock.co"))return json(etfChart(1));if(u.includes("tbstat.com"))return json(etfChart(0));}
   // Основной API свежее — источник не должен «скакать» на зеркало без причины.
-  if(mode==="etf_primary_fresher"){if(u.includes("theblock.co"))return json(etfChart(0));if(u.includes("tbstat.com"))return json(etfChart(3));}
+  if(mode==="etf_primary_fresher"){if(u.includes("theblock.co"))return json(etfChart(0));if(u.includes("tbstat.com"))return json(etfChart(1));}
   // Зеркало свежее, но битое (мало строк): свежесть не должна побеждать валидность.
-  if(mode==="etf_mirror_corrupt"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com"))return json({chart:{jsonFile:{Series:{"Total Net Flow":{Data:Array.from({length:12},(_,i)=>({Timestamp:Math.floor((NOW-i*DAY)/1000),Result:1e8}))}}}}});}
+  if(mode==="etf_mirror_corrupt"){if(u.includes("theblock.co"))return json(etfChart(1));if(u.includes("tbstat.com"))return json({chart:{jsonFile:{Series:{"Total Net Flow":{Data:Array.from({length:12},(_,i)=>({Timestamp:Math.floor((NOW-i*DAY)/1000),Result:1e8}))}}}}});}
   // Зеркало свежее, но расходится с основным API на общих днях — признак порчи одной из копий.
-  if(mode==="etf_mirror_disagrees"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com")){const c=etfChart(0);const d=c.chart.jsonFile.Series["Total Net Flow"].Data;d[d.length-5].Result=9.9e8;return json(c);}}
+  if(mode==="etf_mirror_disagrees"){if(u.includes("theblock.co"))return json(etfChart(1));if(u.includes("tbstat.com")){const c=etfChart(0);const d=c.chart.jsonFile.Series["Total Net Flow"].Data;d[d.length-5].Result=9.9e8;return json(c);}}
   // Оба зеркала мертвы → последний резерв Farside.
   if(mode==="etf_both_dead"){if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);if(u.includes("farside.co.uk"))return text(farsideHtml());}
-  // Дополняющий слой SosoValue поверх канона The Block, отставшего на 3 дня. Значения обязаны
+  // Дополняющий слой SosoValue поверх канона The Block, отставшего на 2 торговых дня. Значения обязаны
   // совпадать с каноном на общих днях — иначе слой будет отбракован проверкой расхождения.
   if(mode.startsWith("etf_soso")){
-    if(u.includes("theblock.co"))return json(etfChart(3));
+    if(u.includes("theblock.co"))return json(etfChart(2));
     if(u.includes("tbstat.com"))return json({},503);
     if(u.includes("historicalInflowChart")){
       if(mode==="etf_soso_dead")return json({},503);
@@ -60,13 +84,9 @@ globalThis.fetch=async input=>{const u=String(input);
       if(mode==="etf_soso_drift")rows[rows.length-3].totalNetInflow=9e9;
       return json({code:0,data:rows});
     }
-    if(u.includes("currentEtfDataMetrics")){
-      const rows=sosoRows(0);
-      return json({code:0,data:{list:[1,2,3].map(()=>({dailyNetInflow:{lastUpdateDate:(mode==="etf_soso_partial_day"?rows.at(-2):rows.at(-1)).date}}))}});
-    }
   }
   if(mode==="cftc"){if(u.includes(".json?"))return json({},503);if(u.includes(".csv?"))return text(cftcCsv());}
-  if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:"FI_XBTUSD_260925",tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"40000",openInterest:"2000000000"}});return json({},503);}
+  if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:`FI_XBTUSD_${quarterAhead()}`,tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"40000",openInterest:"2000000000"}});return json({},503);}
   throw new Error(`unexpected ${mode} URL ${u}`);
 };
 try{
@@ -82,7 +102,7 @@ try{
   // ---- Выбор источника ETF: свежайшее ВАЛИДНОЕ зеркало одного провайдера ----
   mode="etf_mirror_fresher";const eM=await fetchEtfFlows();
   assert.equal(eM.source,"The Block (tbstat)","более свежее зеркало обязано побеждать основной API");
-  assert.ok(Date.now()-Date.parse(eM.observed_at)<2*DAY,"выбрана свежая копия ряда");
+  assert.equal(Date.parse(eM.observed_at),tradingDays(1)[0]+CANON_HOUR,"выбрана свежая копия ряда");
   mode="etf_primary_fresher";const eP=await fetchEtfFlows();
   assert.equal(eP.source,"The Block","при более свежем основном API источник не должен уходить на зеркало");
   mode="etf_mirror_corrupt";const eC=await fetchEtfFlows();
@@ -94,20 +114,16 @@ try{
   mode="etf_both_dead";const eF=await fetchEtfFlows();
   assert.equal(eF.source,"Farside","при смерти обоих зеркал The Block обязан включиться последний резерв");
   assert.ok(eF.data.length>=100,`farside rows ${eF.data.length}`);
-  // ---- Дополняющий слой SosoValue: он обязан ТОЛЬКО добавлять свежие дни ----
+  // ---- Дополняющий слой SosoValue ----
+  // Прошлых наблюдений нет (набор герметичен), поэтому подтвердить свежий день нечем. Это главный
+  // контракт слоя: без подтверждения он обязан отказывать В ЗАКРЫТУЮ, а не пропускать день молча.
   mode="etf_soso_fresh";const eS=await fetchEtfFlows();
-  assert.equal(eS.source,"The Block + SosoValue","дополняющий слой не подключился к отставшему канону");
-  assert.ok(eS.spliced>=1,`нет добавленных дней: ${eS.spliced}`);
-  assert.ok(Date.now()-Date.parse(eS.observed_at)<2*DAY,"наблюдение обязано стать свежее канона");
-  // Соглашения о метке времени у провайдеров разные. Без выравнивания шаг между последними точками
-  // становится 12 ч вместо суток, и возраст наблюдения прыгает без единого нового факта.
-  assert.equal(new Set(eS.data.slice(-8).map(x=>x.t%DAY)).size,1,"сшитые дни обязаны жить в соглашении канона о времени суток");
-  assert.ok(eS.data.every(x=>![0,6].includes(new Date(x.t).getUTCDay())),"выходные не должны просачиваться через сшивку");
-  // Ранний срез неполон: отчитались не все фонды. Такой день занижен по модулю и, попав в окно
-  // детектора слома спроса, способен зажечь его ложно — поэтому он обязан быть отброшен.
-  mode="etf_soso_partial_day";const eSp=await fetchEtfFlows();
-  assert.equal(eSp.spliced,eS.spliced-1,`неполный день не отброшен: ${eSp.spliced} против ${eS.spliced}`);
-  assert.ok(Date.parse(eSp.observed_at)<Date.parse(eS.observed_at),"наблюдение обязано остаться на последнем полном дне");
+  assert.equal(eS.source,"The Block","неподтверждённый день обязан быть придержан, а не сшит");
+  assert.equal(eS.spliced,0,`сшит неподтверждённый день: ${eS.spliced}`);
+  assert.match(eS.errors.join(" "),/не подтверждён повторным наблюдением/,"причина отказа обязана попасть в диагностику");
+  // Наблюдения этого прогона обязаны быть возвращены — иначе подтверждать в следующий час нечем,
+  // и слой окажется мёртвым навсегда.
+  assert.equal(Object.keys(eS.fresh_probe||{}).length,2,"память наблюдений не заполнена: подтверждение никогда не наступит");
   mode="etf_soso_dead";const eSd=await fetchEtfFlows();
   assert.equal(eSd.source,"The Block","смерть дополняющего слоя не должна ронять канон");
   assert.equal(eSd.spliced,0);

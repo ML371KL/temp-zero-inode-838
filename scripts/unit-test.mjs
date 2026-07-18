@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -27,7 +27,11 @@ const etfRecent=[];
 for(let i=170;i>=0;i--){const d=new Date(Date.now()-i*864e5);if(![0,6].includes(d.getUTCDay()))etfRecent.push({t:Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()),v:25_000_000});}
 ok(validateEtfSeries(etfRecent),"fresh ETF trading-day series accepted");
 ok(!validateEtfSeries([...etfRecent,{t:Date.now(),v:11_000_000_000}]),"implausible ETF flow rejected");
-const weekend=[...etfRecent];weekend[weekend.length-2]={...weekend[weekend.length-2],t:Date.UTC(2026,6,12)};weekend.sort((a,b)=>a.t-b.t);
+// Выходной день берётся ОТНОСИТЕЛЬНО окна ряда: зашитая календарная дата выпадает из окна, как
+// только настоящий календарь уходит вперёд, и проверка начинает мерить не то, что задумано.
+const weekend=[...etfRecent];
+const friday=weekend.findLastIndex(x=>new Date(x.t).getUTCDay()===5);
+weekend[friday]={...weekend[friday],t:weekend[friday].t+864e5}; // пятница -> суббота, порядок сохраняется
 ok(!validateEtfSeries(weekend),"weekend ETF row rejected");
 
 // Retry-After supports both delta-seconds and HTTP-date forms.
@@ -263,17 +267,104 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
     const asc=out.reverse();return asc.slice(0,asc.length-endBack);};
   const mk=(count,endBack,f=1)=>weekdays(count,endBack).map((t,i)=>({t,v:(1+(i%5))*1e8*f}));
   const canon=mk(200,2),fresh=mk(202,0);
-  const r=spliceFreshEtfDays(canon,fresh,"The Block");
-  eq(r.spliced,2,"два отсутствующих торговых дня обязаны быть дополнены");
+  // Подтверждение вторым наблюдением: `seen` — то, что прогон часом раньше видел у провайдера.
+  const seenOf=(c,f)=>Object.fromEntries(f.filter(x=>x.t>c.at(-1).t).map(x=>[new Date(x.t).toISOString().slice(0,10),x.v]));
+  const seen=seenOf(canon,fresh);
+  const r=spliceFreshEtfDays(canon,fresh,"The Block",{seen});
+  eq(r.spliced,2,"два подтверждённых торговых дня обязаны быть дополнены");
   eq(r.source,"The Block + SosoValue","атрибуция должна честно называть оба источника");
   ok(r.series.slice(0,canon.length).every((x,i)=>x.v===canon[i].v),"канонические дни не должны переписываться дополняющим слоем");
-  eq(spliceFreshEtfDays(fresh,fresh,"The Block").spliced,0,"канон не отстаёт — сшивки быть не должно");
-  eq(spliceFreshEtfDays(mk(202,0),mk(200,2),"The Block").spliced,0,"провайдер позади канона — сшивки быть не должно");
-  ok(/расхождение/.test(spliceFreshEtfDays(canon,mk(202,0,1.5),"The Block").note||""),"расхождение провайдеров на общих днях обязано отменять сшивку");
-  ok(/опережение/.test(spliceFreshEtfDays(mk(200,8),fresh,"The Block").note||""),"опережение сверх лимита обязано отменять сшивку (это подмена источника, а не дополнение)");
-  ok(/общих дней/.test(spliceFreshEtfDays(canon,fresh.slice(-4),"The Block").note||""),"без достаточного пересечения сверять нечего — сшивка отменяется");
-  eq(spliceFreshEtfDays(canon,mk(202,0).map(x=>({...x,v:x.v*1.02})),"The Block").spliced,2,"обычный шум провайдеров не должен блокировать дополнение");
-  eq(spliceFreshEtfDays(canon,mk(202,0).map((x,i)=>i>=200?{...x,v:2e10}:x),"The Block").spliced,0,"точка вне физической полосы обязана отменять сшивку");
+
+  // ГЛАВНЫЙ КОНТРАКТ: без подтверждения слой отказывает В ЗАКРЫТУЮ. Полноту дня у провайдера
+  // спросить нельзя — все фонды всегда несут одну дату публикации, а неотчитавшийся фонд выглядит
+  // ровным нулём. Единственный наблюдаемый признак неполноты — что значение ещё меняется.
+  eq(spliceFreshEtfDays(canon,fresh,"The Block").spliced,0,"без прошлых наблюдений сшивать нечего — обязан быть отказ, а не пропуск");
+  ok(/не подтверждён/.test(spliceFreshEtfDays(canon,fresh,"The Block").note||""),"причина отказа обязана быть названа");
+  const drifting={...seen};drifting[Object.keys(drifting)[0]]+=1e6;
+  eq(spliceFreshEtfDays(canon,fresh,"The Block",{seen:drifting}).spliced,0,"значение изменилось между наблюдениями — день ещё дорастает и обязан быть придержан");
+  // Подтверждён только первый из двух: сшивается непрерывный отрезок, разрыва в ряду быть не может.
+  const partial={[Object.keys(seen)[0]]:seen[Object.keys(seen)[0]]};
+  const rp=spliceFreshEtfDays(canon,fresh,"The Block",{seen:partial});
+  eq(rp.spliced,1,"подтверждён один день — сшит должен быть ровно один");
+  ok(rp.series.every((x,i,a)=>!i||x.t>a[i-1].t),"ряд обязан остаться строго возрастающим");
+  // Память наблюдений возвращается ВСЕГДА, иначе подтверждать в следующий час будет нечем.
+  eq(Object.keys(spliceFreshEtfDays(canon,fresh,"The Block").probe||{}).length,2,"наблюдения этого прогона обязаны быть возвращены даже при отказе");
+
+  eq(spliceFreshEtfDays(fresh,fresh,"The Block",{seen}).spliced,0,"канон не отстаёт — сшивки быть не должно");
+  eq(spliceFreshEtfDays(mk(202,0),mk(200,2),"The Block",{seen}).spliced,0,"провайдер позади канона — сшивки быть не должно");
+  ok(/расхождение/.test(spliceFreshEtfDays(canon,mk(202,0,1.5),"The Block",{seen:seenOf(canon,mk(202,0,1.5))}).note||""),"расхождение провайдеров на общих днях обязано отменять сшивку");
+  ok(/общих дней/.test(spliceFreshEtfDays(canon,fresh.slice(-4),"The Block",{seen}).note||""),"без достаточного пересечения сверять нечего — сшивка отменяется");
+  eq(spliceFreshEtfDays(canon,mk(202,0).map(x=>({...x,v:x.v*1.02})),"The Block",{seen:seenOf(canon,mk(202,0).map(x=>({...x,v:x.v*1.02})))}).spliced,2,"обычный шум провайдеров не должен блокировать дополнение");
+  eq(spliceFreshEtfDays(canon,mk(202,0).map((x,i)=>i>=200?{...x,v:2e10}:x),"The Block",{seen:seenOf(canon,mk(202,0).map((x,i)=>i>=200?{...x,v:2e10}:x))}).spliced,0,"точка вне физической полосы обязана отменять сшивку");
+
+  // Предел опережения обязан считаться по СЫРОМУ опережению, до отсева по подтверждению. Иначе
+  // мёртвый канон проходит: восемь дней урезаются подтверждением до трёх, лимит молчит, и слой
+  // из дополнения превращается в подмену источника ровно тогда, когда сверить его не с чем.
+  const farBehind=mk(200,8),far=mk(208,0);
+  const onlyThree=Object.fromEntries(Object.entries(seenOf(farBehind,far)).slice(0,3));
+  ok(/опережение/.test(spliceFreshEtfDays(farBehind,far,"The Block",{seen:seenOf(farBehind,far)}).note||""),"опережение сверх лимита обязано отменять сшивку (это подмена источника, а не дополнение)");
+  ok(/опережение/.test(spliceFreshEtfDays(farBehind,far,"The Block",{seen:onlyThree}).note||""),"лимит опережения нельзя обходить, урезав список подтверждением");
+
+  // Выравнивание меток: свежие дни обязаны жить в соглашении канона о времени суток, а день, чей
+  // канонический момент ещё не наступил, — отбрасываться, а не подтягиваться к текущему моменту.
+  const noon=canon.map(x=>({t:x.t+12*3600e3,v:x.v}));
+  const rn=spliceFreshEtfDays(noon,fresh,"The Block",{seen});
+  ok(rn.spliced===0||rn.series.slice(-rn.spliced).every(x=>x.t%DAYMS===12*3600e3),"сшитые дни обязаны жить в соглашении канона о времени суток");
+  ok(rn.series.every(x=>x.t<=Date.now()),"день из будущего не имеет права попасть в ряд потоков");
+  ok(rn.series.every(x=>![0,6].includes(new Date(x.t).getUTCDay())),"выравнивание не имеет права перенести день на выходной");
+
+  // День, чей КАНОНИЧЕСКИЙ момент ещё не наступил, обязан быть отброшен, а не подтянут к текущему
+  // моменту. Подтягивание (кламп к «сейчас минус час») впускало бы незакрытый торговый день в окна
+  // потоков, обходя запрет ETF-контракта на точку из будущего, и делало бы возраст наблюдения
+  // функцией времени прогона. Конструкция намеренно не зависит от дня недели: следующий торговый
+  // день после последнего дня канона наступает в будущем всегда.
+  const base=weekdays(200,0);
+  const nextTrading=t=>{let x=t+DAYMS;while([0,6].includes(new Date(x).getUTCDay()))x+=DAYMS;return x;};
+  const aheadT=nextTrading(base.at(-1));
+  const canonNoon=base.map((t,i)=>({t:t+12*3600e3,v:(1+(i%5))*1e8}));
+  const withFuture=[...base.map((t,i)=>({t,v:(1+(i%5))*1e8})),{t:aheadT,v:3e8}];
+  const rf=spliceFreshEtfDays(canonNoon,withFuture,"The Block",{seen:{[new Date(aheadT).toISOString().slice(0,10)]:3e8}});
+  eq(rf.spliced,0,"незакрытый торговый день обязан быть отброшен, а не подтянут к текущему моменту");
+  ok(/канонический момент/.test(rf.note||""),"причина отказа обязана называть ненаступивший канонический момент, а не маскироваться под отказ контракта");
+}
+// Деградация ряда ETF между прогонами обязана быть ВИДНА, причём в обе стороны: и откат
+// последнего дня, и усечение истории. Второй случай опаснее — он тихо гасит тревогу.
+{
+  const mk=n=>Array.from({length:n},(_,i)=>({t:Date.UTC(2026,0,1)+i*864e5,v:1e8}));
+  const full=mk(600);
+  eq(etfDegradation(full,full).degraded,false,'неизменившийся ряд не должен помечаться деградировавшим');
+  eq(etfDegradation(full,mk(601)).degraded,false,'выросший ряд — норма, а не деградация');
+  // Вытеснение: канон догнал и подменил значение сшитого дня. Длина и последний день те же.
+  const displaced=full.map((x,i)=>i===full.length-1?{...x,v:9e7}:x);
+  eq(etfDegradation(full,displaced).degraded,false,'вытеснение сшитого дня каноном не деградация: длина и последний день те же');
+  eq(etfDegradation(full,mk(599)).degraded,true,'потеря последнего дня — это откат, он обязан помечаться');
+  ok(etfDegradation(full,full.slice(0,-1).concat([{...full.at(-1)}])).degraded===false,'ряд той же длины и с тем же последним днём не деградация');
+  ok(etfDegradation(full,mk(200)).degraded,'усечение истории обязано помечаться: оно меняет перцентили и гасит условие детектора');
+  // Граница: пропал ОДИН день из глубины. Свежесть не пострадала, откат не сработает — поймать
+  // это может только проверка длины, поэтому порог обязан быть строгим, а не «примерно столько же».
+  ok(etfDegradation(full,full.slice(1)).degraded,'потеря даже одного дня глубины обязана помечаться');
+  ok(/усечена/.test(etfDegradation(full,mk(200)).notes.join(' ')),'причина усечения обязана попасть в диагностику');
+  ok(etfDegradation(full,full.slice(0,-3)).degraded,'откат последнего дня назад обязан помечаться');
+  eq(etfDegradation(null,full).degraded,false,'первый прогон без прошлого снимка не деградация');
+  eq(etfDegradation(full,[]).degraded,false,'пустой ряд обрабатывается выше по потоку, здесь не падаем');
+}
+// Повторы запроса проверяются ПОВЕДЕНИЕМ: разовый сбой слоя укорачивает ряд и двигает возраст
+// наблюдения назад, а постоянную ошибку повторять бессмысленно.
+{
+  const realFetch=globalThis.fetch;
+  const rows=Array.from({length:200},(_,i)=>({date:new Date(Date.UTC(2026,0,1)+i*864e5).toISOString().slice(0,10),totalNetInflow:1e8}))
+    .filter(x=>![0,6].includes(new Date(x.date+"T00:00:00Z").getUTCDay()));
+  let calls=0;
+  try{
+    globalThis.fetch=async()=>{calls++;return calls===1?new Response("",{status:503}):new Response(JSON.stringify({code:0,data:rows}),{status:200,headers:{"content-type":"application/json"}});};
+    const got=await fetchSosoEtfDaily();
+    eq(calls,2,"временный сбой обязан повторяться: без повтора ряд укоротится на ровном месте");
+    ok(got.length>=100,"после повтора данные обязаны дойти");
+    calls=0;
+    globalThis.fetch=async()=>{calls++;return new Response("",{status:404});};
+    await fetchSosoEtfDaily().then(()=>ok(false,"404 обязан оставаться ошибкой"),()=>{});
+    eq(calls,1,"постоянную ошибку повторять бессмысленно: это лишний расход лимита маршрута");
+  }finally{globalThis.fetch=realFetch;}
 }
 {
   const collector=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
@@ -281,11 +372,6 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   const fn=collector.slice(collector.indexOf("async function sosoPost"),collector.indexOf("function spliceFreshEtfDays"));
   ok(/process\.env\.SOSO_API_KEY/.test(fn),"ключ обязан читаться из окружения");
   ok(/key\?\{"x-soso-api-key"/.test(fn),"без ключа запрос всё равно должен уходить: маршрут публичный, панель не обязана зависеть от секрета");
-  ok(/lastUpdateDate/.test(fn),"пропала проверка покрытия по фондам: ранний срез занижен по модулю и способен ложно зажечь детектор слома спроса");
-  ok(/verifiedThrough/.test(collector),"сшивка обязана ограничиваться днями, за которые отчитались все фонды");
-  ok(/ряд короче прошлого снимка/.test(collector),"пропала пометка деградации: пропажа слоя между прогонами укорачивает ряд молча");
-  ok(/partial:regressed/.test(collector),"укоротившийся ряд обязан помечать пакет как неполный, а не выдавать себя за штатный");
-  ok(/for\(let i=0;i<tries;i\+\+\)/.test(fn),"пропали повторы: разовый сбой слоя укорачивает ряд и двигает вердикт без новых фактов");
 }
 
 if(fail.length){console.error("Unit tests failed:\n- "+fail.join("\n- "));process.exit(1)}

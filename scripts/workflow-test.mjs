@@ -20,6 +20,11 @@ assert.match(y,/npm run probe/,"endpoint probe step missing");
 assert.match(y,/OUT:\s*\.candidate\/snapshot\.json/,"live candidate must be collected into a temporary path");
 assert.match(y,/REQUIRE_LIVE:\s*"1"/,"strict live verification step missing");
 assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"verified candidate is never promoted");
+// Сравнение порядка обязано опираться на СУЩЕСТВОВАНИЕ обоих шагов: при удалении шага indexOf
+// возвращает -1, и проверка «раньше» становится тождественно истинной — снимок, не прошедший
+// REQUIRE_LIVE, опубликовался бы на продакшен-страницу при зелёном CI.
+assert.match(y,/npm run verify/,"шаг верификации пропал из пайплайна");
+assert.ok(y.indexOf("cp .candidate/snapshot.json")>0,"шаг промоушена кандидата пропал из пайплайна");
 assert.ok(y.indexOf("npm run verify")<y.indexOf("cp .candidate/snapshot.json"),"publication must happen after verification");
 assert.doesNotMatch(y,/fetch-depth:\s*0/,"a full clone gets slower every day and is not needed for a rebase");
 assert.match(y,/continue-on-error:\s*true/,"probe must never block publication");

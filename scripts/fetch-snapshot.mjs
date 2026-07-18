@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.9.1";
+const VERSION = "2.9.2";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -378,7 +378,6 @@ function parseEtfFlowJson(text){
 // означает отказ от сшивки и возврат к чистому ряду The Block. Сшивка не имеет права ухудшить
 // картину — только добавить недостающие дни.
 const SOSO_ETF_URL = "https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart";
-const SOSO_ETF_CURRENT_URL = "https://api.sosovalue.xyz/openapi/v2/etf/currentEtfDataMetrics";
 const SOSO_MAX_SPLICE_DAYS = 3;   // длинные выходные + праздник; больше — это уже подмена источника
 const SOSO_DRIFT_TOLERANCE = 0.03; // 3% валового потока на пересечении (наблюдаемое расхождение ~0.1%)
 const SOSO_MIN_OVERLAP = 10;      // меньше — сверять не на чем, сшивку не делаем
@@ -394,7 +393,9 @@ async function sosoPost(url,tries=2){
       const j=await r.json();
       if(finite(j?.code)&&Number(j.code)!==0)throw new Error(`API code ${j.code}: ${String(j?.msg||"").slice(0,60)}`);
       return j;
-    }catch(e){err=e;if(i<tries-1)await sleep(700);}
+    // Постоянную ошибку повторять бессмысленно: 401/403/404 воспроизведутся один в один, а на
+    // лимитированном маршруте удвоение запросов только приближает 429. Так же поступает request().
+    }catch(e){err=e;const m=String(e?.message||"");if(/HTTP 4\d\d/.test(m)&&!/HTTP 429/.test(m))break;if(i<tries-1)await sleep(700);}
   }
   throw err;
 }
@@ -404,61 +405,82 @@ async function sosoPost(url,tries=2){
 // зажечь детектор слома спроса — то есть нарушить обещание «сшивка может только дополнить».
 // Поэтому покрытие проверяется напрямую, а не эвристикой по величине.
 async function fetchSosoEtfDaily(){
-  const [hist,current]=await Promise.all([sosoPost(SOSO_ETF_URL),sosoPost(SOSO_ETF_CURRENT_URL).catch(()=>null)]);
+  const hist=await sosoPost(SOSO_ETF_URL);
   const rows=(hist?.data||[])
     .map(x=>({t:Date.parse(String(x?.date)+"T00:00:00Z"),v:Number(x?.totalNetInflow)}))
     .filter(x=>finite(x.t)&&finite(x.v)&&![0,6].includes(new Date(x.t).getUTCDay()))
     .sort((a,b)=>a.t-b.t);
   if(rows.length<100)throw new Error(`история слишком коротка: ${rows.length}`);
-  let verifiedThrough=null;
-  const list=current?.data?.list;
-  if(Array.isArray(list)&&list.length){
-    const dates=list.map(f=>String(f?.dailyNetInflow?.lastUpdateDate||"")).filter(Boolean);
-    // Все фонды должны отчитаться за один и тот же день — тогда он полный.
-    if(dates.length===list.length){
-      const newest=dates.slice().sort().at(-1);
-      if(dates.every(d=>d===newest))verifiedThrough=Date.parse(newest+"T00:00:00Z");
-    }
-  }
-  return{rows,verifiedThrough:finite(verifiedThrough)?verifiedThrough:null};
+  return rows;
 }
-// Возвращает {series, source, spliced} — сшитый ряд либо исходный канон без изменений.
-function spliceFreshEtfDays(canon,fresh,canonName,{verifiedThrough=null}={}){
+// Возвращает {series, source, spliced, note, probe} — сшитый ряд либо исходный канон без изменений.
+// `seen` — наблюдения ПРОШЛОГО прогона (день -> значение); `probe` — наблюдения этого прогона,
+// которые вызывающий обязан сохранить в состоянии, иначе подтверждать будет нечем.
+function spliceFreshEtfDays(canon,fresh,canonName,{seen=null}={}){
   const canonLast=Number(last(canon).t);
-  let ahead=fresh.filter(x=>x.t>canonLast);
-  if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:null};
-  // Досюда все фонды отчитались; более свежие дни — заведомо неполные, их не берём.
-  if(finite(verifiedThrough)){
-    const dropped=ahead.filter(x=>x.t>verifiedThrough).length;
-    ahead=ahead.filter(x=>x.t<=verifiedThrough);
-    if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:`свежий день ещё не полон (отчитались не все фонды) — сшивка отложена`};
-    if(dropped)return spliceVerified(canon,ahead,fresh,canonName,`${dropped} неполн. дн отброшено`);
+  const ahead=fresh.filter(x=>x.t>canonLast);
+  const probe=Object.fromEntries(ahead.map(x=>[dayKey(x.t),x.v]));
+  if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:null,probe};
+  // Предел опережения проверяется по СЫРОМУ опережению, до любого отсева: три дня — это граница,
+  // за которой сшивка перестаёт быть дополнением и становится подменой источника. Считать предел
+  // по уже урезанному списку значило бы пропускать мёртвый канон, урезав его до разрешённых трёх.
+  if(ahead.length>SOSO_MAX_SPLICE_DAYS)return{series:canon,source:canonName,spliced:0,note:`опережение ${ahead.length} дн больше допустимых ${SOSO_MAX_SPLICE_DAYS} — сшивка отменена`,probe};
+  // ПОДТВЕРЖДЕНИЕ ВТОРЫМ НАБЛЮДЕНИЕМ. Полноту дня у провайдера спросить нельзя: все фонды всегда
+  // несут одну дату публикации, а неотчитавшийся фонд выглядит ровным нулём, а не отставшей датой.
+  // Зато неполный день ДОРАСТАЕТ по мере отчёта фондов, поэтому между двумя часовыми прогонами его
+  // значение меняется, а значение закрытого дня — нет. Берём только дни, которые прошлый прогон
+  // уже видел ровно такими же. Цена — час задержки на самом свежем дне.
+  const held=[];
+  const confirmed=[];
+  for(const x of ahead){
+    const before=seen?.[dayKey(x.t)];
+    if(finite(before)&&Math.abs(before-x.v)<=Math.max(1,Math.abs(x.v)*1e-9))confirmed.push(x);
+    else{held.push(dayKey(x.t));break;} // только непрерывный отрезок от канона: разрыв в ряду недопустим
   }
-  return spliceVerified(canon,ahead,fresh,canonName,null);
+  if(!confirmed.length)return{series:canon,source:canonName,spliced:0,note:`день ${held[0]} ещё не подтверждён повторным наблюдением — сшивка отложена`,probe};
+  const heldNote=held.length?`день ${held[0]} придержан до подтверждения`:null;
+  return spliceConfirmed(canon,confirmed,fresh,canonName,heldNote,probe);
 }
-function spliceVerified(canon,ahead,fresh,canonName,extraNote){
+function spliceConfirmed(canon,ahead,fresh,canonName,extraNote,probe){
   const canonLast=Number(last(canon).t);
-  if(ahead.length>SOSO_MAX_SPLICE_DAYS)return{series:canon,source:canonName,spliced:0,note:`опережение ${ahead.length} дн больше допустимых ${SOSO_MAX_SPLICE_DAYS} — сшивка отменена`};
   // Сверка на ПЕРЕСЕЧЕНИИ: провайдеры обязаны описывать одну и ту же величину. Сравниваются суммы,
   // а не отдельные дни: посуточный разброс симметричен и взаимно гасится, а смена методологии или
   // единицы измерения сдвинет именно сумму.
   const byDay=new Map(canon.map(x=>[dayKey(x.t),x.v]));
   const overlap=fresh.filter(x=>byDay.has(dayKey(x.t))).slice(-20);
-  if(overlap.length<SOSO_MIN_OVERLAP)return{series:canon,source:canonName,spliced:0,note:`общих дней для сверки ${overlap.length} < ${SOSO_MIN_OVERLAP} — сшивка отменена`};
+  if(overlap.length<SOSO_MIN_OVERLAP)return{series:canon,source:canonName,spliced:0,note:`общих дней для сверки ${overlap.length} < ${SOSO_MIN_OVERLAP} — сшивка отменена`,probe};
   const delta=overlap.reduce((acc,x)=>acc+(x.v-byDay.get(dayKey(x.t))),0);
   const gross=overlap.reduce((acc,x)=>acc+Math.abs(byDay.get(dayKey(x.t))),0);
   const drift=gross>0?Math.abs(delta)/gross:1;
-  if(drift>SOSO_DRIFT_TOLERANCE)return{series:canon,source:canonName,spliced:0,note:`расхождение с каноном ${(drift*100).toFixed(2)}% > ${(SOSO_DRIFT_TOLERANCE*100).toFixed(0)}% — сшивка отменена`};
+  if(drift>SOSO_DRIFT_TOLERANCE)return{series:canon,source:canonName,spliced:0,note:`расхождение с каноном ${(drift*100).toFixed(2)}% > ${(SOSO_DRIFT_TOLERANCE*100).toFixed(0)}% — сшивка отменена`,probe};
   // Провайдеры используют разные соглашения о метке времени (канон — полдень UTC, дополняющий
   // слой — полночь). Без выравнивания шаг между последними точками становится 12 ч вместо 24, а
-  // возраст наблюдения прыгает на полсуток без единого нового факта. Приводим к соглашению канона,
-  // не выходя за текущий момент (иначе ETF-контракт отбракует точку как «из будущего»).
+  // возраст наблюдения прыгает на полсуток без единого нового факта.
+  // День, чья КАНОНИЧЕСКАЯ метка ещё не наступила, отбрасывается, а не подтягивается к текущему
+  // моменту: подтягивание впускало бы в ряд незакрытый торговый день, обходя запрет ETF-контракта
+  // на точку из будущего, и делало бы возраст наблюдения функцией времени прогона, а не данных.
   const offset=canonLast%DAY;
-  const aligned=ahead.map(x=>({t:Math.min(x.t-(x.t%DAY)+offset,NOW-HOUR),v:x.v})).filter(x=>x.t>canonLast);
-  if(!aligned.length)return{series:canon,source:canonName,spliced:0,note:"после выравнивания меток времени свежих дней не осталось"};
+  const aligned=ahead.map(x=>({t:x.t-(x.t%DAY)+offset,v:x.v})).filter(x=>x.t>canonLast&&x.t<=NOW);
+  if(!aligned.length)return{series:canon,source:canonName,spliced:0,note:"канонический момент свежего дня ещё не наступил — сшивка отложена",probe};
   const merged=[...canon,...aligned];
-  if(!validateEtfSeries(merged))return{series:canon,source:canonName,spliced:0,note:"сшитый ряд не прошёл ETF-контракт — сшивка отменена"};
-  return{series:merged,source:`${canonName} + SosoValue`,spliced:aligned.length,note:extraNote};
+  if(!validateEtfSeries(merged))return{series:canon,source:canonName,spliced:0,note:"сшитый ряд не прошёл ETF-контракт — сшивка отменена",probe};
+  return{series:merged,source:`${canonName} + SosoValue`,spliced:aligned.length,note:extraNote,probe};
+}
+// Ряд ETF между часовыми прогонами может стать ХУЖЕ двумя способами, и оба обязаны быть видны.
+// Откат последнего дня двигает возраст наблюдения назад; усечение истории не трогает свежесть, но
+// меняет перцентили, а через них — балл семьи, которая стоит у самой границы детектора слома
+// спроса. Второй случай опаснее: он тихо ГАСИТ тревогу, не поднимая её.
+function etfDegradation(prevRows,series){
+  const notes=[];
+  if(!Array.isArray(prevRows)||!prevRows.length||!series.length)return{degraded:false,notes};
+  const prevLast=Number(last(prevRows).t),nowLast=Number(last(series).t);
+  const rolledBack=finite(prevLast)&&dayKey(prevLast)>dayKey(nowLast);
+  // Вытеснение сшитого дня каноном длины не меняет, поэтому допуск не нужен: любое укорачивание —
+  // повод показать деградацию, включая придержанный до подтверждения день.
+  const truncated=series.length<prevRows.length;
+  if(rolledBack)notes.push(`ряд короче прошлого снимка: было по ${dayKey(prevLast)}, стало по ${dayKey(nowLast)}`);
+  if(truncated)notes.push(`история ETF усечена: было ${prevRows.length} дней, стало ${series.length}`);
+  return{degraded:rolledBack||truncated,notes};
 }
 const ETF_BLOCK_MIRRORS = [
   { name: "The Block", url: "https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow" },
@@ -498,23 +520,25 @@ async function fetchEtfFlows(){
     // Дополняющий слой свежих дат. Любая проблема = тихий возврат к чистому канону: диагностика
     // записывается, но картина не ухудшается.
     let series=best.series,source=best.name,spliced=0,urls=[SOURCE_URLS.theblock];
+    // Наблюдения прошлого прогона — топливо подтверждения. Если их нет (первый запуск, потеря
+    // кэша), сшивка просто не состоится и восстановится сама на следующем часе.
+    let probe=previous?.datasets?.etf?.fresh_probe||{};
     try{
-      const {rows,verifiedThrough}=await fetchSosoEtfDaily();
-      const r=spliceFreshEtfDays(best.series,rows,best.name,{verifiedThrough});
-      series=r.series;source=r.source;spliced=r.spliced;
+      const rows=await fetchSosoEtfDaily();
+      const r=spliceFreshEtfDays(best.series,rows,best.name,{seen:previous?.datasets?.etf?.fresh_probe});
+      series=r.series;source=r.source;spliced=r.spliced;probe=r.probe||{};
       if(r.note)errors.push(`SosoValue: ${r.note}`);
       if(spliced)urls=[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue];
     }catch(e){errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);}
     // Дополняющий слой может пропасть между часовыми прогонами — тогда ряд станет КОРОЧЕ прошлого,
     // а возраст наблюдения уедет назад. Молчать об этом нельзя: балл семьи ETF стоит у самой
-    // границы детектора слома спроса, и такое «мигание» переключало бы тактический вердикт без
-    // единого нового факта. Помечаем пакет partial — карточки честно покажут деградацию.
-    const prevRows=previous?.datasets?.etf?.data;
-    const prevLast=Array.isArray(prevRows)&&prevRows.length?Number(last(prevRows).t):null;
+    // границы детектора слома спроса, и такое «мигание» двигало бы тактический вердикт без единого
+    // нового факта. Ловим ОБА вида укорачивания — и откат последнего дня, и усечение истории:
+    // потеря глубины меняет перцентили, а через них балл семьи, ничем себя не выдавая.
     const nowLast=Number(last(series).t);
-    const regressed=finite(prevLast)&&dayKey(prevLast)>dayKey(nowLast);
-    if(regressed)errors.push(`ряд короче прошлого снимка: было по ${dayKey(prevLast)}, стало по ${dayKey(nowLast)}`);
-    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,partial:regressed||undefined};
+    const degraded=etfDegradation(previous?.datasets?.etf?.data,series);
+    errors.push(...degraded.notes);
+    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,partial:degraded.degraded||undefined};
   }
   try{
     const series=parseFarside(await request("https://farside.co.uk/bitcoin-etf-flow-all-data/",{text:true,tries:2}));
@@ -940,7 +964,7 @@ function buildMetrics(){
   const etf5Btc=last(f5Btc)?.v,etf20Btc=last(f20Btc)?.v;
   // Economic zero: a net 20-day BTC OUTFLOW cannot score positive, even if historically outflows were larger.
   let etfScore=componentScore([finite(etf5Btc)?highGood(p5):null,finite(etf20Btc)?highGood(p20):null]);if(finite(etf20Btc)&&etf20Btc<0&&finite(etfScore))etfScore=Math.min(etfScore,0);
-  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?(finite(etf20Btc)&&etf20Btc<0?"устойчивый отток":"слабый приток"):"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос. Из двух зеркал The Block берётся то, чьи данные свежее (ряды идентичны, зеркало обновляется раньше). Дни, которых у The Block ещё нет, дополняются из SosoValue и вытесняются, как только канонический источник их догоняет. Дополняется только день, за который отчитались все фонды: ранний неполный срез занижен по модулю и исказил бы окна потоков. При расхождении провайдеров на общих днях сшивка отменяется. Farside — резерв на случай отказа всех остальных.",score:etfScore,source:`${datasetSource("etf","The Block")} · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(datasetUrls("etf",SOURCE_URLS.theblock),datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
+  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?(finite(etf20Btc)&&etf20Btc<0?"устойчивый отток":"слабый приток"):"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос. Из двух зеркал The Block берётся то, чьи данные свежее (ряды идентичны, зеркало обновляется раньше). Дни, которых у The Block ещё нет, дополняются из SosoValue и вытесняются, как только канонический источник их догоняет. Свежий день берётся лишь после того, как повторное наблюдение дало то же значение: неполный день дорастает по мере отчёта фондов, поэтому расходится между наблюдениями и придерживается. При расхождении провайдеров на общих днях сшивка отменяется. Farside — резерв на случай отказа всех остальных.",score:etfScore,source:`${datasetSource("etf","The Block")} · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(datasetUrls("etf",SOURCE_URLS.theblock),datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
   add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:datasetSource("etf","The Block"),source_url:SOURCE_URLS.theblock,source_urls:datasetUrls("etf",SOURCE_URLS.theblock),...sourceMeta("etf"),series:etf});
   add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:datasetSource("etf","The Block"),source_url:SOURCE_URLS.theblock,source_urls:datasetUrls("etf",SOURCE_URLS.theblock),...sourceMeta("etf"),series:etf5s});
   add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:datasetSource("etf","The Block"),source_url:SOURCE_URLS.theblock,source_urls:datasetUrls("etf",SOURCE_URLS.theblock),...sourceMeta("etf"),series:etf20s});
@@ -1297,7 +1321,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
