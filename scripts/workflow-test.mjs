@@ -27,6 +27,11 @@ assert.match(y,/REQUIRE_LIVE:\s*"1"/);
 assert.match(y,/branch="\$\{GITHUB_REF_NAME:-main\}"/,"branch must not be hardcoded");
 assert.doesNotMatch(y,/pull --rebase origin main/,"hardcoded main branch remains");
 assert.match(y,/git push origin "HEAD:\$branch"/);
+// Коммит снимка обязан разрешать гонку ДЕТЕРМИНИРОВАННО: ребейз снимка на разошедшийся origin
+// конфликтует одинаково на каждой попытке, поэтому ретраи ребейза = три гарантированных падения.
+assert.doesNotMatch(y,/git rebase/,"ребейз в шаге коммита снимка приводит к неразрешимому конфликту docs/snapshot.json");
+assert.match(y,/git reset -q --soft "origin\/\$branch"/,"пропал перенос свежего снимка поверх origin");
+assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"побеждать обязан снимок этого прогона, уже опубликованный на Pages");
 assert.match(y,/git add docs\/snapshot\.json/,"public snapshot must be committed");
 assert.doesNotMatch(y,/git add[^\n]*\.state\/cache\.json/,"raw internal state must not be committed");
 assert.match(y,/"package\.json"/,"package changes must trigger workflow");

@@ -130,20 +130,24 @@ jobs:
           branch="${GITHUB_REF_NAME:-main}"
           git config user.name "21m-dashboard-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add docs/snapshot.json
-          if git diff --cached --quiet; then
-            echo "Снимок не изменился"
-            exit 0
-          fi
-          git commit -m "BTC snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
-          # Ретрай против гонки с параллельным ручным пушем. Каждый сбойный путь внутри цикла
-          # обёрнут (set -e не должен убивать шаг на полпути), а полный провал трёх попыток
-          # обязан покраснеть: молчаливая дивергенция «сайт обновлён — репозиторий нет» хуже
-          # красного прогона (self-test теперь переживает рассинхрон, но скрывать его нельзя).
+          # Гонка с параллельным пушем разрешается ДЕТЕРМИНИРОВАННО, а не ретраями: если origin
+          # ушёл вперёд и там другой docs/snapshot.json, ребейз конфликтует на каждой попытке
+          # одинаково (файл целиком переписывается), и три ретрая просто трижды падают. При этом
+          # правильный исход очевиден: побеждает снимок ЭТОГО прогона — он собран позже и уже
+          # опубликован на Pages шагом выше. Поэтому вместо ребейза мы каждый раз переносим свой
+          # файл поверх свежего origin (reset --soft + повторный add), что конфликтов не создаёт.
           pushed=0
           for attempt in 1 2 3; do
             git fetch origin "$branch" || { sleep $((attempt*5)); continue; }
-            git rebase "origin/$branch" || { git rebase --abort || true; sleep $((attempt*5)); continue; }
+            git reset -q --soft "origin/$branch" || { sleep $((attempt*5)); continue; }
+            cp .candidate/snapshot.json docs/snapshot.json
+            git add docs/snapshot.json
+            if git diff --cached --quiet; then
+              echo "Снимок не изменился"
+              pushed=1
+              break
+            fi
+            git commit -q -m "BTC snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]" || { sleep $((attempt*5)); continue; }
             if git push origin "HEAD:$branch"; then pushed=1; break; fi
             sleep $((attempt*5))
           done
