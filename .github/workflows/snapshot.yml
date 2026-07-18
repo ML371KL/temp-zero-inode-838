@@ -81,6 +81,9 @@ jobs:
         env:
           FRED_KEY: ${{ secrets.FRED_KEY }}
           CM_API_KEY: ${{ secrets.CM_API_KEY }}
+          # Необязателен: маршрут SosoValue отвечает и без ключа. Проброшен, чтобы слой пережил
+          # включение авторизации провайдером; его отсутствие лишь отключает дополнение свежих дней.
+          SOSO_API_KEY: ${{ secrets.SOSO_API_KEY }}
           OUT: .candidate/snapshot.json
           STATE: .candidate/cache.json
           PREVIOUS_STATE: .state/cache.json

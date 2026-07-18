@@ -17,7 +17,7 @@
     "live-regression": "node scripts/live-regression-test.mjs",
     "fallback": "node scripts/fallback-test.mjs"
   },
-  "version": "2.8.6",
+  "version": "2.9.0",
   "engines": {
     "node": ">=24"
   }

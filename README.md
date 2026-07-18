@@ -1,4 +1,4 @@
-# Сейсмостанция «21M» v2.8.6
+# Сейсмостанция «21M» v2.9.0
 
 Консервативный режимный дэшборд Bitcoin для GitHub Pages. Он не предназначен для интрадей-трейдинга
 и не пытается предсказать цену. Панель отвечает на два практических вопроса:
@@ -53,7 +53,7 @@ trigger a GitHub Pages build.»* При источнике «Deploy from a branc
 | Капитализация | цена × модель эмиссии | — | — | — | USD |
 | Хешрейт, сложность | mempool.space | blockchain.info | — | — | **H/s** (сырые хеши) |
 | Комиссии | mempool.space | Blockstream | — | — | sat/vB |
-| Потоки spot-ETF | **свежайшее из двух зеркал The Block** | data.tbstat.com | Farside (за Cloudflare, 403 с CI) | — | USD/день |
+| Потоки spot-ETF | **свежайшее из двух зеркал The Block** | + SosoValue дополняет свежие дни | data.tbstat.com | Farside (403 с CI) | USD/день |
 | **MVRV** | **Coin Metrics** | **bitcoin-data.com/BGeometrics (без ключа)** | — | — | безразмерное отношение |
 | Адреса, транзакции | Coin Metrics | blockchain.info | — | — | шт/день |
 | Доход майнеров | Coin Metrics (эмиссия + комиссии) | blockchain.info (total) | — | — | USD/день |

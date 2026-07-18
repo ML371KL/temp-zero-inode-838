@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -253,11 +253,34 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   ok(/зеркала The Block разошлись/.test(fn),"пропала сверка зеркал на пересечении: испорченная свежая копия попала бы в публикацию");
 }
 
-// Разведка SosoValue (шаг 1) обязана оставаться ВНЕ сборщика снимка: пока интеграция не принята,
-// коллектор не должен ни читать ключ, ни ходить в этот API.
+// ---- Дополняющий слой свежих дат (SosoValue) ----
+// The Block остаётся КАНОНОМ: слой добавляет только отсутствующие торговые дни и обязан молча
+// отказываться при любом сомнении. Сшивка не имеет права ухудшить картину — только дополнить.
+{
+  const DAYMS=864e5;
+  const weekdays=(count,endBack)=>{const out=[];let t=Date.parse(new Date().toISOString().slice(0,10)+"T00:00:00Z");
+    while(out.length<count+endBack){if(![0,6].includes(new Date(t).getUTCDay()))out.push(t);t-=DAYMS;}
+    const asc=out.reverse();return asc.slice(0,asc.length-endBack);};
+  const mk=(count,endBack,f=1)=>weekdays(count,endBack).map((t,i)=>({t,v:(1+(i%5))*1e8*f}));
+  const canon=mk(200,2),fresh=mk(202,0);
+  const r=spliceFreshEtfDays(canon,fresh,"The Block");
+  eq(r.spliced,2,"два отсутствующих торговых дня обязаны быть дополнены");
+  eq(r.source,"The Block + SosoValue","атрибуция должна честно называть оба источника");
+  ok(r.series.slice(0,canon.length).every((x,i)=>x.v===canon[i].v),"канонические дни не должны переписываться дополняющим слоем");
+  eq(spliceFreshEtfDays(fresh,fresh,"The Block").spliced,0,"канон не отстаёт — сшивки быть не должно");
+  eq(spliceFreshEtfDays(mk(202,0),mk(200,2),"The Block").spliced,0,"провайдер позади канона — сшивки быть не должно");
+  ok(/расхождение/.test(spliceFreshEtfDays(canon,mk(202,0,1.5),"The Block").note||""),"расхождение провайдеров на общих днях обязано отменять сшивку");
+  ok(/опережение/.test(spliceFreshEtfDays(mk(200,8),fresh,"The Block").note||""),"опережение сверх лимита обязано отменять сшивку (это подмена источника, а не дополнение)");
+  ok(/общих дней/.test(spliceFreshEtfDays(canon,fresh.slice(-4),"The Block").note||""),"без достаточного пересечения сверять нечего — сшивка отменяется");
+  eq(spliceFreshEtfDays(canon,mk(202,0).map(x=>({...x,v:x.v*1.02})),"The Block").spliced,2,"обычный шум провайдеров не должен блокировать дополнение");
+  eq(spliceFreshEtfDays(canon,mk(202,0).map((x,i)=>i>=200?{...x,v:2e10}:x),"The Block").spliced,0,"точка вне физической полосы обязана отменять сшивку");
+}
 {
   const collector=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
-  ok(!/SOSO_API_KEY|sosovalue/i.test(collector),"сборщик снимка не должен знать о SosoValue до принятия интеграции");
+  ok(!/SOSO-[A-Za-z0-9]{8}/.test(collector),"ключ SosoValue не должен быть зашит в сборщик");
+  const fn=collector.slice(collector.indexOf("async function fetchSosoEtfDaily"),collector.indexOf("function spliceFreshEtfDays"));
+  ok(/process\.env\.SOSO_API_KEY/.test(fn),"ключ обязан читаться из окружения");
+  ok(/key\?\{"x-soso-api-key"/.test(fn),"без ключа запрос всё равно должен уходить: маршрут публичный, панель не обязана зависеть от секрета");
 }
 
 if(fail.length){console.error("Unit tests failed:\n- "+fail.join("\n- "));process.exit(1)}
