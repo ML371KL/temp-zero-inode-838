@@ -253,6 +253,13 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   ok(/зеркала The Block разошлись/.test(fn),"пропала сверка зеркал на пересечении: испорченная свежая копия попала бы в публикацию");
 }
 
+// Разведка SosoValue (шаг 1) обязана оставаться ВНЕ сборщика снимка: пока интеграция не принята,
+// коллектор не должен ни читать ключ, ни ходить в этот API.
+{
+  const collector=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
+  ok(!/SOSO_API_KEY|sosovalue/i.test(collector),"сборщик снимка не должен знать о SosoValue до принятия интеграции");
+}
+
 if(fail.length){console.error("Unit tests failed:\n- "+fail.join("\n- "));process.exit(1)}
 
 // Observation freshness rejects future-dated data as well as stale data.

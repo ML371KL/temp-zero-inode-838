@@ -47,6 +47,16 @@ const probe=readFileSync(new URL("./probe.mjs",import.meta.url),"utf8");
 assert.match(probe,/The Block ETF API/,"primary ETF endpoint missing from runner probe");
 assert.match(probe,/tbstat ETF mirror/,"ETF mirror missing from runner probe");
 assert.match(probe,/Bitstamp daily OHLC/,"Bitstamp history fallback missing from runner probe");
+// Разведка SosoValue: ключ живёт ТОЛЬКО в диагностике и никогда не печатается.
+assert.match(probe,/SosoValue ETF current/,"разведочная проверка SosoValue пропала из probe");
+assert.match(probe,/SOSO_API_KEY/,"probe должен читать ключ SosoValue из окружения");
+assert.doesNotMatch(probe,/SOSO-[A-Za-z0-9]{8}/,"ключ SosoValue не должен быть зашит в код");
+assert.match(y,/SOSO_API_KEY: \$\{\{ secrets\.SOSO_API_KEY \}\}/,"секрет SosoValue не проброшен в шаг диагностики");
+// Сборщик снимка НЕ должен получать этот ключ: разведка не смеет стать скрытой зависимостью.
+{
+  const collectStep=y.slice(y.indexOf("Собрать live-кандидата"),y.indexOf("Проверить live-кандидата"));
+  assert.doesNotMatch(collectStep,/SOSO_API_KEY/,"ключ SosoValue не должен попадать в сборку снимка на шаге разведки");
+}
 const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
 assert.match(html,/id="uiVersion"/,"dynamic UI version element missing");
 assert.match(html,/SNAP\.version/,"UI version is not tied to snapshot version");

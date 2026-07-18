@@ -2,9 +2,9 @@
 import { readFileSync as __rf } from "node:fs";
 const PKG_VERSION = JSON.parse(__rf(new URL("../package.json", import.meta.url), "utf8")).version;
 
-const FRED_KEY=String(process.env.FRED_KEY||"").trim(),CM_KEY=String(process.env.CM_API_KEY||"").trim(),TIMEOUT=20_000;
+const FRED_KEY=String(process.env.FRED_KEY||"").trim(),CM_KEY=String(process.env.CM_API_KEY||"").trim(),SOSO_KEY=String(process.env.SOSO_API_KEY||"").trim(),TIMEOUT=20_000;
 const host=u=>{try{return new URL(u).host}catch{return"?"}},safe=v=>String(v??"").replace(/[\r\n\t]+/g," ").slice(0,180);
-async function probe(name,url,inspect,{critical=false,text=false,method="GET",payload=null}={}){const t=Date.now();try{const r=await fetch(url,{method,headers:{"User-Agent":"btc-21m-dashboard/"+PKG_VERSION+"-probe","Accept":text?"text/plain,text/csv,text/html,*/*":"application/json,*/*",...(payload?{"Content-Type":"application/json"}:{})},body:payload?JSON.stringify(payload):undefined,signal:AbortSignal.timeout(TIMEOUT)}),raw=await r.text();let body=null;try{body=JSON.parse(raw)}catch{}let note="";try{note=safe(inspect?.(body,raw,r)||"")}catch(e){note=`!inspect ${safe(e.message||e)}`;}return{name,critical,ok:r.ok&&!note.startsWith("!"),status:r.status,ms:Date.now()-t,host:host(url),note};}catch(e){return{name,critical,ok:false,status:"-",ms:Date.now()-t,host:host(url),note:safe(e.message||e)};}}
+async function probe(name,url,inspect,{critical=false,text=false,method="GET",payload=null,headers={}}={}){const t=Date.now();try{const r=await fetch(url,{method,headers:{"User-Agent":"btc-21m-dashboard/"+PKG_VERSION+"-probe","Accept":text?"text/plain,text/csv,text/html,*/*":"application/json,*/*",...(payload?{"Content-Type":"application/json"}:{}),...headers},body:payload?JSON.stringify(payload):undefined,signal:AbortSignal.timeout(TIMEOUT)}),raw=await r.text();let body=null;try{body=JSON.parse(raw)}catch{}let note="";try{note=safe(inspect?.(body,raw,r)||"")}catch(e){note=`!inspect ${safe(e.message||e)}`;}return{name,critical,ok:r.ok&&!note.startsWith("!"),status:r.status,ms:Date.now()-t,host:host(url),note};}catch(e){return{name,critical,ok:false,status:"-",ms:Date.now()-t,host:host(url),note:safe(e.message||e)};}}
 const fredApi=`https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&api_key=${encodeURIComponent(FRED_KEY)}&file_type=json&sort_order=desc&limit=3`;
 const cftcParams=new URLSearchParams({"$select":"report_date_as_yyyy_mm_dd,open_interest_all,asset_mgr_positions_long,asset_mgr_positions_short,lev_money_positions_long,lev_money_positions_short","$limit":"3","$where":"market_and_exchange_names='BITCOIN - CHICAGO MERCANTILE EXCHANGE'","$order":"report_date_as_yyyy_mm_dd desc"});
 const cmMetrics="CapMVRVCur,FlowInExNtv,FlowOutExNtv,SplyExNtv,IssTotUSD,FeeTotNtv,AdrActCnt,TxCnt,TxTfrCnt",cmRoot=CM_KEY?"https://api.coinmetrics.io/v4":"https://community-api.coinmetrics.io/v4",cmQ=new URLSearchParams({assets:"btc",metrics:cmMetrics,frequency:"1d",page_size:"3",ignore_forbidden_errors:"true",ignore_unsupported_errors:"true"});if(CM_KEY)cmQ.set("api_key",CM_KEY);
@@ -30,6 +30,25 @@ const checks=[
  ["The Block ETF API","https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow",b=>{const d=b?.chart?.jsonFile?.Series?.["Total Net Flow"]?.Data;return Array.isArray(d)&&d.length>100?`${d.length} rows · Result USD/day · latest ${new Date(Number(d.at(-1)?.Timestamp)*1000).toISOString().slice(0,10)}`:'!ETF JSON contract failed';}],
  ["tbstat ETF mirror","https://data.tbstat.com/dashboard/markets_structuredproducts_btcspotetftotalnetflows_daily_other.json",b=>{const d=b?.Series?.["Total Net Flow"]?.Data;return Array.isArray(d)&&d.length>100?`${d.length} rows · mirror Result USD/day`:'!ETF mirror contract failed';}],
  ["Farside ETF","https://farside.co.uk/bitcoin-etf-flow-all-data/",(_b,t)=>{const rows=(t.match(/<tr[\s\S]*?<\/tr>/gi)||[]).length,dates=(t.match(/\d{1,2}\s+[A-Z][a-z]{2}\s+20\d{2}/g)||[]);return rows>=50&&dates.length?`${rows} HTML rows · latest ${dates.at(-1)} · USD millions table`:`!HTML/parser contract failed`;},{critical:true,text:true}],
+ // РАЗВЕДКА (шаг 1, ничего не интегрировано в снимок): доступен ли SosoValue с раннера и
+ // насколько он свежее The Block. Farside умирает здесь на Cloudflare-челлендже (403) — у
+ // SosoValue тоже Cloudflare, но это авторизованный REST API, который обычно не челленджится.
+ // Проверка НЕ критическая и без ключа честно сообщает, что пропущена.
+ ["SosoValue ETF current","https://api.sosovalue.xyz/openapi/v2/etf/currentEtfDataMetrics",b=>{
+   if(b?.code!==0&&b?.code!==undefined)return `!API code ${b.code}: ${safe(b.msg||b.message)}`;
+   const f=b?.data?.dailyNetInflow;const v=Number(f?.value);
+   if(!Number.isFinite(v)||!f?.lastUpdateDate)return '!contract failed: нет dailyNetInflow/lastUpdateDate';
+   const funds=Array.isArray(b?.data?.list)?b.data.list.length:0;
+   const withFlow=Array.isArray(b?.data?.list)?b.data.list.filter(x=>Number.isFinite(Number(x?.dailyNetInflow?.value))).length:0;
+   return `latest ${f.lastUpdateDate} · ${(v/1e6).toFixed(1)} млн USD/day · фондов ${withFlow}/${funds} · status ${f.status??'?'} · ключ ${SOSO_KEY?'задан':'не задан (маршрут отвечает и без него)'}`;
+ },{method:"POST",payload:{type:"us-btc-spot"},headers:SOSO_KEY?{"x-soso-api-key":SOSO_KEY}:{}}],
+ ["SosoValue ETF history","https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart",b=>{
+   const a=b?.data;
+   if(!Array.isArray(a)||!a.length)return `!contract failed: нет массива истории (code ${b?.code})`;
+   const dates=a.map(x=>x?.date).filter(Boolean).sort();
+   const unitOk=a.every(x=>Number.isFinite(Number(x?.totalNetInflow)));
+   return `${a.length} дней · ${dates[0]}..${dates.at(-1)} · totalNetInflow USD/day ${unitOk?'ok':'!нечисловой'}`;
+ },{method:"POST",payload:{type:"us-btc-spot"},headers:SOSO_KEY?{"x-soso-api-key":SOSO_KEY}:{}}],
  ["DefiLlama supply","https://stablecoins.llama.fi/stablecoincharts/all",b=>Array.isArray(b)&&b.length>100?`${b.length} points · USD total supply`:'!history missing',{critical:true}],
  ["DefiLlama pegs","https://stablecoins.llama.fi/stablecoins?includePrices=true",b=>{const a=b?.peggedAssets||b?.data||[],f=s=>a.find(x=>String(x.symbol||'').toUpperCase()===s)?.price;return f('USDT')&&f('USDC')?`USD/token USDT ${f('USDT')} · USDC ${f('USDC')}`:'!peg prices missing';},{critical:true}],
  ["Coinbase USDT/USD","https://api.exchange.coinbase.com/products/USDT-USD/ticker",b=>b?.price?`USD/token ${b.price}`:'!missing'],
@@ -50,6 +69,34 @@ const checks=[
 const results=[];for(const [n,u,i,o] of checks)results.push(await probe(n,u,i,o));
 console.log("STATE CRIT HTTP    MS HOST                         NAME · CONTRACT");for(const x of results)console.log(`${x.ok?'OK  ':'FAIL'}  ${x.critical?'YES ':' no '} ${String(x.status).padEnd(4)} ${String(x.ms).padStart(5)} ${x.host.padEnd(28)} ${x.name} · ${x.note}`);
 const cf=results.filter(x=>x.critical&&!x.ok),of=results.filter(x=>!x.critical&&!x.ok);console.log(`\nCritical failures: ${cf.length}${cf.length?' · '+cf.map(x=>x.name).join(', '):''}`);console.log(`Optional/fallback failures: ${of.length}${of.length?' · '+of.map(x=>x.name).join(', '):''}`);console.log('Probe is diagnostic; candidate validation and TTL remain authoritative.');
+// ---- Разведка SosoValue: свежесть и согласие с каноническим рядом The Block ----
+// Единственная проверка, которая отвечает на вопрос «стоит ли интегрировать»: опережает ли
+// SosoValue The Block НА РАННЕРЕ и совпадают ли они на общих днях. Ничего не блокирует.
+
+try{
+  // Ключ шлём, если задан. Проверено 2026-07-18: маршрут отвечает и БЕЗ ключа, и с неверным
+  // ключом — разведка не зависит от секрета, но переживёт включение авторизации провайдером.
+  const hdr={...(SOSO_KEY?{"x-soso-api-key":SOSO_KEY}:{}),"Content-Type":"application/json","User-Agent":"btc-21m-dashboard/"+PKG_VERSION+"-probe"};
+  const [tbRes,soRes]=await Promise.all([
+    fetch("https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow",{signal:AbortSignal.timeout(TIMEOUT)}).then(r=>r.json()),
+    fetch("https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart",{method:"POST",headers:hdr,body:JSON.stringify({type:"us-btc-spot"}),signal:AbortSignal.timeout(TIMEOUT)}).then(r=>r.json()),
+  ]);
+  const jf=tbRes?.chart?.jsonFile||tbRes;
+  const tb=new Map((jf?.Series?.["Total Net Flow"]?.Data||[]).map(d=>[new Date(Number(d.Timestamp)*1000).toISOString().slice(0,10),Number(d.Result)]));
+  const so=new Map((soRes?.data||[]).map(x=>[x.date,Number(x.totalNetInflow)]));
+  if(!tb.size||!so.size)throw new Error("один из рядов пуст");
+  const tbLast=[...tb.keys()].sort().at(-1),soLast=[...so.keys()].sort().at(-1);
+  const ahead=[...so.keys()].filter(d=>d>tbLast).sort();
+  const common=[...so.keys()].filter(d=>tb.has(d)).sort();
+  const scale=[...common.map(d=>Math.abs(tb.get(d)))].sort((a,b)=>a-b)[Math.floor(common.length/2)]||1;
+  const within=common.filter(d=>Math.abs(so.get(d)-tb.get(d))<=scale*0.02).length;
+  const diffs=common.map(d=>so.get(d)-tb.get(d));
+  const bias=diffs.reduce((s,v)=>s+v,0)/(diffs.length||1);
+  console.log("\nРазведка SosoValue (диагностика, не блокирует):");
+  console.log(`  The Block последний день : ${tbLast}`);
+  console.log(`  SosoValue последний день : ${soLast}${ahead.length?`  ← опережает на ${ahead.length} дн: ${ahead.join(", ")}`:"  (не опережает)"}`);
+  console.log(`  согласие на ${common.length} общих днях: ${within} в пределах 2% дневного масштаба = ${(within/common.length*100).toFixed(1)}% · смещение ${(bias/1e6).toFixed(2)} млн/день`);
+}catch(e){console.log("\nРазведка SosoValue не удалась: "+safe(e.message||e));}
 
 // Дрейф календаря публикации: единственная проверка, которая ловит расхождение порога с РЕАЛЬНОСТЬЮ
 // (совпадение двух таблиц между собой этого не ловит — обе могут быть одинаково неправы).

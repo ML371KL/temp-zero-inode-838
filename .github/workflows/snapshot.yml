@@ -69,6 +69,9 @@ jobs:
         env:
           FRED_KEY: ${{ secrets.FRED_KEY }}
           CM_API_KEY: ${{ secrets.CM_API_KEY }}
+          # Разведка SosoValue (шаг 1): ключ нужен ТОЛЬКО диагностике. Сборщик снимка его не
+          # получает и от него не зависит — обещание «панель работает без ключей» в силе.
+          SOSO_API_KEY: ${{ secrets.SOSO_API_KEY }}
         run: npm run probe
 
       # 4. Live-кандидат пишется во ВРЕМЕННЫЕ пути. docs/snapshot.json хранит последний
