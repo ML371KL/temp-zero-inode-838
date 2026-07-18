@@ -145,7 +145,12 @@ jobs:
           pushed=0
           for attempt in 1 2 3; do
             git fetch origin "$branch" || { sleep $((attempt*5)); continue; }
-            git reset -q --soft "origin/$branch" || { sleep $((attempt*5)); continue; }
+            # ВАЖНО: смешанный reset, а НЕ --soft. `--soft` двигает только HEAD и оставляет
+            # ИНДЕКС с деревом старого коммита — тогда `git commit` фиксирует это старое дерево
+            # целиком и молча ОТКАТЫВАЕТ всё, что кто-либо запушил, пока шёл прогон (проверено
+            # воспроизведением на тестовом репозитории: правка в scripts/ исчезала бесследно).
+            # Смешанный reset приводит индекс к свежему origin, и в коммит попадает ровно снимок.
+            git reset -q "origin/$branch" || { sleep $((attempt*5)); continue; }
             cp .candidate/snapshot.json docs/snapshot.json
             git add docs/snapshot.json
             if git diff --cached --quiet; then

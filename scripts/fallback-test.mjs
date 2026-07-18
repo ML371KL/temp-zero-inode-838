@@ -158,7 +158,7 @@ globalThis.fetch=async i=>{const u=String(i);
   return json({},503);};   // SosoValue мёртв
 const {fetchEtfFlows}=await import(process.env.MODULE_URL);
 const r=await fetchEtfFlows();
-console.log(JSON.stringify({source:r.source,len:r.data.length,last:r.data.at(-1).t,spliced:r.spliced,partial:r.partial,errors:r.errors}));
+console.log(JSON.stringify({source:r.source,len:r.data.length,last:r.data.at(-1).t,spliced:r.spliced,partial:r.partial,canon_last:r.canon_last,errors:r.errors}));
 `);
       const out=execFileSync(process.execPath,[join(dir,"drive.mjs")],{encoding:"utf8",env:{...process.env,
         MODULE_URL:new URL("./fetch-snapshot.mjs",import.meta.url).href,FAKE_NOW:String(NOW),
@@ -170,6 +170,7 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,last:r.data.at(-1)
 
     const alive=drive(mk(2));
     assert.equal(alive.spliced,1,"свежий кэш обязан оживить подтверждённый день при отказе слоя");
+    assert.ok(alive.canon_last,"основной путь обязан публиковать границу истинного канона: без неё сшитые дни отмываются в канон на следующем прогоне");
     assert.equal(alive.last,fresh[0].t,"наблюдение обязано остаться на сшитом дне, а не откатиться к канону");
     assert.match(alive.source,/SosoValue/,"атрибуция обязана честно называть дополняющий слой");
     assert.match(alive.errors.join(" "),/кэша подтверждения/,"оживление из кэша обязано быть названо в диагностике");
@@ -181,6 +182,37 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,last:r.data.at(-1)
     rmSync(dir,{recursive:true,force:true});
   }
 
+  // ОДНОВРЕМЕННЫЙ ОТКАЗ ЗЕРКАЛ И СЛОЯ. Ряд собирается из кэша канона, а подтверждённый день
+  // обязан прийти из кэша подтверждения. Раньше эта ветка про кэш дня не знала: защита была
+  // закрыта на основном маршруте и открыта на соседнем.
+  {
+    const dir=mkdtempSync(join(tmpdir(),"etf-both-"));
+    const days=tradingDays(400);
+    const canon=days.slice(0,-1).map(t=>({t:t+CANON_HOUR,v:dayValue(t)}));
+    const fresh=[{t:days.at(-1)+CANON_HOUR,v:dayValue(days.at(-1))}];
+    writeFileSync(join(dir,"state.json"),JSON.stringify({datasets:{etf:{
+      source:"The Block (кэш) + SosoValue",data:[...canon,...fresh],
+      canon_last:new Date(canon.at(-1).t).toISOString(),
+      spliced_cache:{days:fresh,at:new Date(NOW-2*3600e3).toISOString()}}}}));
+    writeFileSync(join(dir,"drive.mjs"),`
+const __t=Number(process.env.FAKE_NOW);
+if(Number.isFinite(__t)){const R=Date;class D extends R{constructor(...a){if(!a.length)super(__t);else super(...a);}static now(){return __t;}}globalThis.Date=D;}
+const json=(b,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{"content-type":"application/json"}});
+globalThis.fetch=async()=>json({},503);   // мертвы ВСЕ источники
+const {fetchEtfFlows}=await import(process.env.MODULE_URL);
+const r=await fetchEtfFlows();
+console.log(JSON.stringify({source:r.source,len:r.data.length,last:r.data.at(-1).t,spliced:r.spliced,canon_last:r.canon_last,hasCache:!!r.spliced_cache,errors:r.errors}));
+`);
+    const out=execFileSync(process.execPath,[join(dir,"drive.mjs")],{encoding:"utf8",env:{...process.env,
+      MODULE_URL:new URL("./fetch-snapshot.mjs",import.meta.url).href,FAKE_NOW:String(NOW),
+      PREVIOUS_STATE:join(dir,"state.json"),PREVIOUS_PUBLIC:join(dir,"state.json")}});
+    const r=JSON.parse(out.trim().split("\n").at(-1));
+    assert.equal(r.last,fresh[0].t,"при отказе обоих источников подтверждённый день обязан прийти из кэша");
+    assert.match(r.source,/SosoValue/,"атрибуция обязана называть слой, чей день в ряду");
+    assert.ok(r.hasCache,"ступень кэша обязана СОХРАНЯТЬ кэш дня, иначе он теряется на следующем прогоне");
+    assert.equal(r.canon_last,new Date(canon.at(-1).t).toISOString(),"граница истинного канона обязана публиковаться, иначе дни слоя отмоются в канон");
+    rmSync(dir,{recursive:true,force:true});
+  }
   // ПЕРВАЯ СТУПЕНЬ РЕЗЕРВА: зеркала мертвы, но история The Block лежит в состоянии. Она обязана
   // стать основой — терять половину глубины из-за отказа эндпоинта нельзя, перцентиль потоков
   // считается по всему ряду. Прошлый снимок читается сборщиком ОДИН раз при загрузке модуля,

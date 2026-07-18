@@ -363,7 +363,21 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   const rows=n=>wd(n).map((t,i)=>({t,v:(1+(i%5))*1e8}));
   const fresh=rows(300);
   ok(cachedEtfCanon({source:"The Block",data:fresh})===fresh,"свежий кэш самого канона обязан годиться в основу");
-  ok(cachedEtfCanon({source:"The Block + SosoValue",data:fresh})===fresh,"сшитый ряд — это по-прежнему канон The Block с дополнением, он годится");
+  // ОТМЫВАНИЕ. Пакет со сшитым хвостом годится в каноны, только если он честно называет границу
+  // истинного канона: иначе прогон берёт свой же прошлый вывод за основу, опережение снова равно
+  // единице, и ни предел в 3 дня, ни недельный порог протухания не срабатывают НИКОГДА — оба
+  // меряются по краю ряда, а край после сшивки всегда свежий.
+  eq(cachedEtfCanon({source:"The Block + SosoValue",data:fresh}),null,"сшитый пакет без границы канона не имеет права стать каноном: так дни слоя отмываются в канон");
+  eq(cachedEtfCanon({source:"The Block (кэш) + SosoValue",data:fresh}),null,"собственный резервный вывод без границы канона тем более не годится");
+  {
+    const edge=fresh.at(-3).t;
+    const trimmed=cachedEtfCanon({source:"The Block + SosoValue",data:fresh,canon_last:new Date(edge).toISOString()});
+    eq(trimmed?.length,fresh.length-2,"сшитый хвост обязан быть ОТРЕЗАН по границе истинного канона");
+    eq(trimmed?.at(-1).t,edge,"канон обязан заканчиваться ровно на объявленной границе");
+    // Протухание меряется по ИСТИННОМУ канону, а не по свежему сшитому хвосту.
+    const stale=fresh.map((x,i)=>i<fresh.length-2?{...x,t:x.t-20*864e5}:x);
+    eq(cachedEtfCanon({source:"The Block + SosoValue",data:stale,canon_last:new Date(stale.at(-3).t).toISOString()}),null,"мёртвый канон со свежим сшитым хвостом обязан отбраковываться");
+  }
   eq(cachedEtfCanon({source:"SosoValue",data:fresh}),null,"прошлый РЕЗЕРВ не имеет права стать каноном: иначе однажды случившаяся подмена закрепится навсегда");
   eq(cachedEtfCanon({source:"Farside",data:fresh}),null,"чужой источник не имеет права стать каноном");
   eq(cachedEtfCanon(null),null,"первый запуск без состояния — не основание что-то выдумывать");
@@ -385,6 +399,7 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   const ahead=wd(200,0).slice(-2).map((t,i)=>({t:t+12*H,v:(2+i)*1e8})).filter(x=>x.t>canon.at(-1).t&&x.t<=NOWMS);
   const fresh={days:ahead,at:new Date(NOWMS-2*H).toISOString()};
 
+  const nextTrading=t=>{let x=t+864e5;while([0,6].includes(new Date(x).getUTCDay()))x+=864e5;return x;};
   const r=reviveSplicedDays(canon,fresh);
   ok(r&&r.days===ahead.length,`свежий кэш обязан оживлять подтверждённые дни: ${JSON.stringify(r&&r.days)} против ${ahead.length}`);
   ok(r&&r.series.length===canon.length+ahead.length,"оживление не имеет права терять или дублировать точки");
@@ -400,14 +415,18 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   // Дни строятся ОТ канона вперёд, а не «последние N торговых», иначе при коротком отставании канона
   // список окажется пустым и проверка молча пропустится, ничего не проверив.
   const short=wd(200,6).map((t,i)=>({t:t+12*H,v:(1+(i%5))*1e8}));
-  const nextTrading=t=>{let x=t+864e5;while([0,6].includes(new Date(x).getUTCDay()))x+=864e5;return x;};
   const many=[];{let t=short.at(-1).t;for(let i=0;i<4;i++){t=nextTrading(t);many.push({t,v:1e8});}}
   eq(many.length,4,"фикстура обязана дать ровно 4 дня опережения, иначе проверка ничего не проверяет");
   eq(reviveSplicedDays(short,{days:many,at:new Date(NOWMS-H).toISOString()}),null,"кэш не имеет права обходить предел опережения в 3 дня");
   eq(reviveSplicedDays(short,{days:many.slice(0,3),at:new Date(NOWMS-H).toISOString()})?.days,3,"ровно на пределе кэш обязан работать");
   // Тот же ETF-контракт, что и для живых данных.
   eq(reviveSplicedDays(canon,{days:ahead.map(x=>({...x,v:2e10})),at:new Date(NOWMS-H).toISOString()}),null,"значение вне физической полосы обязано отбраковываться и в кэше");
-  eq(reviveSplicedDays(canon,{days:ahead.map(x=>({...x,t:x.t+864e5*3})),at:new Date(NOWMS-H).toISOString()}),null,"день из будущего не имеет права оживать");
+  // «Будущий» день строится ОТ КОНЦА РЯДА ВПЕРЁД, а не сдвигом на трое суток: сдвиг пятницы на 3
+  // дня даёт понедельник, который после полудня уже прошлое и валидный торговый день, — из-за чего
+  // проверка превращалась в свою противоположность каждый понедельник с 12:00 UTC и роняла CI.
+  const futureDay=[{t:nextTrading(ahead.at(-1).t-ahead.at(-1).t%864e5)+12*H,v:3e8}];
+  ok(futureDay[0].t>NOWMS,"фикстура обязана дать день в БУДУЩЕМ, иначе проверка ничего не проверяет");
+  eq(reviveSplicedDays(canon,{days:futureDay,at:new Date(NOWMS-H).toISOString()}),null,"день из будущего не имеет права оживать");
 }
 // ГИСТЕРЕЗИС РЕЖИМА. Это то, что решает, КОГДА панель меняет торговую рекомендацию, и до сих пор
 // его семантику не защищал ни один тест: обе стороны асимметрии можно было сломать незаметно.
@@ -448,6 +467,15 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   eq(afterBlip.count,1,"встречный снимок обнуляет счётчик наблюдений");
   eq(Date.parse(afterBlip.since),T0+47.5*H,"встречный снимок сбрасывает отсчёт 48 часов в ноль");
   eq(afterBlip.state,"demand_break","и режим при этом остаётся удерживаемым");
+  // Испорченное состояние обязано ДЕГРАДИРОВАТЬ, а не ронять сборку: без этого одно битое поле
+  // в кэше замораживает публикацию целиком (RangeError при печати границы удержания).
+  for(const bad of ["abc","",null,undefined,12345,{}]){
+    let r=null,threw=null;
+    try{r=st("balanced","demand_break",{state:"demand_break",candidate:"balanced",count:30,since:bad,downStreak:0,anchor:"demand_break"},49);}catch(e){threw=e;}
+    ok(!threw,"битая метка since="+JSON.stringify(bad)+" не имеет права ронять сборку: "+(threw&&threw.message));
+    ok(r&&Number.isFinite(Date.parse(r.since)),"после деградации метка обязана стать валидной");
+    ok(!r||!r.hold_until||Number.isFinite(Date.parse(r.hold_until)),"граница удержания обязана быть валидной датой или отсутствовать");
+  }
   // Граница снятия публикуется ТОЛЬКО когда удержание реально действует, иначе панель
   // подписала бы удержанием обычный установившийся режим.
   const holding=st("balanced","demand_break",meta("balanced",5,0),3);

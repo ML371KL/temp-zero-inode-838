@@ -19,6 +19,16 @@ assert.match(y,/npm run probe/,"endpoint probe step missing");
 // the candidate has passed strict verification.
 assert.match(y,/OUT:\s*\.candidate\/snapshot\.json/,"live candidate must be collected into a temporary path");
 assert.match(y,/REQUIRE_LIVE:\s*"1"/,"strict live verification step missing");
+{
+  // Шлюз обязан стоять ВНУТРИ шага верификации и смотреть на КАНДИДАТА. Иначе его можно обойти
+  // вхолостую, перенацелив OUT на уже опубликованный снимок: проверка станет проверять сама себя.
+  const i=y.indexOf("Проверить live-кандидата");
+  assert.ok(i>0,"шаг верификации кандидата пропал из пайплайна");
+  const step=y.slice(i,i+700);
+  assert.match(step,/REQUIRE_LIVE:\s*"1"/,"шлюз REQUIRE_LIVE обязан жить внутри шага верификации");
+  assert.match(step,/OUT:\s*\.candidate\/snapshot\.json/,"верификация обязана смотреть на КАНДИДАТА, а не на опубликованный снимок");
+  assert.match(step,/npm run verify/,"шаг верификации обязан запускать verify");
+}
 assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"verified candidate is never promoted");
 // Сравнение порядка обязано опираться на СУЩЕСТВОВАНИЕ обоих шагов: при удалении шага indexOf
 // возвращает -1, и проверка «раньше» становится тождественно истинной — снимок, не прошедший
@@ -35,7 +45,12 @@ assert.match(y,/git push origin "HEAD:\$branch"/);
 // Коммит снимка обязан разрешать гонку ДЕТЕРМИНИРОВАННО: ребейз снимка на разошедшийся origin
 // конфликтует одинаково на каждой попытке, поэтому ретраи ребейза = три гарантированных падения.
 assert.doesNotMatch(y,/git rebase/,"ребейз в шаге коммита снимка приводит к неразрешимому конфликту docs/snapshot.json");
-assert.match(y,/git reset -q --soft "origin\/\$branch"/,"пропал перенос свежего снимка поверх origin");
+assert.match(y,/git reset -q "origin\/\$branch"/,"пропал перенос свежего снимка поверх origin");
+// `--soft` здесь — тихий откат чужой работы: он двигает только HEAD, оставляя ИНДЕКС с деревом
+// старого коммита, и последующий `git commit` фиксирует это старое дерево целиком. Всё, что кто-то
+// запушил, пока шёл получасовой прогон, исчезает без следа и без конфликта. Воспроизведено на
+// тестовом репозитории: правка в scripts/ откатывалась до предыдущей версии.
+assert.doesNotMatch(y,/git reset[^\n]*--soft/,"смешанный reset обязателен: --soft оставляет индекс со старым деревом и откатывает чужие пуши");
 assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"побеждать обязан снимок этого прогона, уже опубликованный на Pages");
 assert.match(y,/git add docs\/snapshot\.json/,"public snapshot must be committed");
 assert.doesNotMatch(y,/git add[^\n]*\.state\/cache\.json/,"raw internal state must not be committed");
@@ -78,9 +93,12 @@ assert.match(html,/"X-OpenRouter-Title"/,"OpenRouter attribution should use the 
 // The site MUST be deployed by the workflow itself. GitHub does not rebuild a "Deploy from a branch"
 // Pages site for commits pushed with the GITHUB_TOKEN — the run would be green, the data would land
 // in the repo, and the live page would serve a stale snapshot forever. So the workflow deploys Pages.
-assert.match(y,/actions\/configure-pages/,"Pages must be configured by the workflow");
-assert.match(y,/actions\/upload-pages-artifact/,"the site must be uploaded as a Pages artifact");
-assert.match(y,/actions\/deploy-pages/,"the site must be deployed by the workflow, not by a commit");
+// Привязка к СТРУКТУРЕ, а не к упоминанию: грепом по всему файлу инвариант удовлетворяется
+// комментарием, и шаг можно удалить целиком, оставив CI зелёным. Проверено мутацией: замена
+// «uses: actions/deploy-pages» на закомментированную строку раньше не краснела.
+assert.match(y,/^\s*uses:\s*actions\/configure-pages/m,"настройка Pages обязана быть ШАГОМ uses:, а не упоминанием в комментарии");
+assert.match(y,/^\s*uses:\s*actions\/upload-pages-artifact/m,"загрузка артефакта обязана быть ШАГОМ uses:, а не упоминанием");
+assert.match(y,/^\s*uses:\s*actions\/deploy-pages/m,"деплой обязан быть ШАГОМ uses:, а не упоминанием");
 assert.match(y,/path:\s*docs/,"the Pages artifact must be the docs/ folder");
 assert.match(y,/pages:\s*write/,"pages: write permission missing");
 assert.match(y,/id-token:\s*write/,"id-token: write permission missing");

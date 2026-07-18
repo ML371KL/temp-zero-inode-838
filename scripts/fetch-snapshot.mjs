@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.9.7";
+const VERSION = "2.9.8";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -493,10 +493,20 @@ function reviveSplicedDays(canon,cache){
 // из прогона в прогон; (2) история не старше недели — протухший ряд хуже честного отсутствия,
 // потому что окна потоков считаются от его конца; (3) тот же ETF-контракт, что и для живых данных.
 function cachedEtfCanon(packet){
-  const rows=Array.isArray(packet?.data)?packet.data:null;
-  if(!rows?.length)return null;
-  if(!String(packet.source||"").startsWith("The Block"))return null;
-  if(!validateEtfSeries(rows,7*DAY))return null;
+  const all=Array.isArray(packet?.data)?packet.data:null;
+  if(!all?.length)return null;
+  const src=String(packet.source||"");
+  if(!src.startsWith("The Block"))return null;
+  // СШИТЫЙ ХВОСТ ОБЯЗАН БЫТЬ ОТРЕЗАН. Иначе дни SosoValue «отмываются» в канон: прогон берёт свой
+  // же прошлый вывод за основу, опережение снова равно единице, и предел в 3 дня не срабатывает
+  // никогда. Порог протухания тоже перестаёт работать — он меряет возраст ПОСЛЕДНЕЙ точки, а она
+  // после сшивки всегда свежая, каким бы мёртвым ни был настоящий канон. Граница истинного канона
+  // публикуется отдельным полем именно ради этого.
+  const spliced=/SosoValue|\(кэш\)/.test(src);
+  const edge=Date.parse(packet.canon_last||"");
+  if(spliced&&!finite(edge))return null;
+  const rows=finite(edge)?all.filter(x=>finite(x?.t)&&Number(x.t)<=edge):all;
+  if(!rows.length||!validateEtfSeries(rows,7*DAY))return null;
   return rows;
 }
 // Ряд ETF между часовыми прогонами может стать ХУЖЕ двумя способами, и оба обязаны быть видны.
@@ -587,7 +597,7 @@ async function fetchEtfFlows(){
     const nowLast=Number(last(series).t);
     const degraded=etfDegradation(previous?.datasets?.etf?.data,series);
     errors.push(...degraded.notes);
-    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,spliced_cache:cache||undefined,partial:degraded.degraded||undefined};
+    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,spliced_cache:cache||undefined,canon_last:iso(Number(last(best.series).t)),partial:degraded.degraded||undefined};
   }
   // РЕЗЕРВ ПЕРВОЙ СТУПЕНИ: зеркала канона недоступны, но САМА ИСТОРИЯ The Block никуда не делась —
   // она лежит в состоянии с прошлого прогона. Отказ эндпоинта не повод терять половину глубины:
@@ -599,16 +609,28 @@ async function fetchEtfFlows(){
   const cachedRows=cachedEtfCanon(previous?.datasets?.etf);
   if(cachedRows){
     let series=cachedRows,source="The Block (кэш)",probe=previous?.datasets?.etf?.fresh_probe||{};
+    let cache2=previous?.datasets?.etf?.spliced_cache||null;
     try{
       const rows=await fetchSosoEtfDaily();
       const r=spliceFreshEtfDays(cachedRows,rows,"The Block (кэш)",{seen:previous?.datasets?.etf?.fresh_probe});
       series=r.series;source=r.source;probe=r.probe||{};
+      cache2=r.spliced?{days:r.series.slice(-r.spliced),at:iso(NOW)}:null;
       if(r.note)errors.push(`SosoValue: ${r.note}`);
-    }catch(e){errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);}
+    }catch(e){
+      errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);
+      // Тот же кэш подтверждённого дня, что и на основном пути: одновременный отказ зеркал И
+      // слоя не должен выбрасывать из ряда уже подтверждённый день. Раньше эта ветка про кэш
+      // не знала — дыра была закрыта на одном маршруте и открыта на соседнем.
+      const rev=reviveSplicedDays(cachedRows,cache2);
+      if(rev){
+        series=rev.series;source=`The Block (кэш) + SosoValue`;
+        errors.push(`сшитый день сохранён из кэша подтверждения (${rev.ageH} ч назад)`);
+      }
+    }
     errors.push(`зеркала The Block недоступны, история взята из кэша прошлого прогона (${cachedRows.length} дн)`);
     return{data:series,observed_at:iso(last(series).t),source,source_url:SOURCE_URLS.theblock,
       source_urls:uniqueHttps(series.length>cachedRows.length?[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue]:[SOURCE_URLS.theblock]),
-      errors,spliced:series.length-cachedRows.length,fresh_probe:probe,partial:true};
+      errors,spliced:series.length-cachedRows.length,fresh_probe:probe,spliced_cache:cache2||undefined,canon_last:iso(Number(last(cachedRows).t)),partial:true};
   }
   // РЕЗЕРВ ВТОРОЙ СТУПЕНИ: канона нет вообще (первый запуск, потеря кэша, кэш старше недели). Тогда
   // ряд берётся у SosoValue целиком — это уже подмена источника с более короткой историей, поэтому
@@ -1323,7 +1345,11 @@ function stabilizeCore(candidate,prevState,prevMetaIn,now,{hard=false,fresh=fals
     // the 2-snapshot downgrade confirmation forever under a flapping source.
     return{state:candidate,candidate,count:1,since:iso(now),anchor,downStreak:prevMeta.downStreak||0};
   const meta=prevMeta,count=meta.candidate===candidate?(meta.count||0)+1:1,prev=prevState||candidate;
-  const since=meta.candidate===candidate&&meta.since?meta.since:iso(now);
+  // Непарсящаяся метка в состоянии (повреждённый кэш, ручная правка) не должна ронять всю сборку:
+  // без этой проверки Date.parse даёт NaN, и публикация границы удержания падает с RangeError,
+  // то есть панель замирает целиком из-за одного испорченного поля. Считаем отсчёт начатым сейчас.
+  const prevSince=meta.candidate===candidate&&finite(Date.parse(meta.since))?meta.since:null;
+  const since=prevSince||iso(now);
   const ref=DEGRADED.includes(prev)?(anchor??prev):prev;
   const sevRef=severity(ref),worse=severity(candidate)<sevRef;
   const downStreak=worse?(meta.downStreak||0)+1:0;
