@@ -253,7 +253,11 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   const fn=src.slice(src.indexOf("async function fetchEtfFlows"),src.indexOf("function parseCsv"));
   ok(/validateEtfSeries\(series\)/.test(fn),"кандидат обязан проходить ETF-контракт ДО сравнения свежести");
   ok(/b\.latest>a\.latest/.test(fn),"пропал выбор по максимальной свежести");
-  ok(fn.indexOf("farside.co.uk")>fn.indexOf("candidates.length"),"Farside обязан оставаться последним резервом, а не участником сравнения");
+  // Резерв обязан стоять ПОСЛЕ выбора среди зеркал канона, а не участвовать в сравнении свежести:
+  // он всегда свежее (у SosoValue быстрее агрегация) и иначе вытеснял бы канон каждый прогон,
+  // превращая подмену источника в норму. Поведенчески это закрыто сценарием etf_both_dead.
+  ok(fn.lastIndexOf("fetchSosoEtfDaily")>fn.indexOf("candidates.length"),"резервный источник обязан включаться только после провала обоих зеркал канона");
+  ok(!/farside\.co\.uk|parseFarside\(/.test(fn),"Farside отдаёт 403 на каждом прогоне и не имеет права оставаться в тракте: мёртвый резерв — это отсутствие резерва");
   ok(/зеркала The Block разошлись/.test(fn),"пропала сверка зеркал на пересечении: испорченная свежая копия попала бы в публикацию");
 }
 

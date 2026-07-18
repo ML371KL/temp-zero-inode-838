@@ -71,8 +71,16 @@ globalThis.fetch=async input=>{const u=String(input);
   if(mode==="etf_mirror_corrupt"){if(u.includes("theblock.co"))return json(etfChart(1));if(u.includes("tbstat.com"))return json({chart:{jsonFile:{Series:{"Total Net Flow":{Data:Array.from({length:12},(_,i)=>({Timestamp:Math.floor((NOW-i*DAY)/1000),Result:1e8}))}}}}});}
   // Зеркало свежее, но расходится с основным API на общих днях — признак порчи одной из копий.
   if(mode==="etf_mirror_disagrees"){if(u.includes("theblock.co"))return json(etfChart(1));if(u.includes("tbstat.com")){const c=etfChart(0);const d=c.chart.jsonFile.Series["Total Net Flow"].Data;d[d.length-5].Result=9.9e8;return json(c);}}
-  // Оба зеркала мертвы → последний резерв Farside.
-  if(mode==="etf_both_dead"){if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);if(u.includes("farside.co.uk"))return text(farsideHtml());}
+  // Оба зеркала канона мертвы → ряд целиком берётся у SosoValue.
+  if(mode==="etf_both_dead"){if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);if(u.includes("historicalInflowChart"))return json({code:0,data:sosoRows(0)});}
+  // Мертвы и канон, и резерв: потоки ETF обязаны честно отсутствовать, а не выдумываться.
+  if(mode==="etf_all_dead")return json({},503);
+  // Канон мёртв, резерв отвечает, но отдаёт величины вне физической полосы. Резерв обязан
+  // проходить тот же ETF-контракт, что и канон: подмена источника не повод ослаблять проверку.
+  if(mode==="etf_fallback_corrupt"){
+    if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);
+    if(u.includes("historicalInflowChart"))return json({code:0,data:sosoRows(0).map((x,i,a)=>i>=a.length-2?{...x,totalNetInflow:2e10}:x)});
+  }
   // Дополняющий слой SosoValue поверх канона The Block, отставшего на 2 торговых дня. Значения обязаны
   // совпадать с каноном на общих днях — иначе слой будет отбракован проверкой расхождения.
   if(mode.startsWith("etf_soso")){
@@ -112,8 +120,17 @@ try{
   assert.equal(eD.source,"The Block","при расхождении зеркал обязан побеждать канонический chart-API, а не более свежая копия");
   assert.match(eD.errors.join(" "),/разошлись/,"расхождение зеркал должно быть записано в диагностику");
   mode="etf_both_dead";const eF=await fetchEtfFlows();
-  assert.equal(eF.source,"Farside","при смерти обоих зеркал The Block обязан включиться последний резерв");
-  assert.ok(eF.data.length>=100,`farside rows ${eF.data.length}`);
+  assert.equal(eF.source,"SosoValue","при смерти обоих зеркал канона обязан включиться резервный источник");
+  assert.ok(eF.data.length>=100,`строк резерва ${eF.data.length}`);
+  // Резерв — это ПОДМЕНА источника с более короткой историей, а перцентиль потоков считается по
+  // всей глубине ряда. Молчать об этом нельзя: на короткой базе то же значение получает более
+  // высокий ранг, то есть картина систематически менее медвежья.
+  assert.equal(eF.partial,true,"работа на резервном источнике обязана помечаться неполной");
+  assert.match(eF.errors.join(" "),/перцентили потоков смещены/,"смещение перцентилей обязано быть названо в диагностике");
+  mode="etf_all_dead";
+  await assert.rejects(()=>fetchEtfFlows(),/ETF flows unavailable/,"при смерти всех источников потоки обязаны отсутствовать, а не выдумываться");
+  mode="etf_fallback_corrupt";
+  await assert.rejects(()=>fetchEtfFlows(),/ETF flows unavailable/,"резерв обязан проходить тот же ETF-контракт: подмена источника не повод ослаблять проверку");
   // ---- Дополняющий слой SosoValue ----
   // Прошлых наблюдений нет (набор герметичен), поэтому подтвердить свежий день нечем. Это главный
   // контракт слоя: без подтверждения он обязан отказывать В ЗАКРЫТУЮ, а не пропускать день молча.

@@ -29,7 +29,6 @@ const checks=[
  ["Blockchain miner revenue","https://api.blockchain.info/charts/miners-revenue?timespan=30days&format=json&sampled=false",chart("miners-revenue","USD")],
  ["The Block ETF API","https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow",b=>{const d=b?.chart?.jsonFile?.Series?.["Total Net Flow"]?.Data;return Array.isArray(d)&&d.length>100?`${d.length} rows · Result USD/day · latest ${new Date(Number(d.at(-1)?.Timestamp)*1000).toISOString().slice(0,10)}`:'!ETF JSON contract failed';}],
  ["tbstat ETF mirror","https://data.tbstat.com/dashboard/markets_structuredproducts_btcspotetftotalnetflows_daily_other.json",b=>{const d=b?.Series?.["Total Net Flow"]?.Data;return Array.isArray(d)&&d.length>100?`${d.length} rows · mirror Result USD/day`:'!ETF mirror contract failed';}],
- ["Farside ETF","https://farside.co.uk/bitcoin-etf-flow-all-data/",(_b,t)=>{const rows=(t.match(/<tr[\s\S]*?<\/tr>/gi)||[]).length,dates=(t.match(/\d{1,2}\s+[A-Z][a-z]{2}\s+20\d{2}/g)||[]);return rows>=50&&dates.length?`${rows} HTML rows · latest ${dates.at(-1)} · USD millions table`:`!HTML/parser contract failed`;},{critical:true,text:true}],
  // РАЗВЕДКА (шаг 1, ничего не интегрировано в снимок): доступен ли SosoValue с раннера и
  // насколько он свежее The Block. Farside умирает здесь на Cloudflare-челлендже (403) — у
  // SosoValue тоже Cloudflare, но это авторизованный REST API, который обычно не челленджится.

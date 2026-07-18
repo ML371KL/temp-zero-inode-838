@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.9.2";
+const VERSION = "2.9.3";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -360,8 +360,9 @@ function parseEtfFlowJson(text){
 // точками Farside сознательно НЕ делается: Farside отдаёт 403 с CI-раннеров (Cloudflare), то есть
 // в продакшне такой слой не дал бы ни одной точки, а код без исполнения нельзя проверить.
 //
-// Farside остаётся последним резервом на случай смерти ОБОИХ зеркал The Block: он держит
-// локальный/ручной путь живым и его парсер — под тестом.
+// Последний резерв на случай смерти ОБОИХ зеркал The Block — SosoValue целиком. Farside в этой
+// роли был фикцией: 403 на каждом прогоне (Cloudflare режет раннеры), то есть при отказе канона
+// потоки ETF исчезали совсем, а вместе с ними — главная нога блока спроса.
 // ДОПОЛНЯЮЩИЙ СЛОЙ СВЕЖИХ ДАТ (SosoValue). Канонической историей остаётся The Block: SosoValue
 // добавляет ТОЛЬКО те торговые дни, которых у канона ещё нет, и вытесняется, как только канон их
 // догоняет. Это осознанное исключение из правила «не сшивать двух провайдеров»: правило защищает
@@ -540,11 +541,19 @@ async function fetchEtfFlows(){
     errors.push(...degraded.notes);
     return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,partial:degraded.degraded||undefined};
   }
+  // РЕЗЕРВ: оба зеркала канона мертвы — ряд берётся у SosoValue целиком. Это уже не дополнение, а
+  // подмена источника, поэтому пакет помечается неполным: у SosoValue ~300 дней истории против ~630
+  // у канона, а перцентиль потоков считается по всей глубине ряда. На короткой базе то же значение
+  // получает заметно более высокий ранг (на живой точке p20 15.2 против 10.1), то есть картина
+  // систематически менее медвежья. Замер сделан на ряду из состояния, а не оценён на глаз.
+  // Прежним резервом был Farside: он отдаёт 403 на каждом прогоне (Cloudflare режет раннеры), то
+  // есть при отказе канона панель оставалась вовсе без потоков ETF — главной ноги блока спроса.
   try{
-    const series=parseFarside(await request("https://farside.co.uk/bitcoin-etf-flow-all-data/",{text:true,tries:2}));
+    const series=await fetchSosoEtfDaily();
     if(!validateEtfSeries(series))throw new Error(`ряд не прошёл ETF-контракт (${series.length} строк)`);
-    return{data:series,observed_at:iso(last(series).t),source:"Farside",source_url:SOURCE_URLS.farside,source_urls:[SOURCE_URLS.farside],errors};
-  }catch(e){errors.push(`Farside: ${String(e?.message||e)}`);}
+    errors.push(`канон недоступен, ряд взят у SosoValue целиком: история ${series.length} дн вместо ~630, перцентили потоков смещены`);
+    return{data:series,observed_at:iso(last(series).t),source:"SosoValue",source_url:SOURCE_URLS.sosovalue,source_urls:[SOURCE_URLS.sosovalue],errors,partial:true};
+  }catch(e){errors.push(`SosoValue (резервный источник): ${String(e?.message||e)}`);}
   throw new Error(`ETF flows unavailable: ${errors.join("; ")}`);
 }
 function parseCsv(text){const lines=String(text).trim().split(/\r?\n/);if(lines.length<2)return[];const h=lines[0].split(",");return lines.slice(1).map(line=>{const c=line.split(","),o={};h.forEach((k,i)=>o[k]=c[i]);return o;});}
@@ -964,7 +973,7 @@ function buildMetrics(){
   const etf5Btc=last(f5Btc)?.v,etf20Btc=last(f20Btc)?.v;
   // Economic zero: a net 20-day BTC OUTFLOW cannot score positive, even if historically outflows were larger.
   let etfScore=componentScore([finite(etf5Btc)?highGood(p5):null,finite(etf20Btc)?highGood(p20):null]);if(finite(etf20Btc)&&etf20Btc<0&&finite(etfScore))etfScore=Math.min(etfScore,0);
-  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?(finite(etf20Btc)&&etf20Btc<0?"устойчивый отток":"слабый приток"):"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос. Из двух зеркал The Block берётся то, чьи данные свежее (ряды идентичны, зеркало обновляется раньше). Дни, которых у The Block ещё нет, дополняются из SosoValue и вытесняются, как только канонический источник их догоняет. Свежий день берётся лишь после того, как повторное наблюдение дало то же значение: неполный день дорастает по мере отчёта фондов, поэтому расходится между наблюдениями и придерживается. При расхождении провайдеров на общих днях сшивка отменяется. Farside — резерв на случай отказа всех остальных.",score:etfScore,source:`${datasetSource("etf","The Block")} · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(datasetUrls("etf",SOURCE_URLS.theblock),datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
+  add({id:"etf_regime",block:"demand",family:"etf",name:"US spot-ETF · режим потоков",horizon:"medium",role:"leading",method:"dynamic",tactical:true,value_num:etfScore,value:finite(etfScore)?(etfScore>=1?"устойчивый приток":etfScore<=-1?(finite(etf20Btc)&&etf20Btc<0?"устойчивый отток":"слабый приток"):"смешанно"):"—",delta:finite(etf5Btc)&&finite(etf20Btc)?`5д ${formatCompact(etf5Btc,0)} BTC · 20д ${formatCompact(etf20Btc,0)} BTC`:"",note:"Потоки переводятся в BTC по цене дня и оцениваются перцентилем относительно собственной истории. В шапке они показаны в BTC для наглядного сопоставления с дневной эмиссией (~450 BTC/день); само сопоставление с эмиссией в балл пока не входит — это относительная, а не абсолютная мера поглощения. Основной наблюдаемый маржинальный спрос. Из двух зеркал The Block берётся то, чьи данные свежее (ряды идентичны, зеркало обновляется раньше). Дни, которых у The Block ещё нет, дополняются из SosoValue и вытесняются, как только канонический источник их догоняет. Свежий день берётся лишь после того, как повторное наблюдение дало то же значение: неполный день дорастает по мере отчёта фондов, поэтому расходится между наблюдениями и придерживается. При расхождении провайдеров на общих днях сшивка отменяется. Если оба зеркала канона умрут, ряд целиком берётся у SosoValue и пакет помечается неполным: истории там ~300 дней вместо ~630, а перцентиль считается по всей глубине, поэтому на короткой базе картина систематически менее медвежья.",score:etfScore,source:`${datasetSource("etf","The Block")} · ${datasetSource("market","market price")}`,source_url:SOURCE_URLS.theblock,source_urls:links(datasetUrls("etf",SOURCE_URLS.theblock),datasetUrls("market",SOURCE_URLS.coinbase_candles,SOURCE_URLS.blockchain)),...sourceMetaMany(["etf","market"]),series:f20Btc});
   add({id:"etf_1d",block:"demand",family:"etf",name:"ETF · последний день",horizon:"short",role:"component",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:etf1,value:finite(etf1)?`${etf1>=0?"+":""}${formatCompact(etf1,0)} $`:"—",note:"Событийный компонент; один день не меняет среднесрочный режим.",score:null,source:datasetSource("etf","The Block"),source_url:SOURCE_URLS.theblock,source_urls:datasetUrls("etf",SOURCE_URLS.theblock),...sourceMeta("etf"),series:etf});
   add({id:"etf_5d",block:"demand",family:"etf",name:"ETF · 5 торговых дней",horizon:"short",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf5,value:finite(etf5)?`${etf5>=0?"+":""}${formatCompact(etf5,0)} $`:"—",delta:finite(p5)?`${p5.toFixed(0)}-й перцентиль`:"",note:"Быстрый компонент семейства.",score:null,source:datasetSource("etf","The Block"),source_url:SOURCE_URLS.theblock,source_urls:datasetUrls("etf",SOURCE_URLS.theblock),...sourceMeta("etf"),series:etf5s});
   add({id:"etf_20d",block:"demand",family:"etf",name:"ETF · 20 торговых дней",horizon:"medium",role:"component",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:etf20,value:finite(etf20)?`${etf20>=0?"+":""}${formatCompact(etf20,0)} $`:"—",delta:finite(p20)?`${p20.toFixed(0)}-й перцентиль`:"",note:"Среднесрочный компонент семейства.",score:null,source:datasetSource("etf","The Block"),source_url:SOURCE_URLS.theblock,source_urls:datasetUrls("etf",SOURCE_URLS.theblock),...sourceMeta("etf"),series:etf20s});
