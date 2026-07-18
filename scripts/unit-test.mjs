@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, stabilizeCore, severity, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, stabilizeCore, severity, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -371,6 +371,43 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   // Протухшая история хуже честного отсутствия: окна потоков считаются от её конца.
   const stale=wd(300,25).map((t,i)=>({t,v:(1+(i%5))*1e8}));
   eq(cachedEtfCanon({source:"The Block",data:stale}),null,"кэш старше недели обязан отбраковываться");
+}
+// КЭШ ПОДТВЕРЖДЁННОГО СШИТОГО ДНЯ. Разовый отказ провайдера не должен выбрасывать день из ряда:
+// такой выброс — единственный подтверждённый в системе источник ОДИНОЧНОГО встречного снимка, а тот
+// обнуляет 48-часовой отсчёт гистерезиса. Но кэш обязан оставаться кэшем, а не лазейкой мимо
+// проверок: те же предел опережения, тот же контракт, обязательное вытеснение каноном.
+{
+  const wd=(count,endBack=0)=>{const out=[];let t=Date.parse(new Date().toISOString().slice(0,10)+"T00:00:00Z");
+    while(out.length<count+endBack){if(![0,6].includes(new Date(t).getUTCDay()))out.push(t);t-=864e5;}
+    const asc=out.reverse();return asc.slice(0,asc.length-endBack);};
+  const H=36e5, NOWMS=Date.now();
+  const canon=wd(200,2).map((t,i)=>({t:t+12*H,v:(1+(i%5))*1e8}));
+  const ahead=wd(200,0).slice(-2).map((t,i)=>({t:t+12*H,v:(2+i)*1e8})).filter(x=>x.t>canon.at(-1).t&&x.t<=NOWMS);
+  const fresh={days:ahead,at:new Date(NOWMS-2*H).toISOString()};
+
+  const r=reviveSplicedDays(canon,fresh);
+  ok(r&&r.days===ahead.length,`свежий кэш обязан оживлять подтверждённые дни: ${JSON.stringify(r&&r.days)} против ${ahead.length}`);
+  ok(r&&r.series.length===canon.length+ahead.length,"оживление не имеет права терять или дублировать точки");
+  ok(r&&r.series.every((x,i,a)=>!i||x.t>a[i-1].t),"ряд обязан остаться строго возрастающим");
+
+  eq(reviveSplicedDays(canon,{days:ahead,at:new Date(NOWMS-25*H).toISOString()}),null,"кэш старше суток обязан протухать: держать неперепроверенный день бесконечно нельзя");
+  eq(reviveSplicedDays(canon,{days:ahead,at:new Date(NOWMS+2*H).toISOString()}),null,"кэш из будущего — испорченное состояние, доверять нельзя");
+  // Канон догнал: день обязан быть ВЫТЕСНЕН, а не продублирован.
+  eq(reviveSplicedDays([...canon,...ahead],fresh),null,"догнавший канон обязан вытеснять кэш");
+  eq(reviveSplicedDays(canon,null),null,"без кэша оживлять нечего");
+  eq(reviveSplicedDays(canon,{days:[],at:new Date(NOWMS).toISOString()}),null,"пустой кэш не годится");
+  // Предел опережения действует и на кэш: иначе он стал бы обходом правила «дополнение, не подмена».
+  // Дни строятся ОТ канона вперёд, а не «последние N торговых», иначе при коротком отставании канона
+  // список окажется пустым и проверка молча пропустится, ничего не проверив.
+  const short=wd(200,6).map((t,i)=>({t:t+12*H,v:(1+(i%5))*1e8}));
+  const nextTrading=t=>{let x=t+864e5;while([0,6].includes(new Date(x).getUTCDay()))x+=864e5;return x;};
+  const many=[];{let t=short.at(-1).t;for(let i=0;i<4;i++){t=nextTrading(t);many.push({t,v:1e8});}}
+  eq(many.length,4,"фикстура обязана дать ровно 4 дня опережения, иначе проверка ничего не проверяет");
+  eq(reviveSplicedDays(short,{days:many,at:new Date(NOWMS-H).toISOString()}),null,"кэш не имеет права обходить предел опережения в 3 дня");
+  eq(reviveSplicedDays(short,{days:many.slice(0,3),at:new Date(NOWMS-H).toISOString()})?.days,3,"ровно на пределе кэш обязан работать");
+  // Тот же ETF-контракт, что и для живых данных.
+  eq(reviveSplicedDays(canon,{days:ahead.map(x=>({...x,v:2e10})),at:new Date(NOWMS-H).toISOString()}),null,"значение вне физической полосы обязано отбраковываться и в кэше");
+  eq(reviveSplicedDays(canon,{days:ahead.map(x=>({...x,t:x.t+864e5*3})),at:new Date(NOWMS-H).toISOString()}),null,"день из будущего не имеет права оживать");
 }
 // ГИСТЕРЕЗИС РЕЖИМА. Это то, что решает, КОГДА панель меняет торговую рекомендацию, и до сих пор
 // его семантику не защищал ни один тест: обе стороны асимметрии можно было сломать незаметно.

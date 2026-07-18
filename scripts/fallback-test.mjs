@@ -51,6 +51,7 @@ function quarterAhead(){
   const d=new Date(NOW+90*DAY),p=n=>String(n).padStart(2,"0");
   return `${p(d.getUTCFullYear()%100)}${p(d.getUTCMonth()+1)}${p(d.getUTCDate())}`;
 }
+const etfChartFrom=ser=>({chart:{jsonFile:{Frequency:"Daily",Series:{"Total Net Flow":{Data:ser.map(x=>({Timestamp:Math.floor(x.t/1000),Result:x.v}))}}}}});
 function farsideHtml(){
   const rows=[];
   for(let i=200;i>=0;i--){const d=new Date(NOW-i*DAY);if([0,6].includes(d.getUTCDay()))continue;
@@ -136,6 +137,49 @@ try{
   await assert.rejects(()=>fetchEtfFlows(),/ETF flows unavailable/,"при смерти всех источников потоки обязаны отсутствовать, а не выдумываться");
   mode="etf_fallback_corrupt";
   await assert.rejects(()=>fetchEtfFlows(),/ETF flows unavailable/,"резерв обязан проходить тот же ETF-контракт: подмена источника не повод ослаблять проверку");
+
+  // КЭШ ПОДТВЕРЖДЁННОГО ДНЯ: SosoValue отвалился на один прогон, но уже подтверждённый день
+  // обязан остаться в ряду. Иначе получается ровно тот одиночный встречный снимок, который
+  // обнуляет 48-часовой отсчёт гистерезиса, — единственный подтверждённый источник такого в системе.
+  {
+    const dir=mkdtempSync(join(tmpdir(),"etf-cache-"));
+    const days=tradingDays(400);
+    const canon=days.slice(0,-1).map(t=>({t:t+CANON_HOUR,v:dayValue(t)}));   // канон отстал на день
+    const fresh=[{t:days.at(-1)+CANON_HOUR,v:dayValue(days.at(-1))}];        // он уже был сшит час назад
+    const drive=(state,label)=>{
+      writeFileSync(join(dir,"state.json"),JSON.stringify(state));
+      writeFileSync(join(dir,"drive.mjs"),`
+const __t=Number(process.env.FAKE_NOW);
+if(Number.isFinite(__t)){const R=Date;class D extends R{constructor(...a){if(!a.length)super(__t);else super(...a);}static now(){return __t;}}globalThis.Date=D;}
+const json=(b,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{"content-type":"application/json"}});
+globalThis.fetch=async i=>{const u=String(i);
+  if(u.includes("theblock.co"))return json(${JSON.stringify(etfChartFrom(canon))});
+  if(u.includes("tbstat.com"))return json({},503);
+  return json({},503);};   // SosoValue мёртв
+const {fetchEtfFlows}=await import(process.env.MODULE_URL);
+const r=await fetchEtfFlows();
+console.log(JSON.stringify({source:r.source,len:r.data.length,last:r.data.at(-1).t,spliced:r.spliced,partial:r.partial,errors:r.errors}));
+`);
+      const out=execFileSync(process.execPath,[join(dir,"drive.mjs")],{encoding:"utf8",env:{...process.env,
+        MODULE_URL:new URL("./fetch-snapshot.mjs",import.meta.url).href,FAKE_NOW:String(NOW),
+        PREVIOUS_STATE:join(dir,"state.json"),PREVIOUS_PUBLIC:join(dir,"state.json")}});
+      return JSON.parse(out.trim().split("\n").at(-1));
+    };
+    const mk=ageH=>({datasets:{etf:{source:"The Block + SosoValue",data:[...canon,...fresh],
+      spliced_cache:{days:fresh,at:new Date(NOW-ageH*3600e3).toISOString()}}}});
+
+    const alive=drive(mk(2));
+    assert.equal(alive.spliced,1,"свежий кэш обязан оживить подтверждённый день при отказе слоя");
+    assert.equal(alive.last,fresh[0].t,"наблюдение обязано остаться на сшитом дне, а не откатиться к канону");
+    assert.match(alive.source,/SosoValue/,"атрибуция обязана честно называть дополняющий слой");
+    assert.match(alive.errors.join(" "),/кэша подтверждения/,"оживление из кэша обязано быть названо в диагностике");
+    assert.ok(!alive.partial,"ряд не укоротился — помечать пакет неполным не за что");
+
+    const stale=drive(mk(25));
+    assert.equal(stale.spliced,0,"кэш старше суток обязан протухать, а не держать неперепроверенный день");
+    assert.equal(stale.len,canon.length,"после протухания ряд обязан честно вернуться к канону");
+    rmSync(dir,{recursive:true,force:true});
+  }
 
   // ПЕРВАЯ СТУПЕНЬ РЕЗЕРВА: зеркала мертвы, но история The Block лежит в состоянии. Она обязана
   // стать основой — терять половину глубины из-за отказа эндпоинта нельзя, перцентиль потоков

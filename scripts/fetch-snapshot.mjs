@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.9.6";
+const VERSION = "2.9.7";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -467,6 +467,26 @@ function spliceConfirmed(canon,ahead,fresh,canonName,extraNote,probe){
   if(!validateEtfSeries(merged))return{series:canon,source:canonName,spliced:0,note:"сшитый ряд не прошёл ETF-контракт — сшивка отменена",probe};
   return{series:merged,source:`${canonName} + SosoValue`,spliced:aligned.length,note:extraNote,probe};
 }
+// Сколько живёт подтверждённый сшитый день без переподтверждения. Сутки — это запас на разовые
+// сбои и короткие отказы провайдера, но не на молчаливое хранение устаревшего значения: канон
+// догоняет за ~3 дня, а дольше держать неперепроверенный день незачем.
+const SOSO_CACHE_TTL = 24 * HOUR;
+// Возвращает ряд с оживлёнными из кэша днями либо null. Кэш — не лазейка мимо проверок: день
+// обязан быть впереди канона (иначе канон его уже вытеснил), уложиться в тот же предел опережения
+// и пройти тот же ETF-контракт, что и живые данные.
+function reviveSplicedDays(canon,cache){
+  if(!cache||!Array.isArray(cache.days)||!cache.days.length||!canon?.length)return null;
+  const at=Date.parse(cache.at||"");
+  if(!finite(at)||NOW-at>SOSO_CACHE_TTL||NOW<at)return null;
+  const canonLast=Number(last(canon).t);
+  const days=cache.days
+    .filter(x=>finite(x?.t)&&finite(x?.v)&&x.t>canonLast&&x.t<=NOW&&![0,6].includes(new Date(x.t).getUTCDay()))
+    .sort((a,b)=>a.t-b.t);
+  if(!days.length||days.length>SOSO_MAX_SPLICE_DAYS)return null;
+  const merged=[...canon,...days];
+  if(!validateEtfSeries(merged))return null;
+  return{series:merged,days:days.length,ageH:Math.round((NOW-at)/HOUR)};
+}
 // Годится ли прошлый пакет ETF на роль канона, когда живые зеркала недоступны. Три условия, и
 // каждое отсекает свой способ тихо испортить ряд: (1) это должен быть САМ канон, а не прошлый
 // резерв — иначе однажды случившаяся подмена источника закрепится навсегда и будет копироваться
@@ -536,13 +556,29 @@ async function fetchEtfFlows(){
     // Наблюдения прошлого прогона — топливо подтверждения. Если их нет (первый запуск, потеря
     // кэша), сшивка просто не состоится и восстановится сама на следующем часе.
     let probe=previous?.datasets?.etf?.fresh_probe||{};
+    let cache=previous?.datasets?.etf?.spliced_cache||null;
     try{
       const rows=await fetchSosoEtfDaily();
       const r=spliceFreshEtfDays(best.series,rows,best.name,{seen:previous?.datasets?.etf?.fresh_probe});
       series=r.series;source=r.source;spliced=r.spliced;probe=r.probe||{};
+      // Успешно сшитые дни запоминаются вместе с моментом ПОДТВЕРЖДЕНИЯ: он и задаёт срок годности.
+      cache=r.spliced?{days:r.series.slice(-r.spliced),at:iso(NOW)}:null;
       if(r.note)errors.push(`SosoValue: ${r.note}`);
       if(spliced)urls=[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue];
-    }catch(e){errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);}
+    }catch(e){
+      errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);
+      // Разовый сетевой сбой не должен выбрасывать из ряда уже подтверждённый день. Такой выброс —
+      // единственный подтверждённый в системе источник ОДИНОЧНОГО встречного снимка, а тот обнуляет
+      // 48-часовой отсчёт гистерезиса; на исторической реконструкции пропажа свежего дня
+      // переворачивает кандидат среднесрочного режима на 4.2% дней. Поэтому день переживает сбой.
+      const rev=reviveSplicedDays(best.series,cache);
+      if(rev){
+        series=rev.series;spliced=rev.days;source=`${best.name} + SosoValue`;urls=[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue];
+        errors.push(`сшитый день сохранён из кэша подтверждения (${rev.ageH} ч назад), ряд не укорочен`);
+      }else if(cache)errors.push("кэш подтверждённого дня непригоден — ряд возвращается к канону");
+      // Срок годности отсчитывается от ПОДТВЕРЖДЕНИЯ, а не от оживления: иначе длительный отказ
+      // провайдера продлевал бы жизнь неподтверждённого дня бесконечно.
+    }
     // Дополняющий слой может пропасть между часовыми прогонами — тогда ряд станет КОРОЧЕ прошлого,
     // а возраст наблюдения уедет назад. Молчать об этом нельзя: балл семьи ETF стоит у самой
     // границы детектора слома спроса, и такое «мигание» двигало бы тактический вердикт без единого
@@ -551,7 +587,7 @@ async function fetchEtfFlows(){
     const nowLast=Number(last(series).t);
     const degraded=etfDegradation(previous?.datasets?.etf?.data,series);
     errors.push(...degraded.notes);
-    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,partial:degraded.degraded||undefined};
+    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,spliced_cache:cache||undefined,partial:degraded.degraded||undefined};
   }
   // РЕЗЕРВ ПЕРВОЙ СТУПЕНИ: зеркала канона недоступны, но САМА ИСТОРИЯ The Block никуда не делась —
   // она лежит в состоянии с прошлого прогона. Отказ эндпоинта не повод терять половину глубины:
@@ -1370,7 +1406,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
