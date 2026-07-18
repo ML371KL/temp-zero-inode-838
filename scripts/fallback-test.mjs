@@ -14,6 +14,14 @@ function etfChart(lagDays){
     const dayIdx=Math.floor(t/DAY);rows.push({Timestamp:Math.floor(t/1000),Result:dayIdx%7===0?-2e8:1.2e8});}
   return {chart:{jsonFile:{Frequency:"Daily",Series:{"Total Net Flow":{Data:rows}}}}};
 }
+// Тот же календарь и те же значения, что у etfChart, но в соглашении SosoValue: дата вместо
+// метки времени (то есть полночь UTC против полудня у канона).
+function sosoRows(lagDays){
+  const rows=[];
+  for(let i=260;i>=0;i--){const t=NOW-(i+lagDays)*DAY;if([0,6].includes(new Date(t).getUTCDay()))continue;
+    const dayIdx=Math.floor(t/DAY);rows.push({date:new Date(t).toISOString().slice(0,10),totalNetInflow:dayIdx%7===0?-2e8:1.2e8});}
+  return rows;
+}
 function farsideHtml(){
   const rows=[];
   for(let i=200;i>=0;i--){const d=new Date(NOW-i*DAY);if([0,6].includes(d.getUTCDay()))continue;
@@ -41,6 +49,22 @@ globalThis.fetch=async input=>{const u=String(input);
   if(mode==="etf_mirror_disagrees"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com")){const c=etfChart(0);const d=c.chart.jsonFile.Series["Total Net Flow"].Data;d[d.length-5].Result=9.9e8;return json(c);}}
   // Оба зеркала мертвы → последний резерв Farside.
   if(mode==="etf_both_dead"){if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);if(u.includes("farside.co.uk"))return text(farsideHtml());}
+  // Дополняющий слой SosoValue поверх канона The Block, отставшего на 3 дня. Значения обязаны
+  // совпадать с каноном на общих днях — иначе слой будет отбракован проверкой расхождения.
+  if(mode.startsWith("etf_soso")){
+    if(u.includes("theblock.co"))return json(etfChart(3));
+    if(u.includes("tbstat.com"))return json({},503);
+    if(u.includes("historicalInflowChart")){
+      if(mode==="etf_soso_dead")return json({},503);
+      const rows=sosoRows(0);
+      if(mode==="etf_soso_drift")rows[rows.length-3].totalNetInflow=9e9;
+      return json({code:0,data:rows});
+    }
+    if(u.includes("currentEtfDataMetrics")){
+      const rows=sosoRows(0);
+      return json({code:0,data:{list:[1,2,3].map(()=>({dailyNetInflow:{lastUpdateDate:(mode==="etf_soso_partial_day"?rows.at(-2):rows.at(-1)).date}}))}});
+    }
+  }
   if(mode==="cftc"){if(u.includes(".json?"))return json({},503);if(u.includes(".csv?"))return text(cftcCsv());}
   if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:"FI_XBTUSD_260925",tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"40000",openInterest:"2000000000"}});return json({},503);}
   throw new Error(`unexpected ${mode} URL ${u}`);
@@ -70,6 +94,27 @@ try{
   mode="etf_both_dead";const eF=await fetchEtfFlows();
   assert.equal(eF.source,"Farside","при смерти обоих зеркал The Block обязан включиться последний резерв");
   assert.ok(eF.data.length>=100,`farside rows ${eF.data.length}`);
+  // ---- Дополняющий слой SosoValue: он обязан ТОЛЬКО добавлять свежие дни ----
+  mode="etf_soso_fresh";const eS=await fetchEtfFlows();
+  assert.equal(eS.source,"The Block + SosoValue","дополняющий слой не подключился к отставшему канону");
+  assert.ok(eS.spliced>=1,`нет добавленных дней: ${eS.spliced}`);
+  assert.ok(Date.now()-Date.parse(eS.observed_at)<2*DAY,"наблюдение обязано стать свежее канона");
+  // Соглашения о метке времени у провайдеров разные. Без выравнивания шаг между последними точками
+  // становится 12 ч вместо суток, и возраст наблюдения прыгает без единого нового факта.
+  assert.equal(new Set(eS.data.slice(-8).map(x=>x.t%DAY)).size,1,"сшитые дни обязаны жить в соглашении канона о времени суток");
+  assert.ok(eS.data.every(x=>![0,6].includes(new Date(x.t).getUTCDay())),"выходные не должны просачиваться через сшивку");
+  // Ранний срез неполон: отчитались не все фонды. Такой день занижен по модулю и, попав в окно
+  // детектора слома спроса, способен зажечь его ложно — поэтому он обязан быть отброшен.
+  mode="etf_soso_partial_day";const eSp=await fetchEtfFlows();
+  assert.equal(eSp.spliced,eS.spliced-1,`неполный день не отброшен: ${eSp.spliced} против ${eS.spliced}`);
+  assert.ok(Date.parse(eSp.observed_at)<Date.parse(eS.observed_at),"наблюдение обязано остаться на последнем полном дне");
+  mode="etf_soso_dead";const eSd=await fetchEtfFlows();
+  assert.equal(eSd.source,"The Block","смерть дополняющего слоя не должна ронять канон");
+  assert.equal(eSd.spliced,0);
+  assert.match(eSd.errors.join(" "),/SosoValue/,"недоступность слоя обязана попасть в диагностику");
+  mode="etf_soso_drift";const eSx=await fetchEtfFlows();
+  assert.equal(eSx.source,"The Block","расхождение с каноном на общих днях обязано отменять сшивку");
+  assert.equal(eSx.spliced,0);
   mode="cftc";const c=await fetchCftc();assert.equal(c.partial,true);assert.match(c.source,/CSV/);assert.equal(c.data.length,24);
   mode="derivatives";const d=await fetchDerivatives();assert.equal(d.partial,true);assert.equal(d.data.funding.length,1);assert.equal(d.data.funding[0].venue,"Kraken Futures");assert.equal(d.data.funding[0].rate8h,.00008,"absolute Kraken funding * markPrice * 8");assert.equal(d.data.funding[0].oiUsd,2e9);assert.equal(d.data.basisSource,"Kraken Futures");assert.ok(Number.isFinite(d.data.basis));
   console.log("Fallback contract tests OK");

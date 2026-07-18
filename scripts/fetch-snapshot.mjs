@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.9.0";
+const VERSION = "2.9.1";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -378,29 +378,66 @@ function parseEtfFlowJson(text){
 // означает отказ от сшивки и возврат к чистому ряду The Block. Сшивка не имеет права ухудшить
 // картину — только добавить недостающие дни.
 const SOSO_ETF_URL = "https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart";
+const SOSO_ETF_CURRENT_URL = "https://api.sosovalue.xyz/openapi/v2/etf/currentEtfDataMetrics";
 const SOSO_MAX_SPLICE_DAYS = 3;   // длинные выходные + праздник; больше — это уже подмена источника
 const SOSO_DRIFT_TOLERANCE = 0.03; // 3% валового потока на пересечении (наблюдаемое расхождение ~0.1%)
 const SOSO_MIN_OVERLAP = 10;      // меньше — сверять не на чем, сшивку не делаем
-async function fetchSosoEtfDaily(){
+async function sosoPost(url,tries=2){
   const key=String(process.env.SOSO_API_KEY||"").trim();
-  const r=await fetch(SOSO_ETF_URL,{method:"POST",
-    headers:{...(key?{"x-soso-api-key":key}:{}),"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/"+VERSION},
-    body:JSON.stringify({type:"us-btc-spot"}),signal:AbortSignal.timeout(25_000)});
-  if(!r.ok)throw new Error(`HTTP ${r.status}`);
-  const j=await r.json();
-  if(finite(j?.code)&&Number(j.code)!==0)throw new Error(`API code ${j.code}: ${String(j?.msg||"").slice(0,60)}`);
-  const rows=(j?.data||[])
+  let err;
+  for(let i=0;i<tries;i++){
+    try{
+      const r=await fetch(url,{method:"POST",
+        headers:{...(key?{"x-soso-api-key":key}:{}),"Content-Type":"application/json","Accept":"application/json","User-Agent":"btc-21m-dashboard/"+VERSION},
+        body:JSON.stringify({type:"us-btc-spot"}),signal:AbortSignal.timeout(25_000)});
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const j=await r.json();
+      if(finite(j?.code)&&Number(j.code)!==0)throw new Error(`API code ${j.code}: ${String(j?.msg||"").slice(0,60)}`);
+      return j;
+    }catch(e){err=e;if(i<tries-1)await sleep(700);}
+  }
+  throw err;
+}
+// Возвращает {rows, verifiedThrough}. verifiedThrough — последний день, за который отчитались ВСЕ
+// фонды: SosoValue публикует раньше канона именно потому, что агрегирует быстрее, и ранний срез
+// может быть неполным. Неполный день занижен по модулю и, попав в 5-дневное окно, способен ЛОЖНО
+// зажечь детектор слома спроса — то есть нарушить обещание «сшивка может только дополнить».
+// Поэтому покрытие проверяется напрямую, а не эвристикой по величине.
+async function fetchSosoEtfDaily(){
+  const [hist,current]=await Promise.all([sosoPost(SOSO_ETF_URL),sosoPost(SOSO_ETF_CURRENT_URL).catch(()=>null)]);
+  const rows=(hist?.data||[])
     .map(x=>({t:Date.parse(String(x?.date)+"T00:00:00Z"),v:Number(x?.totalNetInflow)}))
     .filter(x=>finite(x.t)&&finite(x.v)&&![0,6].includes(new Date(x.t).getUTCDay()))
     .sort((a,b)=>a.t-b.t);
   if(rows.length<100)throw new Error(`история слишком коротка: ${rows.length}`);
-  return rows;
+  let verifiedThrough=null;
+  const list=current?.data?.list;
+  if(Array.isArray(list)&&list.length){
+    const dates=list.map(f=>String(f?.dailyNetInflow?.lastUpdateDate||"")).filter(Boolean);
+    // Все фонды должны отчитаться за один и тот же день — тогда он полный.
+    if(dates.length===list.length){
+      const newest=dates.slice().sort().at(-1);
+      if(dates.every(d=>d===newest))verifiedThrough=Date.parse(newest+"T00:00:00Z");
+    }
+  }
+  return{rows,verifiedThrough:finite(verifiedThrough)?verifiedThrough:null};
 }
 // Возвращает {series, source, spliced} — сшитый ряд либо исходный канон без изменений.
-function spliceFreshEtfDays(canon,fresh,canonName){
+function spliceFreshEtfDays(canon,fresh,canonName,{verifiedThrough=null}={}){
   const canonLast=Number(last(canon).t);
-  const ahead=fresh.filter(x=>x.t>canonLast);
+  let ahead=fresh.filter(x=>x.t>canonLast);
   if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:null};
+  // Досюда все фонды отчитались; более свежие дни — заведомо неполные, их не берём.
+  if(finite(verifiedThrough)){
+    const dropped=ahead.filter(x=>x.t>verifiedThrough).length;
+    ahead=ahead.filter(x=>x.t<=verifiedThrough);
+    if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:`свежий день ещё не полон (отчитались не все фонды) — сшивка отложена`};
+    if(dropped)return spliceVerified(canon,ahead,fresh,canonName,`${dropped} неполн. дн отброшено`);
+  }
+  return spliceVerified(canon,ahead,fresh,canonName,null);
+}
+function spliceVerified(canon,ahead,fresh,canonName,extraNote){
+  const canonLast=Number(last(canon).t);
   if(ahead.length>SOSO_MAX_SPLICE_DAYS)return{series:canon,source:canonName,spliced:0,note:`опережение ${ahead.length} дн больше допустимых ${SOSO_MAX_SPLICE_DAYS} — сшивка отменена`};
   // Сверка на ПЕРЕСЕЧЕНИИ: провайдеры обязаны описывать одну и ту же величину. Сравниваются суммы,
   // а не отдельные дни: посуточный разброс симметричен и взаимно гасится, а смена методологии или
@@ -412,9 +449,16 @@ function spliceFreshEtfDays(canon,fresh,canonName){
   const gross=overlap.reduce((acc,x)=>acc+Math.abs(byDay.get(dayKey(x.t))),0);
   const drift=gross>0?Math.abs(delta)/gross:1;
   if(drift>SOSO_DRIFT_TOLERANCE)return{series:canon,source:canonName,spliced:0,note:`расхождение с каноном ${(drift*100).toFixed(2)}% > ${(SOSO_DRIFT_TOLERANCE*100).toFixed(0)}% — сшивка отменена`};
-  const merged=[...canon,...ahead];
+  // Провайдеры используют разные соглашения о метке времени (канон — полдень UTC, дополняющий
+  // слой — полночь). Без выравнивания шаг между последними точками становится 12 ч вместо 24, а
+  // возраст наблюдения прыгает на полсуток без единого нового факта. Приводим к соглашению канона,
+  // не выходя за текущий момент (иначе ETF-контракт отбракует точку как «из будущего»).
+  const offset=canonLast%DAY;
+  const aligned=ahead.map(x=>({t:Math.min(x.t-(x.t%DAY)+offset,NOW-HOUR),v:x.v})).filter(x=>x.t>canonLast);
+  if(!aligned.length)return{series:canon,source:canonName,spliced:0,note:"после выравнивания меток времени свежих дней не осталось"};
+  const merged=[...canon,...aligned];
   if(!validateEtfSeries(merged))return{series:canon,source:canonName,spliced:0,note:"сшитый ряд не прошёл ETF-контракт — сшивка отменена"};
-  return{series:merged,source:`${canonName} + SosoValue`,spliced:ahead.length,note:null};
+  return{series:merged,source:`${canonName} + SosoValue`,spliced:aligned.length,note:extraNote};
 }
 const ETF_BLOCK_MIRRORS = [
   { name: "The Block", url: "https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow" },
@@ -455,13 +499,22 @@ async function fetchEtfFlows(){
     // записывается, но картина не ухудшается.
     let series=best.series,source=best.name,spliced=0,urls=[SOURCE_URLS.theblock];
     try{
-      const fresh=await fetchSosoEtfDaily();
-      const r=spliceFreshEtfDays(best.series,fresh,best.name);
+      const {rows,verifiedThrough}=await fetchSosoEtfDaily();
+      const r=spliceFreshEtfDays(best.series,rows,best.name,{verifiedThrough});
       series=r.series;source=r.source;spliced=r.spliced;
       if(r.note)errors.push(`SosoValue: ${r.note}`);
       if(spliced)urls=[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue];
     }catch(e){errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);}
-    return{data:series,observed_at:iso(Number(last(series).t)),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced};
+    // Дополняющий слой может пропасть между часовыми прогонами — тогда ряд станет КОРОЧЕ прошлого,
+    // а возраст наблюдения уедет назад. Молчать об этом нельзя: балл семьи ETF стоит у самой
+    // границы детектора слома спроса, и такое «мигание» переключало бы тактический вердикт без
+    // единого нового факта. Помечаем пакет partial — карточки честно покажут деградацию.
+    const prevRows=previous?.datasets?.etf?.data;
+    const prevLast=Array.isArray(prevRows)&&prevRows.length?Number(last(prevRows).t):null;
+    const nowLast=Number(last(series).t);
+    const regressed=finite(prevLast)&&dayKey(prevLast)>dayKey(nowLast);
+    if(regressed)errors.push(`ряд короче прошлого снимка: было по ${dayKey(prevLast)}, стало по ${dayKey(nowLast)}`);
+    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,partial:regressed||undefined};
   }
   try{
     const series=parseFarside(await request("https://farside.co.uk/bitcoin-etf-flow-all-data/",{text:true,tries:2}));
@@ -915,7 +968,7 @@ function buildMetrics(){
   const asset4=cLast&&c4&&cLast.oi&&c4.oi?assetNet-(c4.assetLong-c4.assetShort)/c4.oi*100:null,lev4=cLast&&c4&&cLast.oi&&c4.oi?levShort-(c4.levShort-c4.levLong)/c4.oi*100:null;
   let qualityScore=null,qualityText="—";
   if(finite(asset4)&&finite(lev4)){qualityScore=asset4>1&&lev4<1?1:lev4>3&&finite(etf20)&&etf20>0?-1:asset4<-2?-1:0;qualityText=qualityScore>0?"направленный спрос подтверждён":qualityScore<0?"ETF-поток частично похож на basis trade":"смешанное позиционирование";}
-  add({id:"institutional_quality",block:"demand",family:"institutional",name:"Качество институционального спроса",horizon:"medium",role:"confirming",method:"derived",tactical:false,value_num:qualityScore,value:qualityText,delta:finite(assetNet)&&finite(levShort)?`asset mgr ${assetNet.toFixed(1)}% OI · lev. net short ${levShort.toFixed(1)}% OI`:"",note:"CFTC CME futures-only. Рост шортов leveraged funds при ETF-притоках понижает уверенность: часть спроса может быть cash-and-carry, а не направленной ставкой.",score:qualityScore,source:"CFTC · The Block",source_url:SOURCE_URLS.cftc,source_urls:links(SOURCE_URLS.cftc,SOURCE_URLS.theblock),...sourceMetaMany(["cftc","etf"]),series:cot});
+  add({id:"institutional_quality",block:"demand",family:"institutional",name:"Качество институционального спроса",horizon:"medium",role:"confirming",method:"derived",tactical:false,value_num:qualityScore,value:qualityText,delta:finite(assetNet)&&finite(levShort)?`asset mgr ${assetNet.toFixed(1)}% OI · lev. net short ${levShort.toFixed(1)}% OI`:"",note:"CFTC CME futures-only. Рост шортов leveraged funds при ETF-притоках понижает уверенность: часть спроса может быть cash-and-carry, а не направленной ставкой.",score:qualityScore,source:`CFTC · ${datasetSource("etf","The Block")}`,source_url:SOURCE_URLS.cftc,source_urls:links(SOURCE_URLS.cftc,datasetUrls("etf",SOURCE_URLS.theblock)),...sourceMetaMany(["cftc","etf"]),series:cot});
 
   const spot=data("spot")||{},cb=num(spot.coinbase),comparisonUsd=[spot.kraken,spot.bitstamp,spot.gemini].filter(sanePrice).map(Number),usdRef=median(comparisonUsd),premium=cb&&usdRef?(cb/usdRef-1)*10000:null;
   const premiumScore=customScore(premium,[[v=>v>35,2],[v=>v>8,1],[v=>v>-8,0],[v=>v>-35,-1],[()=>true,-2]]);

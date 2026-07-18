@@ -278,9 +278,14 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
 {
   const collector=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
   ok(!/SOSO-[A-Za-z0-9]{8}/.test(collector),"ключ SosoValue не должен быть зашит в сборщик");
-  const fn=collector.slice(collector.indexOf("async function fetchSosoEtfDaily"),collector.indexOf("function spliceFreshEtfDays"));
+  const fn=collector.slice(collector.indexOf("async function sosoPost"),collector.indexOf("function spliceFreshEtfDays"));
   ok(/process\.env\.SOSO_API_KEY/.test(fn),"ключ обязан читаться из окружения");
   ok(/key\?\{"x-soso-api-key"/.test(fn),"без ключа запрос всё равно должен уходить: маршрут публичный, панель не обязана зависеть от секрета");
+  ok(/lastUpdateDate/.test(fn),"пропала проверка покрытия по фондам: ранний срез занижен по модулю и способен ложно зажечь детектор слома спроса");
+  ok(/verifiedThrough/.test(collector),"сшивка обязана ограничиваться днями, за которые отчитались все фонды");
+  ok(/ряд короче прошлого снимка/.test(collector),"пропала пометка деградации: пропажа слоя между прогонами укорачивает ряд молча");
+  ok(/partial:regressed/.test(collector),"укоротившийся ряд обязан помечать пакет как неполный, а не выдавать себя за штатный");
+  ok(/for\(let i=0;i<tries;i\+\+\)/.test(fn),"пропали повторы: разовый сбой слоя укорачивает ряд и двигает вердикт без новых фактов");
 }
 
 if(fail.length){console.error("Unit tests failed:\n- "+fail.join("\n- "));process.exit(1)}
