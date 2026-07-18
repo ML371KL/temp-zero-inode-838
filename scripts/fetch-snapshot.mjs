@@ -15,7 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const VERSION = "2.9.5";
+const VERSION = "2.9.6";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -1271,31 +1271,40 @@ const STRATEGIC_TEXT={constructive:"КОНСТРУКТИВНЫЙ СРЕДНЕС�
 const TACTICAL_TEXT={spot_led:"СПОТ-ВЕДОМАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",balanced:"СБАЛАНСИРОВАННАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",demand_break:"СЛОМ МАРЖИНАЛЬНОГО СПРОСА",overheated_supported:"БЫЧИЙ ФОН, НО ПЛЕЧО ПЕРЕГРЕТО",fragile:"ХРУПКАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",deleveraging:"ДЕЛЕВЕРИДЖ · ТАКТИЧЕСКАЯ ЗАЩИТА",short_squeeze:"УСЛОВИЯ ДЛЯ SHORT SQUEEZE",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
 function severity(x){return{constructive:2,unconfirmed_positive:1,transition:0,deteriorating:-1,defensive:-2,spot_led:2,balanced:0,overheated_supported:-1,fragile:-1,demand_break:-1,deleveraging:-2,short_squeeze:1,insufficient:0,emergency:-3}[x]??0;}
 function stabilize(candidate,type,hard){
-  const prevMeta=previous?.regime_meta?.[type]||{};
+  return stabilizeCore(candidate,previous?.regime?.[type],previous?.regime_meta?.[type],NOW,{hard,fresh:!previous,mock:!!previous?.mock});
+}
+// Чистое ядро гистерезиса, вынесенное ради проверяемости: оно определяет, КОГДА панель меняет
+// опубликованный режим, то есть напрямую задаёт момент смены торговой рекомендации. До этого
+// семантику нельзя было закрепить тестом — функция читала модульное состояние.
+function stabilizeCore(candidate,prevState,prevMetaIn,now,{hard=false,fresh=false,mock=false}={}){
+  const prevMeta=prevMetaIn||{};
   const DEGRADED=["insufficient","emergency"];
-  const prevState=previous?.regime?.[type];
   // The anchor is the last REAL regime. A degraded state never becomes the anchor itself: a fresh
   // deployment recovering from «insufficient» has no anchor, and its exit must not serve a 48h hold.
   const anchor=DEGRADED.includes(prevState)?(prevMeta.anchor||null):prevState;
-  if(hard||candidate==="insufficient"||candidate==="emergency"||!previous||previous.mock)
+  if(hard||candidate==="insufficient"||candidate==="emergency"||fresh||mock)
     // Degraded snapshots keep the accumulated risk-off streak: a one-hour outage must not re-arm
     // the 2-snapshot downgrade confirmation forever under a flapping source.
-    return{state:candidate,candidate,count:1,since:iso(NOW),anchor,downStreak:prevMeta.downStreak||0};
-  const meta=prevMeta,count=meta.candidate===candidate?(meta.count||0)+1:1,prev=previous.regime?.[type]||candidate;
-  const since=meta.candidate===candidate&&meta.since?meta.since:iso(NOW);
+    return{state:candidate,candidate,count:1,since:iso(now),anchor,downStreak:prevMeta.downStreak||0};
+  const meta=prevMeta,count=meta.candidate===candidate?(meta.count||0)+1:1,prev=prevState||candidate;
+  const since=meta.candidate===candidate&&meta.since?meta.since:iso(now);
   const ref=DEGRADED.includes(prev)?(anchor??prev):prev;
   const sevRef=severity(ref),worse=severity(candidate)<sevRef;
   const downStreak=worse?(meta.downStreak||0)+1:0;
   // Exiting a degraded state with no real anchor is not an "upgrade" — only the 2-snapshot rule applies.
   const upgrade=severity(candidate)>sevRef&&!DEGRADED.includes(ref);
-  const heldLongEnough=NOW-Date.parse(since)>=UPGRADE_HOLD_H*HOUR&&count>=UPGRADE_MIN_SNAPSHOTS;
+  const heldLongEnough=now-Date.parse(since)>=UPGRADE_HOLD_H*HOUR&&count>=UPGRADE_MIN_SNAPSHOTS;
   const adopt=(count>=2&&(!upgrade||heldLongEnough))||(worse&&downStreak>=2);
   // While an upgrade out of a degraded state is held, publish the anchor — but NEVER an anchor that
   // is better than today's candidate: degradation must not resurrect stale optimism («deterioration
   // is fast» applies to the anchor path too).
   const held=!adopt&&DEGRADED.includes(prev)&&anchor?(severity(candidate)<severity(anchor)?candidate:anchor):prev;
   const state=adopt?candidate:held;
-  return{state,candidate,count,since,downStreak,anchor:DEGRADED.includes(state)?anchor:state};
+  // Граница снятия удержания публикуется, чтобы панель могла честно подписать расхождение между
+  // тем, что насчитано сейчас, и тем, что опубликовано. Это именно НИЖНЯЯ граница, а не обратный
+  // отсчёт: `since` обнуляется встречным снимком, поэтому обещать точное время нельзя.
+  const hold_until=!adopt&&upgrade?iso(Date.parse(since)+UPGRADE_HOLD_H*HOUR):undefined;
+  return{state,candidate,count,since,downStreak,anchor:DEGRADED.includes(state)?anchor:state,hold_until};
 }
 
 function behaviors(s,t){
@@ -1361,7 +1370,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});

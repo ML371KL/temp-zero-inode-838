@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, stabilizeCore, severity, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -371,6 +371,45 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   // Протухшая история хуже честного отсутствия: окна потоков считаются от её конца.
   const stale=wd(300,25).map((t,i)=>({t,v:(1+(i%5))*1e8}));
   eq(cachedEtfCanon({source:"The Block",data:stale}),null,"кэш старше недели обязан отбраковываться");
+}
+// ГИСТЕРЕЗИС РЕЖИМА. Это то, что решает, КОГДА панель меняет торговую рекомендацию, и до сих пор
+// его семантику не защищал ни один тест: обе стороны асимметрии можно было сломать незаметно.
+{
+  const H=36e5, T0=Date.parse("2026-07-18T00:00:00Z");
+  const meta=(candidate,count,sinceH=0,downStreak=0)=>({state:candidate,candidate,count,since:new Date(T0+sinceH*H).toISOString(),downStreak,anchor:candidate});
+  const st=(cand,prev,m,atH,opts)=>stabilizeCore(cand,prev,m,T0+atH*H,opts);
+
+  // Асимметрия — суть механизма: ухудшение принимается быстро, улучшение требует подтверждения.
+  ok(severity("demand_break")<severity("balanced"),"выход из demand_break обязан считаться повышением, иначе вся асимметрия не применяется");
+  // Ухудшение: два подряд снимка и не раньше. Счётчик наращивается ВНУТРИ функции, поэтому
+  // «первый тревожный снимок» — это состояние, где прошлым кандидатом был ещё спокойный режим.
+  eq(st("demand_break","balanced",meta("balanced",5),1).state,"balanced","одиночный тревожный снимок не имеет права менять режим");
+  eq(st("demand_break","balanced",meta("demand_break",1,0,1),1).state,"demand_break","второй подряд тревожный снимок обязан приниматься");
+  // Повышение: 48 часов И 12 снимков, оба условия обязательны.
+  eq(st("balanced","demand_break",meta("balanced",10,0),49).state,"demand_break","повышение при 11 снимках обязано удерживаться: мало наблюдений");
+  eq(st("balanced","demand_break",meta("balanced",30,0),47).state,"demand_break","повышение через 47 часов обязано удерживаться: рано");
+  eq(st("balanced","demand_break",meta("balanced",30,0),49).state,"balanced","при 49 часах и 30 снимках повышение обязано состояться");
+  // Переход равной тяжести — не повышение, ему хватает двух снимков.
+  eq(st("fragile","demand_break",meta("fragile",1),1).state,"fragile","переход между состояниями равной тяжести не обязан ждать 48 часов");
+  // Холодный старт: удерживать не от чего.
+  eq(st("balanced",undefined,null,1,{fresh:true}).state,"balanced","первый запуск публикует кандидата как есть");
+  eq(st("balanced","demand_break",meta("balanced",30,0),49,{mock:true}).state,"balanced","снимок на синтетике не имеет права наследовать боевую родословную");
+
+  // ХРАПОВИК (характеризующий тест — фиксирует ТЕКУЩЕЕ поведение, а не желаемое).
+  // `since` обнуляется при любой смене кандидата, поэтому «48 часов» означают «49 часов подряд без
+  // единого встречного снимка». Тот же одиночный встречный снимок выше признан недостаточным, чтобы
+  // менять режим, но его достаточно, чтобы стереть накопленное восстановление. Асимметрия здесь
+  // непреднамеренная: шум фильтруется в одну сторону и не фильтруется в другую.
+  const afterBlip=st("balanced","demand_break",meta("demand_break",1,47),47.5);
+  eq(afterBlip.count,1,"встречный снимок обнуляет счётчик наблюдений");
+  eq(Date.parse(afterBlip.since),T0+47.5*H,"встречный снимок сбрасывает отсчёт 48 часов в ноль");
+  eq(afterBlip.state,"demand_break","и режим при этом остаётся удерживаемым");
+  // Граница снятия публикуется ТОЛЬКО когда удержание реально действует, иначе панель
+  // подписала бы удержанием обычный установившийся режим.
+  const holding=st("balanced","demand_break",meta("balanced",5,0),3);
+  ok(holding.hold_until,"при удержании повышения обязана публиковаться граница снятия");
+  eq(Date.parse(holding.hold_until),Date.parse(holding.since)+48*H,"граница снятия = начало отсчёта плюс окно выдержки");
+  ok(!st("defensive","defensive",meta("defensive",30,0),3).hold_until,"установившийся режим не должен подписываться удержанием");
 }
 // Повторы запроса проверяются ПОВЕДЕНИЕМ: разовый сбой слоя укорачивает ряд и двигает возраст
 // наблюдения назад, а постоянную ошибку повторять бессмысленно.

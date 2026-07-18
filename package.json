@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "snapshot": "node scripts/fetch-snapshot.mjs",
-    "mock": "MOCK=1 node scripts/fetch-snapshot.mjs",
+    "mock": "MOCK=1 OUT=.candidate/mock-snapshot.json STATE=.candidate/mock-state.json node scripts/fetch-snapshot.mjs",
     "unit": "node scripts/unit-test.mjs",
     "check": "node scripts/unit-test.mjs && node scripts/fixture-test.mjs && node scripts/fallback-test.mjs && node scripts/workflow-test.mjs && node scripts/static-audit.mjs && node scripts/live-regression-test.mjs && node scripts/self-test.mjs && node scripts/negative-test.mjs",
     "fixture": "node scripts/fixture-test.mjs",
@@ -17,7 +17,7 @@
     "live-regression": "node scripts/live-regression-test.mjs",
     "fallback": "node scripts/fallback-test.mjs"
   },
-  "version": "2.9.5",
+  "version": "2.9.6",
   "engines": {
     "node": ">=24"
   }
