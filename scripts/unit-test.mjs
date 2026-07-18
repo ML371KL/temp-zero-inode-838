@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -237,6 +237,21 @@ eq(componentScore([2,null,null]),0,"1 из 3 ног: положительный 
 eq(componentScore([-1,null,null]),-1,"1 из 3 ног: предупреждение проходит");
 eq(componentScore([null,null]),null,"нет ни одной ноги — нет голоса, а не 0");
 eq(componentScore([2,2]),2,"полная семья: максимум достижим");
+
+// ---- ETF: выбор свежайшего зеркала одного провайдера ----
+// Оба эндпоинта обязаны принадлежать The Block: сравнение свежести законно только внутри одного
+// провайдера, иначе это скрытое сшивание рядов (запрещено правилом канонических единиц).
+ok(ETF_BLOCK_MIRRORS.length===2,"зеркал The Block должно быть ровно два");
+ok(ETF_BLOCK_MIRRORS.every(m=>/theblock\.co|tbstat\.com/.test(m.url)),"в списке зеркал The Block оказался чужой провайдер");
+ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический chart-API должен быть первым (тай-брейк при равной свежести)");
+{
+  const src=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
+  const fn=src.slice(src.indexOf("async function fetchEtfFlows"),src.indexOf("function parseCsv"));
+  ok(/validateEtfSeries\(series\)/.test(fn),"кандидат обязан проходить ETF-контракт ДО сравнения свежести");
+  ok(/b\.latest>a\.latest/.test(fn),"пропал выбор по максимальной свежести");
+  ok(fn.indexOf("farside.co.uk")>fn.indexOf("candidates.length"),"Farside обязан оставаться последним резервом, а не участником сравнения");
+  ok(/зеркала The Block разошлись/.test(fn),"пропала сверка зеркал на пересечении: испорченная свежая копия попала бы в публикацию");
+}
 
 if(fail.length){console.error("Unit tests failed:\n- "+fail.join("\n- "));process.exit(1)}
 

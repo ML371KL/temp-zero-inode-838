@@ -5,6 +5,22 @@ const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:
 const originalFetch=globalThis.fetch,originalSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
 let mode="";
 const blockchain=(name,n=1500,unit="")=>({status:"ok",name,unit,period:"day",values:Array.from({length:n},(_,i)=>({x:Math.floor((NOW-(n-1-i)*DAY)/1000),y:name==="hash-rate"?600_000_000+i*1000:name==="difficulty"?80e12+i*1e9:name==="mvrv"?1.2+i/10000:name==="n-unique-addresses"?700000+i:name==="n-transactions"?300000+i:name==="miners-revenue"?30e6+i*1000:name==="trade-volume"?5e9+i*1e6:50000+i}))});
+// График ETF, последняя точка которого отстоит на `lagDays` дней от сегодня. Значение зависит от
+// КАЛЕНДАРНОГО дня, а не от счётчика: два зеркала одного провайдера обязаны совпадать на общих днях
+// (в реальности они байт-в-байт идентичны на 628 пересекающихся днях), и фикстура моделирует это.
+function etfChart(lagDays){
+  const rows=[];
+  for(let i=260;i>=0;i--){const t=NOW-(i+lagDays)*DAY;if([0,6].includes(new Date(t).getUTCDay()))continue;
+    const dayIdx=Math.floor(t/DAY);rows.push({Timestamp:Math.floor(t/1000),Result:dayIdx%7===0?-2e8:1.2e8});}
+  return {chart:{jsonFile:{Frequency:"Daily",Series:{"Total Net Flow":{Data:rows}}}}};
+}
+function farsideHtml(){
+  const rows=[];
+  for(let i=200;i>=0;i--){const d=new Date(NOW-i*DAY);if([0,6].includes(d.getUTCDay()))continue;
+    const day=String(d.getUTCDate()),mon=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+    rows.push(`<tr><td>${day} ${mon} ${d.getUTCFullYear()}</td><td>50.0</td><td>60.0</td><td>110.0</td></tr>`);}
+  return `<table>${rows.join("")}</table>`;
+}
 function cftcCsv(){const h="report_date_as_yyyy_mm_dd,open_interest_all,asset_mgr_positions_long,asset_mgr_positions_short,lev_money_positions_long,lev_money_positions_short",r=Array.from({length:24},(_,i)=>`${new Date(NOW-i*7*DAY).toISOString()},${30000-i},8000,2000,3000,12000`);return[h,...r].join("\n");}
 globalThis.fetch=async input=>{const u=String(input);
   if(mode==="fred"){if(u.includes("api.stlouisfed.org"))return json({},503);if(u.includes("fredgraph.csv")){const rows=["observation_date,WALCL",...Array.from({length:40},(_,i)=>`${new Date(NOW-(39-i)*7*DAY).toISOString().slice(0,10)},7000000`)];return text(rows.join("\n"));}}
@@ -14,7 +30,17 @@ globalThis.fetch=async input=>{const u=String(input);
   if(mode==="pegs"){if(u.includes("stablecoins.llama.fi"))return json({peggedAssets:[]});if(u.includes("products/USDT-USD"))return json({price:"0.9998"});if(u.includes("products/USDC-USD"))return json({price:"1.0001"});if(u.includes("pair=USDTUSD"))return json({error:[],result:{USDTUSD:{c:["0.9999"]}}});if(u.includes("pair=USDCUSD"))return json({error:[],result:{USDCUSD:{c:["1.0000"]}}});if(u.includes("pubticker/USDTUSD"))return json({last:"1.0000"});if(u.includes("pubticker/USDCUSD"))return json({last:"1.0001"});}
   if(mode==="pegs_single"){if(u.includes("stablecoins.llama.fi"))return json({peggedAssets:[]});if(u.includes("products/USDT-USD"))return json({price:"0.9998"});if(u.includes("products/USDC-USD"))return json({price:"1.0001"});return json({},503);}
   if(mode==="onchain"){if(u.includes("bitcoin-data.com/v1/mvrv"))return json(Array.from({length:700},(_,i)=>({unixTs:Math.floor((NOW-(699-i)*DAY)/1000),mvrv:1.2+i/10000})));for(const name of ["n-unique-addresses","n-transactions","miners-revenue"])if(u.includes(`/charts/${name}`))return json(blockchain(name,700,name==="miners-revenue"?"USD":""));}
-  if(mode==="etf"){if(u.includes("theblock.co"))return json({chart:{jsonFile:{Frequency:"Daily",Series:{"Total Net Flow":{Data:Array.from({length:200},(_,i)=>({Timestamp:Math.floor((NOW-(199-i)*DAY)/1000),Result:i%7===0?-2e8:1.2e8}))}}}}});}
+  if(mode==="etf"){if(u.includes("theblock.co"))return json(etfChart(0));if(u.includes("tbstat.com"))return json({},503);}
+  // Зеркало свежее основного API ровно на один торговый день — реальная и постоянная ситуация.
+  if(mode==="etf_mirror_fresher"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com"))return json(etfChart(0));}
+  // Основной API свежее — источник не должен «скакать» на зеркало без причины.
+  if(mode==="etf_primary_fresher"){if(u.includes("theblock.co"))return json(etfChart(0));if(u.includes("tbstat.com"))return json(etfChart(3));}
+  // Зеркало свежее, но битое (мало строк): свежесть не должна побеждать валидность.
+  if(mode==="etf_mirror_corrupt"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com"))return json({chart:{jsonFile:{Series:{"Total Net Flow":{Data:Array.from({length:12},(_,i)=>({Timestamp:Math.floor((NOW-i*DAY)/1000),Result:1e8}))}}}}});}
+  // Зеркало свежее, но расходится с основным API на общих днях — признак порчи одной из копий.
+  if(mode==="etf_mirror_disagrees"){if(u.includes("theblock.co"))return json(etfChart(3));if(u.includes("tbstat.com")){const c=etfChart(0);const d=c.chart.jsonFile.Series["Total Net Flow"].Data;d[d.length-5].Result=9.9e8;return json(c);}}
+  // Оба зеркала мертвы → последний резерв Farside.
+  if(mode==="etf_both_dead"){if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);if(u.includes("farside.co.uk"))return text(farsideHtml());}
   if(mode==="cftc"){if(u.includes(".json?"))return json({},503);if(u.includes(".csv?"))return text(cftcCsv());}
   if(mode==="derivatives"){if(u.includes("contractType=futures_inverse"))return json({result:"success",tickers:[{symbol:"FI_XBTUSD_260925",tag:"quarter",markPrice:"103000",indexPrice:"100000",openInterest:"100000000"}]});if(u.includes("futures.kraken.com"))return json({result:"success",serverTime:new Date(NOW).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"40000",openInterest:"2000000000"}});return json({},503);}
   throw new Error(`unexpected ${mode} URL ${u}`);
@@ -28,6 +54,22 @@ try{
   mode="pegs_single";const p1=await fetchPegs();assert.equal(p1.data.USDT,undefined,"one exchange quote must not establish USDT peg");assert.equal(p1.data.USDC,undefined,"one exchange quote must not establish USDC peg");assert.match(p1.errors.join(";"),/at least 2 independent quotes/);
   mode="onchain";const o=await fetchBlockchainOnchain();assert.equal(o.data.MVRV.length,700);assert.equal(o.data.AdrActCnt.length,700);assert.equal(o.data.TxCnt.length,700);assert.equal(o.data.MinerRevUSD.length,700);
   mode="etf";const e=await fetchEtfFlows();assert.equal(e.source,"The Block");assert.ok(e.data.length>=100,`etf rows ${e.data.length}`);assert.ok(e.data.every(x=>![0,6].includes(new Date(x.t).getUTCDay())),"etf weekend rows leaked");
+
+  // ---- Выбор источника ETF: свежайшее ВАЛИДНОЕ зеркало одного провайдера ----
+  mode="etf_mirror_fresher";const eM=await fetchEtfFlows();
+  assert.equal(eM.source,"The Block (tbstat)","более свежее зеркало обязано побеждать основной API");
+  assert.ok(Date.now()-Date.parse(eM.observed_at)<2*DAY,"выбрана свежая копия ряда");
+  mode="etf_primary_fresher";const eP=await fetchEtfFlows();
+  assert.equal(eP.source,"The Block","при более свежем основном API источник не должен уходить на зеркало");
+  mode="etf_mirror_corrupt";const eC=await fetchEtfFlows();
+  assert.equal(eC.source,"The Block","битое, но более свежее зеркало не должно вытеснять валидный ряд");
+  assert.ok(eC.data.length>=100,"выбран полноценный ряд, а не обрезок зеркала");
+  mode="etf_mirror_disagrees";const eD=await fetchEtfFlows();
+  assert.equal(eD.source,"The Block","при расхождении зеркал обязан побеждать канонический chart-API, а не более свежая копия");
+  assert.match(eD.errors.join(" "),/разошлись/,"расхождение зеркал должно быть записано в диагностику");
+  mode="etf_both_dead";const eF=await fetchEtfFlows();
+  assert.equal(eF.source,"Farside","при смерти обоих зеркал The Block обязан включиться последний резерв");
+  assert.ok(eF.data.length>=100,`farside rows ${eF.data.length}`);
   mode="cftc";const c=await fetchCftc();assert.equal(c.partial,true);assert.match(c.source,/CSV/);assert.equal(c.data.length,24);
   mode="derivatives";const d=await fetchDerivatives();assert.equal(d.partial,true);assert.equal(d.data.funding.length,1);assert.equal(d.data.funding[0].venue,"Kraken Futures");assert.equal(d.data.funding[0].rate8h,.00008,"absolute Kraken funding * markPrice * 8");assert.equal(d.data.funding[0].oiUsd,2e9);assert.equal(d.data.basisSource,"Kraken Futures");assert.ok(Number.isFinite(d.data.basis));
   console.log("Fallback contract tests OK");
