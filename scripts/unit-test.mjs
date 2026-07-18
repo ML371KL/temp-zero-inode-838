@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
 
@@ -351,6 +351,26 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   ok(etfDegradation(full,full.slice(0,-3)).degraded,'откат последнего дня назад обязан помечаться');
   eq(etfDegradation(null,full).degraded,false,'первый прогон без прошлого снимка не деградация');
   eq(etfDegradation(full,[]).degraded,false,'пустой ряд обрабатывается выше по потоку, здесь не падаем');
+}
+// Лестница резерва ETF при смерти зеркал канона. Отказ эндпоинта не означает исчезновения истории:
+// она лежит в состоянии, и терять половину глубины нельзя — перцентиль потоков считается по всему
+// ряду, поэтому подмена 630 дней канона на 300 дней резерва сдвигает ранги и делает картину менее
+// медвежьей. Проверяется решение о ВЫБОРЕ базы, сама сшивка покрыта выше.
+{
+  const wd=(count,endBack=0)=>{const out=[];let t=Date.parse(new Date().toISOString().slice(0,10)+"T00:00:00Z");
+    while(out.length<count+endBack){if(![0,6].includes(new Date(t).getUTCDay()))out.push(t);t-=864e5;}
+    const asc=out.reverse();return asc.slice(0,asc.length-endBack);};
+  const rows=n=>wd(n).map((t,i)=>({t,v:(1+(i%5))*1e8}));
+  const fresh=rows(300);
+  ok(cachedEtfCanon({source:"The Block",data:fresh})===fresh,"свежий кэш самого канона обязан годиться в основу");
+  ok(cachedEtfCanon({source:"The Block + SosoValue",data:fresh})===fresh,"сшитый ряд — это по-прежнему канон The Block с дополнением, он годится");
+  eq(cachedEtfCanon({source:"SosoValue",data:fresh}),null,"прошлый РЕЗЕРВ не имеет права стать каноном: иначе однажды случившаяся подмена закрепится навсегда");
+  eq(cachedEtfCanon({source:"Farside",data:fresh}),null,"чужой источник не имеет права стать каноном");
+  eq(cachedEtfCanon(null),null,"первый запуск без состояния — не основание что-то выдумывать");
+  eq(cachedEtfCanon({source:"The Block",data:[]}),null,"пустой кэш не годится");
+  // Протухшая история хуже честного отсутствия: окна потоков считаются от её конца.
+  const stale=wd(300,25).map((t,i)=>({t,v:(1+(i%5))*1e8}));
+  eq(cachedEtfCanon({source:"The Block",data:stale}),null,"кэш старше недели обязан отбраковываться");
 }
 // Повторы запроса проверяются ПОВЕДЕНИЕМ: разовый сбой слоя укорачивает ряд и двигает возраст
 // наблюдения назад, а постоянную ошибку повторять бессмысленно.

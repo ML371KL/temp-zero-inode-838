@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import {mkdtempSync,writeFileSync,rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {pathToFileURL} from "node:url";
+import {execFileSync} from "node:child_process";
 // ГЕРМЕТИЧНОСТЬ. Сборщик при загрузке подхватывает прошлый снимок из .state/cache.json или
 // docs/snapshot.json. Для контрактного набора это чужое состояние: оно приносит в тесты живые
 // данные и делает результат зависящим от того, что лежит в рабочей копии. Отводим оба пути в
@@ -131,6 +136,38 @@ try{
   await assert.rejects(()=>fetchEtfFlows(),/ETF flows unavailable/,"при смерти всех источников потоки обязаны отсутствовать, а не выдумываться");
   mode="etf_fallback_corrupt";
   await assert.rejects(()=>fetchEtfFlows(),/ETF flows unavailable/,"резерв обязан проходить тот же ETF-контракт: подмена источника не повод ослаблять проверку");
+
+  // ПЕРВАЯ СТУПЕНЬ РЕЗЕРВА: зеркала мертвы, но история The Block лежит в состоянии. Она обязана
+  // стать основой — терять половину глубины из-за отказа эндпоинта нельзя, перцентиль потоков
+  // считается по всему ряду. Прошлый снимок читается сборщиком ОДИН раз при загрузке модуля,
+  // поэтому обе ступени в одном процессе не проверить: развилка проверяется в дочернем.
+  {
+    const dir=mkdtempSync(join(tmpdir(),"etf-tier-"));
+    const canon=tradingDays(400).map(t=>({t:t+CANON_HOUR,v:dayValue(t)}));
+    writeFileSync(join(dir,"state.json"),JSON.stringify({datasets:{etf:{source:"The Block",data:canon}}}));
+    writeFileSync(join(dir,"drive.mjs"),`
+// Дочерний процесс обязан жить в том же «сейчас», что и родитель: иначе фикстуры, построенные от
+// родительского календаря, окажутся для него из будущего или протухшими. Набор гоняется с
+// подменённой датой по всем дням недели, и без этой строки он краснел бы шесть дней из семи.
+const __t=Number(process.env.FAKE_NOW);
+if(Number.isFinite(__t)){const R=Date;class D extends R{constructor(...a){if(!a.length)super(__t);else super(...a);}static now(){return __t;}}globalThis.Date=D;}
+const json=(b,s=200)=>new Response(JSON.stringify(b),{status:s,headers:{"content-type":"application/json"}});
+globalThis.fetch=async i=>{const u=String(i);
+  if(u.includes("theblock.co")||u.includes("tbstat.com"))return json({},503);
+  if(u.includes("historicalInflowChart"))return json({code:0,data:${JSON.stringify(sosoRows(0))}});
+  return json({},503);};
+const {fetchEtfFlows}=await import(process.env.MODULE_URL);
+const r=await fetchEtfFlows();
+console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,errors:r.errors}));
+`);
+    const out=execFileSync(process.execPath,[join(dir,"drive.mjs")],{encoding:"utf8",env:{...process.env,MODULE_URL:new URL("./fetch-snapshot.mjs",import.meta.url).href,FAKE_NOW:String(NOW),PREVIOUS_STATE:join(dir,"state.json"),PREVIOUS_PUBLIC:join(dir,"state.json")}});
+    const r=JSON.parse(out.trim().split("\n").at(-1));
+    assert.match(r.source,/^The Block \(кэш\)/,"основой обязана стать кэшированная история канона, а не более короткий резерв");
+    assert.ok(r.len>=400,`глубина ряда обязана сохраниться: ${r.len} вместо >=400`);
+    assert.equal(r.partial,true,"работа на кэше обязана помечаться неполной");
+    assert.match(r.errors.join(" "),/история взята из кэша/,"причина обязана быть названа");
+    rmSync(dir,{recursive:true,force:true});
+  }
   // ---- Дополняющий слой SosoValue ----
   // Прошлых наблюдений нет (набор герметичен), поэтому подтвердить свежий день нечем. Это главный
   // контракт слоя: без подтверждения он обязан отказывать В ЗАКРЫТУЮ, а не пропускать день молча.
