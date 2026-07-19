@@ -1,0 +1,31 @@
+name: Monitor BTC policy v1
+
+on:
+  schedule:
+    - cron: "53 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: btc-policy-v1-monitor
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Проверить опубликованный снимок и синхронизировать инцидент
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_ALERT: "1"
+          SNAPSHOT_URL: https://ml371kl.github.io/temp-zero-inode-838/snapshot.json
+        run: node scripts/monitor-live.mjs

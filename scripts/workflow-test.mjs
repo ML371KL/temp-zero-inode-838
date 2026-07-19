@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import assert from "node:assert/strict";
 const y=readFileSync(new URL("../.github/workflows/snapshot.yml",import.meta.url),"utf8");
+const monitorY=readFileSync(new URL("../.github/workflows/monitor.yml",import.meta.url),"utf8");
 assert.match(y,/cron:\s*"23 \* \* \* \*"/,"hourly schedule missing");
 assert.match(y,/actions\/checkout@v6/);
 assert.match(y,/actions\/setup-node@v6/);
@@ -108,4 +109,9 @@ assert.ok(y.indexOf("cp .candidate/snapshot.json")<y.indexOf("upload-pages-artif
 // Honest partial verdicts must publish rather than freeze the site, so the production gate is
 // REQUIRE_LIVE only. REQUIRE_COMPLETE stays an opt-in capability (self-test.mjs), not a workflow gate.
 assert.doesNotMatch(y,/REQUIRE_COMPLETE/,"the production publish gate must not force both regimes complete");
+assert.match(monitorY,/cron:\s*"53 \*\/2 \* \* \*"/,"independent two-hour live monitor schedule missing");
+assert.match(monitorY,/issues:\s*write/,"monitor cannot open/close an external incident issue");
+assert.match(monitorY,/node scripts\/monitor-live\.mjs/,"monitor runner missing");
+assert.match(monitorY,/MONITOR_ALERT:\s*"1"/,"GitHub issue alerting is not enabled");
+assert.match(monitorY,/ml371kl\.github\.io\/temp-zero-inode-838\/snapshot\.json/,"monitor must check the published Pages artifact, not a local file");
 console.log("Workflow static tests OK");

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { POLICY_V1 } from "../docs/policy-v1.mjs";
+import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 
 const root=new URL("../",import.meta.url);
 const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
@@ -44,6 +45,14 @@ assert.equal(snap.version,pkg.version,"snapshot/package version mismatch");
 assert.match(readme,new RegExp(`v${pkg.version.replaceAll(".","\\.")}`),"README version mismatch");
 assert.equal("datasets" in snap,false,"raw datasets leaked into public snapshot");
 assert.ok(statSync(new URL("../docs/snapshot.json",import.meta.url)).size<2_500_000,"public snapshot too large");
+if(snap.monitoring?.daily?.length&&snap.monitoring?.decision_log?.length&&snap.history?.length){
+  const bytes=x=>Buffer.byteLength(JSON.stringify(x)),cfg=MODEL_POLICY_V1.forward_monitoring;
+  const maxHistoryRows=730+14*24,projected=statSync(new URL("../docs/snapshot.json",import.meta.url)).size+
+    Math.max(0,cfg.daily_history_days-snap.monitoring.daily.length)*bytes(snap.monitoring.daily.at(-1))+
+    Math.max(0,cfg.observation_log_limit-snap.monitoring.decision_log.length)*bytes(snap.monitoring.decision_log.at(-1))+
+    Math.max(0,maxHistoryRows-snap.history.length)*bytes(snap.history.at(-1));
+  assert.ok(projected<2_500_000,`retention policy would eventually grow the public snapshot to ${(projected/1e6).toFixed(2)} MB`);
+}
 for(const m of snap.metrics||[])for(const u of m.source_urls||[])assert.equal(new URL(u).protocol,"https:",`non-HTTPS metric URL ${m.id}`);
 for(const [key,state] of Object.entries(snap.sources||{}))for(const u of state.urls||[])assert.equal(new URL(u).protocol,"https:",`non-HTTPS source URL ${key}`);
 
@@ -75,18 +84,22 @@ const requiredDocs=[
 for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation/source host missing: ${host}`);
 
 
-// Strategy strip consumes the same immutable policy module as the snapshot engine.
+// Strategy strip displays the signed server decision and never recomputes allocation in the browser.
 assert.equal(POLICY_V1.id,"btc-allocation-policy-v1");
-assert.match(html,/import \{ POLICY_V1, allocationTargetV1 \} from "\.\/policy-v1\.mjs"/,"frontend policy-v1 import missing");
-assert.match(html,/const targetFor=reg=>allocationTargetV1\(/,"strategy strip must delegate target calculation to policy-v1");
+assert.match(html,/import \{ POLICY_V1 \} from "\.\/policy-v1\.mjs"/,"frontend policy-v1 metadata import missing");
+assert.doesNotMatch(html,/allocationTargetV1|allocationDecisionV1/,"frontend must not calculate allocation");
+assert.match(html,/const target=Number\.isFinite\(D\.target_pct\)/,"strategy strip must display the server target");
 assert.match(collector,/applyStrategicDetectorPolicyV1\(/,"snapshot engine must delegate detector overlays to policy-v1");
+assert.match(collector,/buildDecisionRecordV1\(/,"snapshot engine must create a server decision record");
 assert.match(html,/историческая перекалибровка отключена/,"frozen policy status missing from the strategy strip");
-assert.match(html,/ageH>12/,"12h snapshot age gate missing from the strip");
+assert.match(html,/operational_pause\.snapshot_stale_hours/,"contractual snapshot age gate missing from the strip");
+assert.match(html,/ступень политики, а не вероятность/,"confidence/evidence boundary missing from the strip");
+assert.match(html,/Forward\/OOS-наблюдение/,"forward evidence panel missing");
 assert.match(html,/модельная иллюстрация, не персональная рекомендация/,"strip disclaimer missing");
 // mdRender must escape BEFORE inline markdown substitution (XSS ordering).
 const mdIdx=html.indexOf("function mdRender");assert.ok(mdIdx>0,"mdRender missing");
 const mdBody=html.slice(mdIdx,html.indexOf("function",mdIdx+10));
 assert.ok(mdBody.indexOf("esc(")>=0&&mdBody.indexOf("esc(")<mdBody.indexOf("<b>"),"mdRender must escape before markdown substitution");
-// The page must re-render periodically so freshness captions and the 12h gate stay honest.
+// The page must re-render periodically so freshness captions and the contractual age gate stay honest.
 assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-render missing");
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);

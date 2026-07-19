@@ -58,21 +58,26 @@ export function applyStrategicDetectorPolicyV1({strategic,macroShockState,distri
   return result;
 }
 
-export function allocationTargetV1({strategic,recoveryState,macroShockState,mvrvPercentile}){
-  if(strategic==="insufficient")return null;
-  if(strategic==="emergency")return POLICY_V1.ladder.emergency;
+export function allocationDecisionV1({strategic,recoveryState,macroShockState,mvrvPercentile}){
+  const inputs={strategic,recovery_state:recoveryState??"calm",macro_shock_state:macroShockState??"calm",mvrv_percentile:Number.isFinite(mvrvPercentile)?Number(mvrvPercentile):null};
+  if(strategic==="insufficient")return{status:"paused",base_target_pct:null,target_pct:null,binding_overlays:[],reason_codes:["insufficient_data"],inputs};
+  if(strategic==="emergency")return{status:"actionable",base_target_pct:POLICY_V1.ladder.emergency,target_pct:POLICY_V1.ladder.emergency,binding_overlays:["emergency_override"],reason_codes:["base:emergency","emergency_override"],inputs};
   const base=POLICY_V1.ladder[strategic];
-  if(!Number.isFinite(base))return null;
+  if(!Number.isFinite(base))return{status:"paused",base_target_pct:null,target_pct:null,binding_overlays:[],reason_codes:["unknown_strategic_regime"],inputs};
   const overlays=POLICY_V1.allocation_overlays;
-  let target=base;
+  let target=base,binding=[];
   if(
     recoveryState===overlays.recovery_detector_state&&
     macroShockState!==overlays.recovery_blocked_by_macro_shock_state&&
     target<overlays.recovery_floor_pct
-  )target=overlays.recovery_floor_pct;
-  if(Number.isFinite(mvrvPercentile)&&mvrvPercentile<=overlays.capitulation_max_mvrv_percentile&&target<overlays.capitulation_floor_pct)target=overlays.capitulation_floor_pct;
-  if(Number.isFinite(mvrvPercentile)&&mvrvPercentile>=overlays.euphoria_min_mvrv_percentile&&target>overlays.euphoria_cap_pct)target=overlays.euphoria_cap_pct;
-  return target;
+  ){target=overlays.recovery_floor_pct;binding.push("recovery_floor");}
+  if(Number.isFinite(mvrvPercentile)&&mvrvPercentile<=overlays.capitulation_max_mvrv_percentile&&target<overlays.capitulation_floor_pct){target=overlays.capitulation_floor_pct;binding.push("capitulation_floor");}
+  if(Number.isFinite(mvrvPercentile)&&mvrvPercentile>=overlays.euphoria_min_mvrv_percentile&&target>overlays.euphoria_cap_pct){target=overlays.euphoria_cap_pct;binding.push("euphoria_safety_cap");}
+  return{status:"actionable",base_target_pct:base,target_pct:target,binding_overlays:binding,reason_codes:[`base:${strategic}`,...binding],inputs};
+}
+
+export function allocationTargetV1(input){
+  return allocationDecisionV1(input).target_pct;
 }
 
 export function policyMetadataV1(){
