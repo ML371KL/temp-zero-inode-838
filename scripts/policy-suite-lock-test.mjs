@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { POLICY_V1, allocationDecisionV1, applyStrategicDetectorPolicyV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { EXECUTION_POLICY_V1 } from "../docs/execution-policy-v1.mjs";
 import { POLICY_SUITE_V1, policySuiteContractV1 } from "../docs/policy-suite-v1.mjs";
@@ -19,6 +20,11 @@ for(const [name,expected] of Object.entries(MODEL_POLICY_V1.locked_sections)){
   assert.equal(sha256(locked(name)),expected,`policy v1 model section changed: ${name}; create policy v2 instead`);
 }
 assert.equal(policySuiteDigestV1(),POLICY_SUITE_V1.contract_sha256,"full policy-suite contract drifted; create policy v2 instead");
+assert.deepEqual(policySuiteContractV1().allocation,POLICY_V1);
+assert.deepEqual(policySuiteContractV1().allocation_engine,{
+  applyStrategicDetectorPolicyV1:applyStrategicDetectorPolicyV1.toString().replace(/\r\n/g,"\n"),
+  allocationDecisionV1:allocationDecisionV1.toString().replace(/\r\n/g,"\n"),
+},"the suite commitment must include the executable allocation engine");
 assert.deepEqual(policySuiteContractV1().model,MODEL_POLICY_V1);
 assert.deepEqual(policySuiteContractV1().execution,EXECUTION_POLICY_V1);
 assert.ok(Object.isFrozen(MODEL_POLICY_V1)&&Object.isFrozen(MODEL_POLICY_V1.blocks)&&Object.isFrozen(EXECUTION_POLICY_V1),"policy suite must be deeply frozen");

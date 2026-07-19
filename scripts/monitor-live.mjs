@@ -3,20 +3,40 @@ import { pathToFileURL } from "node:url";
 import { allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
+import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
 import { policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
 
 const DEFAULT_URL="https://ml371kl.github.io/temp-zero-inode-838/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
+const PACKAGE_VERSION=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8")).version;
+const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs"];
+const normalizedAsset=text=>String(text).replace(/\r\n/g,"\n");
+
+export async function validatePublishedAssetsV1(snapshotUrl,fetchImpl=fetch){
+  const issues=[];
+  for(const name of PUBLISHED_ASSETS){
+    const url=new URL(name,snapshotUrl);
+    try{
+      const response=await fetchImpl(url,{headers:{"cache-control":"no-cache"}});
+      if(!response.ok){issues.push(`asset_http:${name}:${response.status}`);continue;}
+      const remote=normalizedAsset(await response.text()),local=normalizedAsset(readFileSync(new URL(`../docs/${name}`,import.meta.url),"utf8"));
+      if(sha256(remote)!==sha256(local))issues.push(`asset_content_mismatch:${name}`);
+    }catch(error){issues.push(`asset_fetch_failed:${name}:${error.message}`);}
+  }
+  return{ok:issues.length===0,issues,checked_assets:PUBLISHED_ASSETS.length};
+}
 
 export function validateSnapshotV1(snapshot,now=Date.now()){
   const issues=[];
   if(snapshot?.schema!==3)issues.push(`schema:${snapshot?.schema}`);
+  if(snapshot?.version!==PACKAGE_VERSION)issues.push(`snapshot_version_mismatch:${snapshot?.version||"missing"}:${PACKAGE_VERSION}`);
   const generated=Date.parse(snapshot?.generated_at||"");
   const ageHours=(now-generated)/36e5,maxAge=MODEL_POLICY_V1.forward_monitoring.operational_pause.snapshot_stale_hours;
-  if(!Number.isFinite(generated))issues.push("generated_at_invalid");
-  else if(ageHours<-.25)issues.push("generated_at_in_future");
-  else if(ageHours>maxAge)issues.push(`snapshot_stale:${ageHours.toFixed(1)}h`);
+  const actionGate=evaluateActionGateV1({generatedAt:snapshot?.generated_at,now,staleLimitHours:maxAge,decision:snapshot?.decision,operationalStatus:snapshot?.monitoring?.health?.operational_status});
+  if(actionGate.code==="time_invalid")issues.push("generated_at_invalid");
+  else if(actionGate.code==="snapshot_in_future")issues.push("generated_at_in_future");
+  else if(actionGate.code==="snapshot_stale")issues.push(`snapshot_stale:${ageHours.toFixed(1)}h`);
   const expectedPolicyHash=policySuiteDigestV1();
   if(POLICY_SUITE_V1.contract_sha256!==expectedPolicyHash)issues.push("local_policy_contract_mismatch");
   if(snapshot?.policy_suite?.contract_sha256!==expectedPolicyHash)issues.push("snapshot_policy_contract_mismatch");
@@ -29,9 +49,10 @@ export function validateSnapshotV1(snapshot,now=Date.now()){
     const reproduced=allocationDecisionV1({strategic:d.inputs?.strategic,recoveryState:d.inputs?.recovery_state,macroShockState:d.inputs?.macro_shock_state,mvrvPercentile:d.inputs?.mvrv_percentile});
     if(reproduced.status!==d.status||reproduced.base_target_pct!==d.base_target_pct||reproduced.target_pct!==d.target_pct||JSON.stringify(reproduced.binding_overlays)!==JSON.stringify(d.binding_overlays))issues.push("decision_reproduction_failure");
     if(d.status==="actionable"&&!finite(d.target_pct))issues.push("actionable_target_missing");
-    if(d.quality?.status==="paused")issues.push("decision_quality_paused");
+    if(d.status!=="actionable")issues.push("decision_not_actionable");
+    if(!["good","degraded"].includes(d.quality?.status))issues.push("decision_quality_not_actionable");
   }
-  if(snapshot?.monitoring?.health?.operational_status==="paused")issues.push(`forward_monitor_paused:${(snapshot.monitoring.health.operational_issues||[]).join(",")}`);
+  if(snapshot?.monitoring?.health?.operational_status!=="healthy")issues.push(`forward_monitor_not_healthy:${(snapshot?.monitoring?.health?.operational_issues||[]).join(",")}`);
   const lastLog=snapshot?.monitoring?.decision_log?.at(-1);
   if(!lastLog||lastLog.decision_hash!==d?.decision_hash){issues.push("decision_log_missing_or_stale");}
   else{const copy={...lastLog};delete copy.log_hash;if(lastLog.log_hash!==sha256(copy))issues.push("decision_log_hash_mismatch");}
@@ -64,8 +85,13 @@ async function syncAlert(result){
 }
 
 async function main(){
-  const snapshot=process.env.SNAPSHOT_FILE?JSON.parse(readFileSync(process.env.SNAPSHOT_FILE,"utf8")):await fetch(process.env.SNAPSHOT_URL||DEFAULT_URL,{headers:{"cache-control":"no-cache"}}).then(async r=>{if(!r.ok)throw new Error(`snapshot HTTP ${r.status}`);return r.json()});
+  const snapshotUrl=process.env.SNAPSHOT_URL||DEFAULT_URL;
+  const snapshot=process.env.SNAPSHOT_FILE?JSON.parse(readFileSync(process.env.SNAPSHOT_FILE,"utf8")):await fetch(snapshotUrl,{headers:{"cache-control":"no-cache"}}).then(async r=>{if(!r.ok)throw new Error(`snapshot HTTP ${r.status}`);return r.json()});
   const result=validateSnapshotV1(snapshot);
+  if(!process.env.SNAPSHOT_FILE||process.env.DASHBOARD_BASE_URL){
+    const assets=await validatePublishedAssetsV1(process.env.DASHBOARD_BASE_URL?new URL("snapshot.json",process.env.DASHBOARD_BASE_URL).href:snapshotUrl);
+    result.asset_checks=assets.checked_assets;result.issues.push(...assets.issues);result.ok=result.issues.length===0;
+  }
   await syncAlert(result);
   console.log(JSON.stringify(result,null,2));
   if(!result.ok)process.exitCode=1;

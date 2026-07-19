@@ -39,7 +39,27 @@ assert.equal(target("unconfirmed_positive",{recoveryState:"good"}),95,"recovery 
 assert.equal(target("defensive",{recoveryState:"good",macroShockState:"fired"}),5,"macro shock must block recovery");
 assert.equal(target("defensive",{mvrvPercentile:10}),40,"capitulation floor drifted");
 assert.equal(target("constructive",{mvrvPercentile:95}),60,"euphoria cap drifted");
+assert.equal(target("constructive",{recoveryState:"good",mvrvPercentile:95}),60,"euphoria cap must remain binding after a recovery signal");
 assert.equal(target("emergency",{recoveryState:"good",mvrvPercentile:1}),0,"emergency must override every floor");
+
+// Exhaustive boundary matrix. The expected result is calculated independently from the
+// implementation so an uncovered interaction cannot change while the published examples stay green.
+const recoveryStates=["calm","good"],macroStates=["calm","fired"],mvrvValues=[null,9.999,10,10.001,50,94.999,95,95.001];
+function expectedTarget(strategic,recoveryState,macroShockState,mvrvPercentile){
+  if(strategic==="insufficient")return null;
+  if(strategic==="emergency")return 0;
+  let value=expected.ladder[strategic];
+  if(recoveryState==="good"&&macroShockState!=="fired"&&value<80)value=80;
+  if(Number.isFinite(mvrvPercentile)&&mvrvPercentile<=10&&value<40)value=40;
+  if(Number.isFinite(mvrvPercentile)&&mvrvPercentile>=95&&value>60)value=60;
+  return value;
+}
+for(const strategic of [...expected.strategic_order,"insufficient"]){
+  for(const recoveryState of recoveryStates)for(const macroShockState of macroStates)for(const mvrvPercentile of mvrvValues){
+    const actual=target(strategic,{recoveryState,macroShockState,mvrvPercentile});
+    assert.equal(actual,expectedTarget(strategic,recoveryState,macroShockState,mvrvPercentile),`allocation boundary drifted: ${strategic}/${recoveryState}/${macroShockState}/${mvrvPercentile}`);
+  }
+}
 
 const verdict=(strategic,extra={})=>applyStrategicDetectorPolicyV1({strategic,macroShockState:"calm",distributionState:"calm",recoveryState:"calm",...extra});
 assert.equal(verdict("constructive",{macroShockState:"fired"}),"deteriorating");

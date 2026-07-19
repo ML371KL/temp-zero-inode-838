@@ -67,6 +67,9 @@ else{
   const log=s.monitoring.decision_log.at(-1),copy=log?{...log}:null;if(copy)delete copy.log_hash;
   if(!log||log.decision_hash!==s.decision?.decision_hash||log.log_hash!==sha256(copy))fail.push("decision audit log missing, stale or corrupt");
   if(s.monitoring.health.automatic_recalibration!==false)fail.push("forward monitor must never recalibrate policy automatically");
+  if(s.monitoring.counter_semantics_version!==2)fail.push("forward monitor target-change counter semantics are obsolete");
+  if(!Number.isInteger(s.monitoring.target_changes)||s.monitoring.target_changes<0||!Number.isInteger(s.monitoring.state_changes)||s.monitoring.state_changes<s.monitoring.target_changes)fail.push("forward monitor change counters invalid");
+  if(!String(s.monitoring.assumptions?.cash_yield_source||"").includes("converted to effective annual yield"))fail.push("cash benchmark basis/conversion is not declared");
 }
 if(!isDate(s.generated_at))fail.push("generated_at invalid");
 if(!isDate(s.price_observed_at))fail.push("price_observed_at invalid");

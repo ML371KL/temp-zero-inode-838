@@ -87,8 +87,16 @@ for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation
 // Strategy strip displays the signed server decision and never recomputes allocation in the browser.
 assert.equal(POLICY_V1.id,"btc-allocation-policy-v1");
 assert.match(html,/import \{ POLICY_V1 \} from "\.\/policy-v1\.mjs"/,"frontend policy-v1 metadata import missing");
+assert.match(html,/import \{ EXECUTION_POLICY_V1 \} from "\.\/execution-policy-v1\.mjs"/,"frontend execution-policy-v1 import missing");
+assert.match(html,/import \{ evaluateActionGateV1 \} from "\.\/action-gate-v1\.mjs"/,"frontend fail-closed action gate import missing");
 assert.doesNotMatch(html,/allocationTargetV1|allocationDecisionV1/,"frontend must not calculate allocation");
 assert.match(html,/const target=Number\.isFinite\(D\.target_pct\)/,"strategy strip must display the server target");
+assert.match(html,/evaluateActionGateV1\(/,"strategy strip must use the shared fail-closed action gate");
+assert.match(html,/decision:SNAP\.decision/,"strategy strip must gate the signed server decision");
+assert.match(html,/operationalStatus:SNAP\.monitoring\?\.health\?\.operational_status/,"strategy strip must fail closed when operational health is not healthy");
+assert.match(html,/executionPolicySentence\(\)/,"execution guidance must be rendered from the execution contract");
+assert.match(html,/E\.off_cycle_rebalance_drift_pp/,"execution drift threshold must come from the execution contract");
+assert.doesNotMatch(html,/больше чем на 15 п\.п\./,"execution drift threshold is duplicated as a UI literal");
 assert.match(collector,/applyStrategicDetectorPolicyV1\(/,"snapshot engine must delegate detector overlays to policy-v1");
 assert.match(collector,/buildDecisionRecordV1\(/,"snapshot engine must create a server decision record");
 assert.match(html,/историческая перекалибровка отключена/,"frozen policy status missing from the strategy strip");

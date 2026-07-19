@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import assert from "node:assert/strict";
 const y=readFileSync(new URL("../.github/workflows/snapshot.yml",import.meta.url),"utf8");
 const monitorY=readFileSync(new URL("../.github/workflows/monitor.yml",import.meta.url),"utf8");
+const monitorScript=readFileSync(new URL("./monitor-live.mjs",import.meta.url),"utf8");
 assert.match(y,/cron:\s*"23 \* \* \* \*"/,"hourly schedule missing");
 assert.match(y,/actions\/checkout@v6/);
 assert.match(y,/actions\/setup-node@v6/);
@@ -114,4 +115,5 @@ assert.match(monitorY,/issues:\s*write/,"monitor cannot open/close an external i
 assert.match(monitorY,/node scripts\/monitor-live\.mjs/,"monitor runner missing");
 assert.match(monitorY,/MONITOR_ALERT:\s*"1"/,"GitHub issue alerting is not enabled");
 assert.match(monitorY,/ml371kl\.github\.io\/temp-zero-inode-838\/snapshot\.json/,"monitor must check the published Pages artifact, not a local file");
+for(const asset of ["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs"])assert.ok(monitorScript.includes(`"${asset}"`),`external monitor does not check ${asset}`);
 console.log("Workflow static tests OK");
