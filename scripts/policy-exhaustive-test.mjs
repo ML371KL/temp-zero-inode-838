@@ -128,6 +128,9 @@ ok(sourceRevisionAlertsV1(r0.vintages,schemaChange.vintages,r0.datasets,schemaCh
 const nested0=revisionFixture("2026-07-19T00:00:00Z",{a:[{t:"2026-07-19T00:00:00Z",venue:"A",v:1}],b:[{t:"2026-07-19T00:00:00Z",venue:"B",v:2}]});
 const nested1=revisionFixture("2026-07-20T00:00:00Z",{a:[{t:"2026-07-19T00:00:00Z",venue:"A",v:1}],b:[{t:"2026-07-19T00:00:00Z",venue:"B",v:9}]});
 ok(sourceRevisionAlertsV1(nested0.vintages,nested1.vintages,nested0.datasets,nested1.datasets).some(x=>x.type==="historical_overlap_rewritten"&&x.changed_rows===1),"nested path/identity rewrite was missed");
+const open0=revisionFixture("2026-07-19T00:00:00Z",[{t:"2026-07-18T00:00:00Z",v:1},{t:"2026-07-19T00:00:00Z",v:2}]);
+const open1=revisionFixture("2026-07-19T00:00:00Z",[{t:"2026-07-18T00:00:00Z",v:1},{t:"2026-07-19T00:00:00Z",v:9}]);
+same(sourceRevisionAlertsV1(open0.vintages,open1.vintages,open0.datasets,open1.datasets),[],"today's still-open row was misclassified as a historical rewrite");
 
 // 7. Cash conversion for all economic boundary classes and invalid inputs.
 for(const discountPct of [-5,0,0.001,1,5,20,100,300])for(const days of [1,30,91,182,365]){

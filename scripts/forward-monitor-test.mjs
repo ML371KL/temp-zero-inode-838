@@ -46,6 +46,27 @@ const appended=buildSourceVintagesV1({market:{source:"fixture",observed_at:appen
 const backfill=sourceRevisionAlertsV1(vintages,appended,previousDataset,appendedDataset);
 assert.ok(backfill.some(x=>x.type==="historical_overlap_rewritten"&&x.changed_rows===1),"an appended point must not hide a rewrite in the overlapping history");
 
+// The current UTC-day row is an open partition, not immutable history. Market,
+// network, stablecoin and daily-volatility providers legitimately update it intraday.
+const sourcePacket=(observedAt,fetchedAt,data)=>{
+  const datasets={market:{source:"fixture",observed_at:observedAt,fetched_at:fetchedAt,data}};
+  const states={market:{state:"ok",source:"fixture",observed_at:observedAt,fetched_at:fetchedAt}};
+  return{datasets,vintages:buildSourceVintagesV1(datasets,states)};
+};
+const openPrevious=sourcePacket("2026-07-19T00:00:00.000Z","2026-07-19T12:00:00.000Z",[{t:"2026-07-18T00:00:00.000Z",v:100},{t:"2026-07-19T00:00:00.000Z",v:101}]);
+const openCurrent=sourcePacket("2026-07-19T00:00:00.000Z","2026-07-19T13:00:00.000Z",[{t:"2026-07-18T00:00:00.000Z",v:100},{t:"2026-07-19T00:00:00.000Z",v:102}]);
+const openUpdates=sourceRevisionAlertsV1(openPrevious.vintages,openCurrent.vintages,openPrevious.datasets,openCurrent.datasets);
+assert.deepEqual(openUpdates,[],"a normal update to today's open row must not degrade data quality");
+const openDecision=buildDecisionRecordV1({generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:{},metrics,blocks,detectors:[],scores,sourceVintages:openCurrent.vintages,revisionAlerts:openUpdates});
+assert.equal(openDecision.decision.quality.status,"good","an open-period update alone must keep a healthy decision at good quality");
+
+const closedRewrite=sourcePacket("2026-07-19T00:00:00.000Z","2026-07-19T13:00:00.000Z",[{t:"2026-07-18T00:00:00.000Z",v:999},{t:"2026-07-19T00:00:00.000Z",v:102}]);
+const closedAlerts=sourceRevisionAlertsV1(openPrevious.vintages,closedRewrite.vintages,openPrevious.datasets,closedRewrite.datasets);
+assert.ok(closedAlerts.some(x=>x.type==="same_vintage_rewritten"&&x.changed_rows===1),"a rewrite to a closed row must still degrade quality");
+const advancingPrevious=sourcePacket("2026-07-19T12:00:00.000Z","2026-07-19T12:00:00.000Z",openPrevious.datasets.market.data);
+const advancingCurrent=sourcePacket("2026-07-19T13:00:00.000Z","2026-07-19T13:00:00.000Z",openCurrent.datasets.market.data);
+assert.deepEqual(sourceRevisionAlertsV1(advancingPrevious.vintages,advancingCurrent.vintages,advancingPrevious.datasets,advancingCurrent.datasets),[],"an advancing intraday vintage must ignore changes confined to today's open row");
+
 const priceSeries=Array.from({length:250},(_,i)=>({t:Date.UTC(2025,10,12+i),v:80+i*.08}));
 let monitor=updateForwardMonitorV1({now:Date.parse(generatedAt),price:100,decision,inputSummary,sourceVintages:vintages,cashQuotePct:null,priceSeries});
 assert.equal(monitor.cash_yield_available,false,"missing cash yield must be disclosed, not presented as a real 0% quote");

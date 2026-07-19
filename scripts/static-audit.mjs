@@ -99,9 +99,14 @@ assert.match(html,/E\.off_cycle_rebalance_drift_pp/,"execution drift threshold m
 assert.doesNotMatch(html,/больше чем на 15 п\.п\./,"execution drift threshold is duplicated as a UI literal");
 assert.match(collector,/applyStrategicDetectorPolicyV1\(/,"snapshot engine must delegate detector overlays to policy-v1");
 assert.match(collector,/buildDecisionRecordV1\(/,"snapshot engine must create a server decision record");
-assert.match(html,/историческая перекалибровка отключена/,"frozen policy status missing from the strategy strip");
+const strategyStart=html.indexOf("function renderStrategy"),strategyEnd=html.indexOf("function renderFactors",strategyStart),strategyBody=html.slice(strategyStart,strategyEnd);
+const policyStatusStart=html.indexOf("function renderPolicyStatus"),policyStatusEnd=html.indexOf("function renderMonitoring",policyStatusStart),policyStatusBody=html.slice(policyStatusStart,policyStatusEnd);
+assert.doesNotMatch(strategyBody,/качество .*решение|историческая перекалибровка|ступень политики, а не вероятность/,"service metadata must not clutter the action strip");
+assert.match(policyStatusBody,/Историческая перекалибровка отключена/,"frozen policy explanation missing from the methodology panel");
+assert.match(policyStatusBody,/отдельная policy v2/,"methodology must explain how a future policy change is versioned");
+assert.match(policyStatusBody,/решение \$\{esc\(hash\)\}/,"decision audit hash must remain available in the methodology panel");
 assert.match(html,/operational_pause\.snapshot_stale_hours/,"contractual snapshot age gate missing from the strip");
-assert.match(html,/ступень политики, а не вероятность/,"confidence/evidence boundary missing from the strip");
+assert.match(policyStatusBody,/ступень модельной аллокации, а не вероятность/,"confidence/evidence boundary missing from the methodology panel");
 assert.match(html,/Forward\/OOS-наблюдение/,"forward evidence panel missing");
 assert.match(html,/модельная иллюстрация, не персональная рекомендация/,"strip disclaimer missing");
 // mdRender must escape BEFORE inline markdown substitution (XSS ordering).

@@ -37,6 +37,33 @@ function timedRowIndex(value,path="$",out=new Map()){
   return out;
 }
 
+// Daily provider rows stamped at 00:00 UTC remain mutable until that UTC day closes.
+// Treating their normal intraday updates as historical rewrites permanently degraded
+// otherwise healthy live decisions. Rows before this boundary are immutable evidence;
+// rows on/after it are the currently open partition and may evolve without an alert.
+function openUtcDayStart(vintage){
+  const reference=normalizedTimestamp(vintage?.fetched_at)??normalizedTimestamp(vintage?.observed_at);
+  return reference===null?Infinity:Math.floor(reference/DAY)*DAY;
+}
+
+function timedRowDiff(previousData,currentData,mutableFrom=Infinity){
+  const previousRows=timedRowIndex(previousData),currentRows=timedRowIndex(currentData);
+  const changed=[],added=[],removed=[];
+  for(const [rowKey,oldRow] of previousRows){
+    if(oldRow.time>=mutableFrom)continue;
+    const nextRow=currentRows.get(rowKey);
+    if(!nextRow)removed.push(oldRow.time);
+    else if(nextRow.sha256!==oldRow.sha256)changed.push(oldRow.time);
+  }
+  for(const [rowKey,nextRow] of currentRows)if(nextRow.time<mutableFrom&&!previousRows.has(rowKey))added.push(nextRow.time);
+  return{has_timed_rows:previousRows.size>0||currentRows.size>0,changed,added,removed};
+}
+
+function revisionRange(times){
+  const sorted=[...times].sort((a,b)=>a-b);
+  return{first_changed_at:new Date(sorted[0]).toISOString(),last_changed_at:new Date(sorted.at(-1)).toISOString()};
+}
+
 function schemaShape(value,depth=0){
   if(value===null)return"null";
   if(Array.isArray(value))return{type:"array",item:value.length?schemaShape(value[0],depth+1):"empty"};
@@ -65,14 +92,17 @@ export function sourceRevisionAlertsV1(previousVintages,currentVintages,previous
   for(const [key,current] of Object.entries(currentVintages?.sources||{})){
     const prior=previousVintages?.sources?.[key];
     if(!prior)continue;
-    if(current.observed_at&&current.observed_at===prior.observed_at&&current.data_sha256&&prior.data_sha256&&current.data_sha256!==prior.data_sha256)
-      alerts.push({source:key,type:"same_vintage_rewritten",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
-    if(current.observed_at&&prior.observed_at&&current.observed_at!==prior.observed_at&&current.data_sha256&&prior.data_sha256&&current.data_sha256!==prior.data_sha256){
-      const previousRows=timedRowIndex(previousDatasets?.[key]?.data),currentRows=timedRowIndex(currentDatasets?.[key]?.data),changed=[];
-      for(const [rowKey,oldRow] of previousRows){const nextRow=currentRows.get(rowKey);if(nextRow&&nextRow.sha256!==oldRow.sha256)changed.push(oldRow.time);}
-      if(changed.length){
-        changed.sort((a,b)=>a-b);
-        alerts.push({source:key,type:"historical_overlap_rewritten",changed_rows:changed.length,first_changed_at:new Date(changed[0]).toISOString(),last_changed_at:new Date(changed.at(-1)).toISOString(),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+    const dataChanged=current.data_sha256&&prior.data_sha256&&current.data_sha256!==prior.data_sha256;
+    if(dataChanged&&current.observed_at&&prior.observed_at){
+      const diff=timedRowDiff(previousDatasets?.[key]?.data,currentDatasets?.[key]?.data,openUtcDayStart(current));
+      if(current.observed_at===prior.observed_at){
+        const affected=[...diff.changed,...diff.added,...diff.removed];
+        // Keep the legacy hash-only safeguard for scalar/non-temporal packets. For
+        // time-series packets, alert only when an already closed row changed.
+        if(!diff.has_timed_rows)alerts.push({source:key,type:"same_vintage_rewritten",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+        else if(affected.length)alerts.push({source:key,type:"same_vintage_rewritten",observed_at:current.observed_at,changed_rows:diff.changed.length,added_rows:diff.added.length,removed_rows:diff.removed.length,...revisionRange(affected),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+      }else if(diff.changed.length){
+        alerts.push({source:key,type:"historical_overlap_rewritten",changed_rows:diff.changed.length,...revisionRange(diff.changed),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
       }
     }
     if(current.schema_sha256&&prior.schema_sha256&&current.schema_sha256!==prior.schema_sha256)
