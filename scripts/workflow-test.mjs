@@ -55,6 +55,7 @@ assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"побеж
 assert.match(y,/git add docs\/snapshot\.json/,"public snapshot must be committed");
 assert.doesNotMatch(y,/git add[^\n]*\.state\/cache\.json/,"raw internal state must not be committed");
 assert.match(y,/"package\.json"/,"package changes must trigger workflow");
+assert.match(y,/"docs\/\*\*"/,"every deployed policy/frontend file under docs must trigger the workflow");
 const gitignore=readFileSync(new URL("../.gitignore",import.meta.url),"utf8");
 assert.match(gitignore,/^\.state\/cache\.json$/m,"internal cache must be ignored by git");
 const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));

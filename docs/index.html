@@ -85,7 +85,8 @@ footer{margin-top:34px;border-top:2px solid var(--ink);padding-top:12px;color:va
 <details class="panel"><summary>Источники и состояние данных</summary><div class="panel-body"><div class="sources" id="sources"></div></div></details>
 <footer><p><b>Дисклеймер.</b> Это исследовательский режимный индикатор, а не персональная инвестиционная рекомендация. Он переводит публичные данные в заранее описанные зоны и может ошибаться из-за задержек, пересмотров, сбоев источников и смены рыночной структуры. Не использовать плечо или крупные изменения позиции на основании одного снимка.</p><p style="margin-top:6px">Снимок рассчитан на обновление примерно раз в час. Дневные и недельные ряды естественным образом меняются реже.</p><p style="margin-top:6px">On-chain слой использует Coin Metrics при доступности и независимые Blockchain.com fallback’ы для MVRV, activity и miner revenue. Exchange-labelled series не подменяются. Перед коммерческой публикацией отдельно проверьте условия лицензирования поставщиков.</p></footer>
 </div>
-<script>
+<script type="module">
+import { POLICY_V1, allocationTargetV1 } from "./policy-v1.mjs";
 const $=id=>document.getElementById(id);let SNAP=null;
 const esc=s=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const cleanUrls=o=>[...new Set([...(Array.isArray(o?.source_urls)?o.source_urls:[]),...(Array.isArray(o?.urls)?o.urls:[]),o?.source_url,o?.url].filter(u=>typeof u==="string"&&/^https:\/\//.test(u)))];
@@ -102,14 +103,9 @@ function render(){$("uiVersion").textContent=`v${SNAP.version||"?"}`;document.ti
   $("price").textContent=Number.isFinite(SNAP.price)?`$${Math.round(SNAP.price).toLocaleString("en-US")}`:"—";$("coverS").textContent=`${Math.round((SNAP.scores.coverage_strategic||0)*100)}%`;$("coverT").textContent=`${Math.round((SNAP.scores.coverage_tactical||0)*100)}%`;$("detCount").textContent=SNAP.detectors.filter(d=>["fired","watch","good"].includes(d.state)).length;$("onchainCoverage").textContent=`${Math.round((SNAP.scores.onchain_coverage||0)*100)}%`;$("shortBehavior").textContent=SNAP.behavior.short;$("mediumBehavior").textContent=SNAP.behavior.medium;$("phase").innerHTML=`<b>${esc(SNAP.phase)}</b><br>${esc(SNAP.thesis)}`;
   renderStrategy();renderFactors();renderSources();renderBlocks();renderDetectors();renderMethod();renderContrib();drawTape();}
 function renderStrategy(){
-// Лестница и оверлеи проверены walk-forward реконструкцией 2013–2026 (backtest/eval4/eval5.mjs):
-// база 0/5/20/45/95/100 по среднесрочному режиму; поверх — оверлеи из публикуемых полей снимка:
-// «Восстановление» (не при макрошоке — как в движке) поднимает цель до 80%, MVRV ≤10-го перцентиля
-// — пол 40%, MVRV ≥95-го — потолок 60%. Оверлеи не действуют в emergency/insufficient. Триггеры и
-// заголовок считаются от ЭФФЕКТИВНЫХ целей (с оверлеями), чтобы стрелки не указывали на числа
-// ниже/выше уже показанной цели.
-const PCT={emergency:0,defensive:5,deteriorating:20,transition:45,unconfirmed_positive:95,constructive:100};
-const ORDER=["emergency","defensive","deteriorating","transition","unconfirmed_positive","constructive"];
+// Единственный источник live-порогов — замороженный исполняемый контракт policy-v1.
+// Исторические backtest/out никогда не читаются интерфейсом и не могут перекалибровать цель.
+const PCT=POLICY_V1.ladder,ORDER=POLICY_V1.strategic_order,A=POLICY_V1.allocation_overlays;
 const SHORT={emergency:"аварийный",defensive:"защитный",deteriorating:"ухудшается",transition:"переходный",unconfirmed_positive:"спрос не подтв.",constructive:"конструктивный"};
 const META={constructive:{tone:"good",step:5,lead:"Держать полную позицию. Добирать ступенчато."},unconfirmed_positive:{tone:"good",step:4,lead:"Держать почти полную. Без агрессивных докупок."},transition:{tone:"neutral",step:3,lead:"Держать умеренную долю. Ждать согласования."},deteriorating:{tone:"warn",step:2,lead:"Сокращать риск. Докупки — стоп."},defensive:{tone:"bad",step:1,lead:"Держать ядро. Без плеча."},insufficient:{tone:"neutral",step:0,lead:"Держать текущую. Выводов не делать."},emergency:{tone:"bad",step:0,lead:"Убрать риск. Ждать нормализации."}};
 const S=SNAP.regime?.strategic,T=SNAP.regime?.tactical,m=META[S]||META.insufficient;
@@ -120,21 +116,16 @@ if(!Number.isFinite(ageH)||ageH>12){$("strategy").className="strategy";$("strate
 const mvrvPct=(SNAP.metrics.find(x=>x.id==="mvrv_cycle")||{}).value_num;
 const recovGood=(SNAP.detectors.find(d=>d.id==="recovery")||{}).state==="good";
 const shockFired=(SNAP.detectors.find(d=>d.id==="macro_shock")||{}).state==="fired";
-// эффективная цель режима = база + оверлеи (в emergency оверлеи не действуют)
-const applyOvl=b=>{let t=b;
-  if(recovGood&&!shockFired&&t<80)t=80;
-  if(Number.isFinite(mvrvPct)&&mvrvPct<=10&&t<40)t=40;
-  if(Number.isFinite(mvrvPct)&&mvrvPct>=95&&t>60)t=60;
-  return t;};
-const eff=reg=>reg==="emergency"?0:reg==="insufficient"?null:applyOvl(PCT[reg]);
+const targetFor=reg=>allocationTargetV1({strategic:reg,recoveryState:recovGood?"good":"calm",macroShockState:shockFired?"fired":"calm",mvrvPercentile:mvrvPct});
+const eff=reg=>targetFor(reg);
 const base=S==="insufficient"?null:PCT[S];
-const target=S==="insufficient"?null:S==="emergency"?0:applyOvl(base);
+const target=targetFor(S);
 const ovl=[];
 if(target!=null&&S!=="emergency"){
-  if(recovGood&&!shockFired&&base<80&&target>=80)ovl.push(["⤒","var(--good)","Детектор «Восстановление» подтверждён: капитуляция позади, потоки стабилизируются — цель поднята до 80%."]);
+  if(recovGood&&!shockFired&&base<A.recovery_floor_pct&&target>=A.recovery_floor_pct)ovl.push(["⤒","var(--good)",`Детектор «Восстановление» подтверждён: капитуляция позади, потоки стабилизируются — цель поднята до ${A.recovery_floor_pct}%.`]);
   if(recovGood&&shockFired)ovl.push(["·","var(--soft)","Детектор «Восстановление» активен, но макрошок его блокирует — цель не поднята (как и в самом движке)."]);
-  if(Number.isFinite(mvrvPct)&&mvrvPct<=10&&base<40&&target>=40&&!(recovGood&&!shockFired))ovl.push(["⤒","var(--good)","Пол капитуляции: MVRV в нижнем дециле своей 4-летней истории — держать не меньше 40% (не действует только в аварийном режиме)."]);
-  if(Number.isFinite(mvrvPct)&&mvrvPct>=95&&base>60)ovl.push(["⤓","var(--warn)","Потолок эйфории: MVRV ≥95-го перцентиля — не выше 60% даже при конструктивном режиме."]);
+  if(Number.isFinite(mvrvPct)&&mvrvPct<=A.capitulation_max_mvrv_percentile&&base<A.capitulation_floor_pct&&target>=A.capitulation_floor_pct&&!(recovGood&&!shockFired))ovl.push(["⤒","var(--good)",`Пол капитуляции: MVRV в нижнем дециле своей 4-летней истории — держать не меньше ${A.capitulation_floor_pct}% (не действует только в аварийном режиме).`]);
+  if(Number.isFinite(mvrvPct)&&mvrvPct>=A.euphoria_min_mvrv_percentile&&base>A.euphoria_cap_pct)ovl.push(["⤓","var(--warn)",`Потолок эйфории: MVRV ≥${A.euphoria_min_mvrv_percentile}-го перцентиля — не выше ${A.euphoria_cap_pct}% даже при конструктивном режиме.`]);
 }
 // lead согласован с оверлеем, который реально двигает цель
 let lead=m.lead;
@@ -152,7 +143,7 @@ const i=ORDER.indexOf(S);let trig="";
 if(S==="emergency")trig+=`<div class="t">выход — в режим по данным: два подтверждённых снимка, вверх — с задержкой гистерезиса</div>`;
 else if(S==="insufficient")trig+=`<div class="t">цель появится после восстановления критических данных</div>`;
 else{
-  if((S==="defensive"||S==="deteriorating")&&!recovGood&&!shockFired&&target<80&&Number.isFinite(mvrvPct)&&mvrvPct<25)trig+=`<div class="t"><span style="color:var(--good)">↑</span> до <b>80%</b> — детектор «Восстановление» (не при макрошоке)</div>`;
+  if((S==="defensive"||S==="deteriorating")&&!recovGood&&!shockFired&&target<A.recovery_floor_pct&&Number.isFinite(mvrvPct)&&mvrvPct<25)trig+=`<div class="t"><span style="color:var(--good)">↑</span> до <b>${A.recovery_floor_pct}%</b> — детектор «Восстановление» (не при макрошоке)</div>`;
   // ближайшая ЭФФЕКТИВНАЯ цель выше/ниже текущей (оверлеи могут сплющивать соседние ступени)
   // Гейт оценки: при MVRV ≥82-го перцентиля движок не выдаёт constructive/unconfirmed_positive —
   // такие апгрейд-цели не рекламируются как достижимые.
@@ -167,7 +158,7 @@ const sc=Number.isFinite(SNAP.scores?.strategic)?(SNAP.scores.strategic>=0?"+":"
 $("strategy").className="strategy "+m.tone;
 const ovlHtml=ovl.map(o=>`<div class="warnline"><span style="color:${o[1]}">${o[0]}</span> ${o[2]}</div>`).join("");
 const baseNote=target!=null&&base!=null&&target!==base?`режим даёт ${base}% · оверлей ${target>base?"поднял цель до":"опустил цель до"} ${target}%`:`доля BTC от вашего лимита <b>B</b>${m.step?" · ступень "+m.step+"/5":""}`;
-$("strategy").innerHTML=`<div class="dial"><div class="eyebrow">Что делать сейчас · модельная аллокация</div><div class="num"><div class="pct ${m.tone}">${pctTxt}</div><div class="meter">${meter}</div></div><div class="sub">${baseNote}</div></div><div class="act"><div class="lead">${lead}</div>${ovlHtml}<div class="warnline"><span style="color:${TW[1]}">${TW[0]}</span> ${TW[2]}${holdNote}</div></div><div class="trig">${trig||'<div class="t">держать до смены режима</div>'}<div class="ctx">среднесрочный балл сейчас ${sc}${Number.isFinite(mvrvPct)?" · MVRV "+Math.round(mvrvPct)+"-й пц":""}</div></div><div class="foot">действие — на смене ступени; внепланово — если факт отклонился от цели больше чем на 15 п.п. · апгрейды исполнять траншами со следующей сессии, даунгрейды — сразу · свободный кэш — в доходный инструмент · без плеча · модельная иллюстрация, не персональная рекомендация</div>`;}
+$("strategy").innerHTML=`<div class="dial"><div class="eyebrow">Что делать сейчас · модельная аллокация · policy v1</div><div class="num"><div class="pct ${m.tone}">${pctTxt}</div><div class="meter">${meter}</div></div><div class="sub">${baseNote}</div></div><div class="act"><div class="lead">${lead}</div>${ovlHtml}<div class="warnline"><span style="color:${TW[1]}">${TW[0]}</span> ${TW[2]}${holdNote}</div></div><div class="trig">${trig||'<div class="t">держать до смены режима</div>'}<div class="ctx">среднесрочный балл сейчас ${sc}${Number.isFinite(mvrvPct)?" · MVRV "+Math.round(mvrvPct)+"-й пц":""}</div></div><div class="foot">policy v1 · пороги зафиксированы 19.07.2026 · историческая перекалибровка отключена · действие — на смене ступени; внепланово — если факт отклонился от цели больше чем на 15 п.п. · апгрейды исполнять траншами со следующей сессии, даунгрейды — сразу · свободный кэш — в доходный инструмент · без плеча · модельная иллюстрация, не персональная рекомендация</div>`;}
 function renderFactors(){const all=[...(SNAP.factors.strategic||[]).map(x=>({...x,scope:"среднесрок"})),...(SNAP.factors.tactical||[]).map(x=>({...x,scope:"краткосрок"}))];const unique=[];for(const x of all)if(!unique.some(y=>y.id===x.id))unique.push(x);unique.sort((a,b)=>Math.abs(b.score)-Math.abs(a.score));$("factors").innerHTML=unique.slice(0,8).map(x=>`<div class="factor ${x.score>0?"pos":x.score<0?"neg":"neutral"}"><span>${esc(x.name)} <small>· ${x.scope}</small></span><span>${x.score>0?"+":""}${x.score} · ${esc(x.value)}</span></div>`).join("")||"<p>Нет доступных факторов.</p>"}
 function drawSpark(canvas,series,score){if(!series||series.length<2)return;const ctx=canvas.getContext("2d"),w=canvas.clientWidth||250,h=35,dpr=devicePixelRatio||1;canvas.width=w*dpr;canvas.height=h*dpr;ctx.scale(dpr,dpr);const vals=series.map(x=>Number(x.v)).filter(Number.isFinite);if(vals.length<2)return;let mn=Math.min(...vals),mx=Math.max(...vals);if(mx===mn){mx+=1;mn-=1}ctx.strokeStyle=score<0?"#A63A2B":score>0?"#1F7A63":"#6D7772";ctx.lineWidth=1.4;ctx.beginPath();vals.forEach((v,i)=>{const x=i/(vals.length-1)*w,y=h-2-(v-mn)/(mx-mn)*(h-4);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
 function renderBlocks(){const root=$("blocks");root.innerHTML="";for(const [id,b] of Object.entries(SNAP.blocks)){const sec=document.createElement("section");sec.className="block";const bs=b.strategic.score,bt=b.tactical.score;sec.innerHTML=`<div class="block-head"><h2>${esc(b.roman)} · ${esc(b.title)}</h2><span class="sub">${esc(b.subtitle)}</span><span class="block-score">S ${fmtScore(bs)} · T ${fmtScore(bt)}</span></div><div class="grid"></div>`;const grid=sec.querySelector(".grid");for(const m of SNAP.metrics.filter(x=>x.block===id)){const card=document.createElement("article");card.className=`card ${cls(m.score)} ${m.score==null?"na":""}`;const valClass=String(m.value).length>24?" text":"";const scClass=m.score>0?"pos":m.score< -1?"neg":m.score<0?"warn":"";const badgeText=m.vote?badge(m.score):"без голоса";card.innerHTML=`<div class="ctop"><div class="cname">${esc(m.name)}</div><div class="score ${scClass}" title="${m.vote?"голосующая карточка":"справочная карточка: значение показывается, в баллы не входит"}">${esc(badgeText)}</div></div><div class="cvalue${valClass}">${esc(m.value)}${m.unit?` <small>${esc(m.unit)}</small>`:""}</div><div class="delta">${esc(m.delta||"")}</div><div class="note">${esc(m.note)}</div><div class="tags"><span class="tag">${esc(horizonLabel[m.horizon]||m.horizon)}</span><span class="tag">${esc(roleLabel[m.role]||m.role)}</span><span class="tag">${esc(methodLabel[m.method]||m.method)}</span><span class="tag">семья: ${esc(m.family)}</span>${m.vote?"":`<span class="tag">без голоса</span>`}</div><div class="spark"><canvas aria-hidden="true"></canvas></div><div class="meta"><span class="${m.stale?"stale":""}">${m.stale?"резерв / partial · наблюдение " + ageText(m.observed_at):"наблюдение " + ageText(m.observed_at)}</span><span class="links" title="${esc(m.source||"источники")}">${sourceLinks(m)}</span></div>`;grid.appendChild(card);requestAnimationFrame(()=>drawSpark(card.querySelector("canvas"),m.series,m.score))}root.appendChild(sec)}}

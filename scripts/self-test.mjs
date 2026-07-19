@@ -1,4 +1,5 @@
 import { readFileSync, statSync, existsSync } from "node:fs";
+import { policyMetadataV1 } from "../docs/policy-v1.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
 const statePath=process.env.STATE||".state/cache.json";
@@ -29,6 +30,7 @@ const sorted=a=>(a||[]).every((x,i)=>i===0||Number(x.t)>=Number(a[i-1].t));
 const last=a=>a?.length?a[a.length-1]:null;
 const requiredBlocks=["macro","demand","cycle","leverage","market"];
 const allowedSourceStates=new Set(["ok","partial","stale","fail","mock"]);
+const expectedPolicy=policyMetadataV1();
 // ВНИМАНИЕ: пороги обязаны совпадать с FRED_SERIES[*].ttl в коллекторе — unit-test это проверяет.
 // Рассинхрон не «мягкая» ошибка: коллектор примет наблюдение, self-test под REQUIRE_LIVE отвергнет
 // кандидата, и сайт замрёт на прошлом снимке до конца недели.
@@ -41,6 +43,10 @@ const sourceMaxAgeH={
 
 if(s.schema!==2)fail.push("schema must be 2");
 if(String(s.version||"")!==String(pkg.version||""))fail.push(`snapshot/package version mismatch:${s.version}/${pkg.version}`);
+if(s.policy===undefined){
+  if(process.env.REQUIRE_LIVE==="1")fail.push("live snapshot missing frozen policy-v1 metadata");
+  else warn.push("published snapshot predates policy-v1 metadata; next successful live run will add it");
+}else if(JSON.stringify(s.policy)!==JSON.stringify(expectedPolicy))fail.push(`snapshot policy mismatch:${JSON.stringify(s.policy)}`);
 if(!isDate(s.generated_at))fail.push("generated_at invalid");
 if(!isDate(s.price_observed_at))fail.push("price_observed_at invalid");
 if(process.env.REQUIRE_LIVE==="1"&&s.mock)fail.push("workflow produced mock snapshot");

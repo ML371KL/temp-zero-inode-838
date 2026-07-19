@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import { POLICY_V1 } from "../docs/policy-v1.mjs";
 
 const root=new URL("../",import.meta.url);
 const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
@@ -74,11 +75,12 @@ const requiredDocs=[
 for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation/source host missing: ${host}`);
 
 
-// Strategy strip: the backtested contract must stay literally in the markup.
-assert.match(html,/PCT=\{emergency:0,defensive:5,deteriorating:20,transition:45,unconfirmed_positive:95,constructive:100\}/,"strip ladder drifted from the backtested 0/5/20/45/95/100");
-assert.match(html,/recovGood&&!shockFired&&t<80/,"recovery overlay must be gated on macro_shock and capped at 80");
-assert.match(html,/mvrvPct<=10&&t<40/,"capitulation floor 40 missing");
-assert.match(html,/mvrvPct>=95&&t>60/,"euphoria cap 60 missing");
+// Strategy strip consumes the same immutable policy module as the snapshot engine.
+assert.equal(POLICY_V1.id,"btc-allocation-policy-v1");
+assert.match(html,/import \{ POLICY_V1, allocationTargetV1 \} from "\.\/policy-v1\.mjs"/,"frontend policy-v1 import missing");
+assert.match(html,/const targetFor=reg=>allocationTargetV1\(/,"strategy strip must delegate target calculation to policy-v1");
+assert.match(collector,/applyStrategicDetectorPolicyV1\(/,"snapshot engine must delegate detector overlays to policy-v1");
+assert.match(html,/историческая перекалибровка отключена/,"frozen policy status missing from the strategy strip");
 assert.match(html,/ageH>12/,"12h snapshot age gate missing from the strip");
 assert.match(html,/модельная иллюстрация, не персональная рекомендация/,"strip disclaimer missing");
 // mdRender must escape BEFORE inline markdown substitution (XSS ordering).

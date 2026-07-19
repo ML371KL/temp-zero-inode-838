@@ -14,6 +14,7 @@
 */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { POLICY_V1, applyStrategicDetectorPolicyV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
 
 const VERSION = "2.9.8";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
@@ -1299,11 +1300,9 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   //    with hit-rate 0.82 — a defensive/deteriorating verdict is lifted to "transition" so the
   //    accumulate window after a capitulation is not reported as "stay defensive".
   const shockState=detectors.find(x=>x.id==="macro_shock")?.state,recoveryState=detectors.find(x=>x.id==="recovery")?.state,distState=detectors.find(x=>x.id==="distribution")?.state;
-  if(shockState==="fired"&&["constructive","unconfirmed_positive","transition"].includes(strategic))strategic="deteriorating";
-  // Distribution fired = expensive valuation + exchange supply returning + broken trend: the panel
-  // may not stay optimistic while holders demonstrably sell into strength.
-  if(distState==="fired"&&["constructive","unconfirmed_positive","transition"].includes(strategic))strategic="deteriorating";
-  if(recoveryState==="good"&&shockState!=="fired"&&["defensive","deteriorating"].includes(strategic))strategic="transition";
+  // Detector effects are part of the frozen policy-v1 contract. Historical backtest output is never
+  // imported here and cannot silently rewrite the live decision rule.
+  strategic=applyStrategicDetectorPolicyV1({strategic,macroShockState:shockState,distributionState:distState,recoveryState});
 
   const L=blocks.leverage.tactical.score,Q=fastDemand(metrics),K=blocks.market.tactical.score;
   const levDet=detectors.find(x=>x.id==="leverage")?.state,demandDet=detectors.find(x=>x.id==="demand_break")?.state;
@@ -1413,7 +1412,7 @@ function compute(){
   history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,raw});
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
-    schema:2,version:VERSION,generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
+    schema:2,version:VERSION,policy:policyMetadataV1(),generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
     regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,
     sources:sourceStates,history,datasets,
@@ -1425,6 +1424,7 @@ function compute(){
       family_completeness:"a family that lost half or more of its inputs may warn but not support: its positive vote is capped at 0 (the family is never nulled — that would let one series switch off a required family)",
       hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h AND at least 12 observed snapshots; hard override is immediate",
       detector_power:"macro_shock or distribution fired cap the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; all three keep anchor+confirmation structure",
+      allocation_policy:`${POLICY_V1.id}; frozen ${POLICY_V1.frozen_at}; historical recalibration ${POLICY_V1.historical_recalibration}`,
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),
       tactical_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.tacticalWeight])),
