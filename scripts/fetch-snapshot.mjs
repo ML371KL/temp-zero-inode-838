@@ -20,7 +20,7 @@ import { executionPolicyMetadataV1 } from "../docs/execution-policy-v1.mjs";
 import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
 import { buildDecisionRecordV1, buildSourceVintagesV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
 
-const VERSION = "2.10.0";
+const VERSION = "2.11.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -1407,9 +1407,9 @@ function compute(){
   const factors={strategic:metrics.filter(x=>x.vote&&x.strategic&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value})),tactical:metrics.filter(x=>x.vote&&x.tactical&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value}))};
   const price=referencePrice();
   const sourceVintages=buildSourceVintagesV1(datasets,sourceStates);sourceVintages.captured_at=iso(NOW);
-  const revisionAlerts=sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages);
+  const revisionAlerts=sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages,previous?.datasets,datasets);
   const {decision,inputSummary}=buildDecisionRecordV1({generatedAt:iso(NOW),regime,regimeMeta:{strategic:stableS,tactical:stableT},metrics,blocks,detectors,scores,sourceVintages,revisionAlerts});
-  const monitoring=updateForwardMonitorV1({previousMonitor:previous?.monitoring,now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashAnnualPct:last(fred("DTB3"))?.v??null,priceSeries:marketSeries("price")});
+  const monitoring=updateForwardMonitorV1({previousMonitor:previous?.monitoring,now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price")});
   // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
   // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
   // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.
@@ -1436,7 +1436,7 @@ function compute(){
       detector_power:"macro_shock or distribution fired cap the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; all three keep anchor+confirmation structure",
       allocation_policy:`${POLICY_V1.id}; frozen ${POLICY_V1.frozen_at}; historical recalibration ${POLICY_V1.historical_recalibration}`,
       model_policy:`${MODEL_POLICY_V1.id}; decision sections locked by SHA-256`,
-      point_in_time:"forward evidence stores as-collected source/data hashes plus exact daily decision inputs; revised histories never overwrite the recorded input hash",
+      point_in_time:"forward evidence stores hash commitments plus exact daily decision inputs; they verify recorded inputs and reproduce the allocation, but the public snapshot does not retain full raw provider payloads",
       forward_monitoring:"policy v1, previous policy and simple benchmarks are observed prospectively; monitoring never recalibrates live thresholds",
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),

@@ -18,6 +18,25 @@ export function stableStringify(value){
 export const sha256=value=>createHash("sha256").update(typeof value==="string"?value:stableStringify(value)).digest("hex");
 export const policySuiteDigestV1=()=>sha256(policySuiteContractV1());
 
+function normalizedTimestamp(value){
+  if(typeof value==="number"&&Number.isFinite(value))return value<100_000_000_000?value*1000:value;
+  const parsed=Date.parse(String(value??""));return Number.isFinite(parsed)?parsed:null;
+}
+function timedRowIndex(value,path="$",out=new Map()){
+  if(Array.isArray(value)){
+    for(const row of value){
+      if(row&&typeof row==="object"&&!Array.isArray(row)){
+        const timeKey=["t","time","date","timestamp","period"].find(k=>row[k]!==undefined),time=timeKey?normalizedTimestamp(row[timeKey]):null;
+        if(time!==null){
+          const identity=["id","venue","symbol","instrument","instrument_name","asset","name"].map(k=>row[k]).find(x=>x!==undefined&&x!==null)??"";
+          out.set(`${path}|${time}|${identity}`,{time,sha256:sha256(row)});
+        }else timedRowIndex(row,`${path}[]`,out);
+      }
+    }
+  }else if(value&&typeof value==="object")for(const [key,child] of Object.entries(value))timedRowIndex(child,`${path}.${key}`,out);
+  return out;
+}
+
 function schemaShape(value,depth=0){
   if(value===null)return"null";
   if(Array.isArray(value))return{type:"array",item:value.length?schemaShape(value[0],depth+1):"empty"};
@@ -41,17 +60,32 @@ export function buildSourceVintagesV1(datasets={},sourceStates={}){
   return{mode:"as_collected",captured_at:null,sources,contract_sha256:sha256(sources)};
 }
 
-export function sourceRevisionAlertsV1(previousVintages,currentVintages){
+export function sourceRevisionAlertsV1(previousVintages,currentVintages,previousDatasets={},currentDatasets={}){
   const alerts=[];
   for(const [key,current] of Object.entries(currentVintages?.sources||{})){
     const prior=previousVintages?.sources?.[key];
     if(!prior)continue;
     if(current.observed_at&&current.observed_at===prior.observed_at&&current.data_sha256&&prior.data_sha256&&current.data_sha256!==prior.data_sha256)
       alerts.push({source:key,type:"same_vintage_rewritten",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+    if(current.observed_at&&prior.observed_at&&current.observed_at!==prior.observed_at&&current.data_sha256&&prior.data_sha256&&current.data_sha256!==prior.data_sha256){
+      const previousRows=timedRowIndex(previousDatasets?.[key]?.data),currentRows=timedRowIndex(currentDatasets?.[key]?.data),changed=[];
+      for(const [rowKey,oldRow] of previousRows){const nextRow=currentRows.get(rowKey);if(nextRow&&nextRow.sha256!==oldRow.sha256)changed.push(oldRow.time);}
+      if(changed.length){
+        changed.sort((a,b)=>a-b);
+        alerts.push({source:key,type:"historical_overlap_rewritten",changed_rows:changed.length,first_changed_at:new Date(changed[0]).toISOString(),last_changed_at:new Date(changed.at(-1)).toISOString(),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+      }
+    }
     if(current.schema_sha256&&prior.schema_sha256&&current.schema_sha256!==prior.schema_sha256)
       alerts.push({source:key,type:"schema_changed",previous_schema_sha256:prior.schema_sha256,current_schema_sha256:current.schema_sha256});
   }
   return alerts;
+}
+
+export function treasuryBillDiscountToEffectiveAnnualPct(discountPct,days=91){
+  if(!finite(discountPct)||!finite(days)||Number(days)<=0)return null;
+  const discount=Number(discountPct)/100,term=Number(days),price=1-discount*term/360;
+  if(price<=0)return null;
+  return ((1/price)**(YEAR_DAYS/term)-1)*100;
 }
 
 export function compactDecisionInputsV1({metrics=[],blocks={},detectors=[],scores={},sourceVintages}){
@@ -158,7 +192,7 @@ function evaluateHealth(monitor,decision){
   return{operational_status:operationalIssues.length?"paused":"healthy",operational_issues:operationalIssues,performance_status:performanceStatus,performance_reasons:performanceReasons,automatic_recalibration:false,owner_approval_required_for_policy_v2:true};
 }
 
-export function updateForwardMonitorV1({previousMonitor,now,price,decision,inputSummary,sourceVintages,revisionAlerts=[],cashAnnualPct=null,priceSeries=[]}){
+export function updateForwardMonitorV1({previousMonitor,now,price,decision,inputSummary,sourceVintages,revisionAlerts=[],cashQuotePct=null,cashQuoteBasis="treasury_bill_discount",priceSeries=[]}){
   if(!finite(price)||Number(price)<=0)throw new Error("forward monitor requires a positive price");
   const cfg=MODEL_POLICY_V1.forward_monitoring,at=new Date(now).toISOString(),date=at.slice(0,10),simple=simpleTargets(priceSeries);
   const desired={
@@ -167,12 +201,16 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     buy_and_hold:simple.buy_and_hold,fixed_50:simple.fixed_50,cash:simple.cash,trend_vol_25:simple.trend_vol_25,
   };
   const monitor=previousMonitor?.schema===1?structuredClone(previousMonitor):{
-    schema:1,id:cfg.id,started_at:at,updated_at:at,last_price:Number(price),last_at:at,last_cash_annual_pct:finite(cashAnnualPct)?Number(cashAnnualPct):null,
-    strategies:{},daily:[],decision_events:[],decision_log:[],target_changes:0,revision_alerts:[],assumptions:{transaction_cost_bps_per_full_turnover:cfg.transaction_cost_bps_per_full_turnover,cash_yield_source:"FRED DTB3; zero only when unavailable",timezone:cfg.timezone,observation_mode:cfg.observation_mode},
+    schema:1,id:cfg.id,started_at:at,updated_at:at,last_price:Number(price),last_at:at,last_cash_quote_pct:finite(cashQuotePct)?Number(cashQuotePct):null,last_cash_quote_basis:cashQuoteBasis,
+    strategies:{},daily:[],decision_events:[],decision_log:[],counter_semantics_version:2,state_changes:0,target_changes:0,revision_alerts:[],assumptions:{transaction_cost_bps_per_full_turnover:cfg.transaction_cost_bps_per_full_turnover,cash_yield_source:"FRED DTB3, discount basis converted to effective annual yield (91-day convention)",cash_yield_basis:"3-month Treasury bill discount quote; ACT/360 price conversion, effective ACT/365.25 annualization",timezone:cfg.timezone,observation_mode:cfg.observation_mode},
   };
   const costRate=cfg.transaction_cost_bps_per_full_turnover/10_000;
   const priorPrice=Number(monitor.last_price),dt=Math.max(0,now-Date.parse(monitor.last_at||at)),btcReturn=priorPrice>0?Number(price)/priorPrice-1:0;
-  const priorCashRate=finite(monitor.last_cash_annual_pct)?Number(monitor.last_cash_annual_pct):0,cashReturn=(1+priorCashRate/100)**(dt/(YEAR_DAYS*DAY))-1;
+  const legacyCashQuote=finite(monitor.last_cash_annual_pct)?Number(monitor.last_cash_annual_pct):null;
+  const priorCashQuote=finite(monitor.last_cash_quote_pct)?Number(monitor.last_cash_quote_pct):legacyCashQuote;
+  const priorCashBasis=monitor.last_cash_quote_basis||"treasury_bill_discount";
+  const priorCashEffective=priorCashBasis==="treasury_bill_discount"?treasuryBillDiscountToEffectiveAnnualPct(priorCashQuote):finite(priorCashQuote)?Number(priorCashQuote):0;
+  const cashReturn=(1+(finite(priorCashEffective)?Number(priorCashEffective):0)/100)**(dt/(YEAR_DAYS*DAY))-1;
   for(const [name,rawTarget] of Object.entries(desired)){
     const existing=monitor.strategies[name];
     const target=finite(rawTarget)?clamp(Number(rawTarget),0,100):(existing?.current_target_pct??0);
@@ -180,8 +218,18 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     const prevTarget=Number(existing.current_target_pct),gross=prevTarget/100*btcReturn+(1-prevTarget/100)*cashReturn,preCost=Number(existing.nav)*(1+gross),turnover=Math.abs(target-prevTarget),cost=turnover/100*costRate,nav=preCost*(1-cost),peak=Math.max(Number(existing.peak_nav),nav),dd=(nav/peak-1)*100;
     Object.assign(existing,{nav,peak_nav:peak,max_drawdown_pct:Math.min(Number(existing.max_drawdown_pct||0),dd),turnover_pct:Number(existing.turnover_pct||0)+turnover,transaction_cost_pct:Number(existing.transaction_cost_pct||0)+cost*100,current_target_pct:target});
   }
+  if(monitor.counter_semantics_version!==2){
+    const events=monitor.decision_events||[];
+    monitor.state_changes=Math.max(0,events.length-1);
+    monitor.target_changes=events.slice(1).reduce((count,event,index)=>count+(events[index].target_pct!==event.target_pct?1:0),0);
+    monitor.counter_semantics_version=2;
+  }else{
+    monitor.state_changes=Number.isFinite(Number(monitor.state_changes))?Number(monitor.state_changes):0;
+    monitor.target_changes=Number.isFinite(Number(monitor.target_changes))?Number(monitor.target_changes):0;
+  }
   if(monitor.decision_events.at(-1)?.state_hash!==decision.state_hash){
-    if(monitor.decision_events.length)monitor.target_changes++;
+    const priorEvent=monitor.decision_events.at(-1);
+    if(priorEvent){monitor.state_changes++;if(priorEvent.target_pct!==decision.target_pct)monitor.target_changes++;}
     monitor.decision_events.push({t:at,state_hash:decision.state_hash,decision_hash:decision.decision_hash,strategic:decision.strategic,tactical:decision.tactical,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,input_hash:decision.input_hash});
   }
   monitor.decision_events=monitor.decision_events.slice(-cfg.decision_event_limit);
@@ -194,7 +242,8 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
   const sameDay=monitor.daily.findIndex(x=>x.date===date);if(sameDay>=0)monitor.daily[sameDay]=dailyRow;else monitor.daily.push(dailyRow);
   monitor.daily=monitor.daily.filter(x=>now-Date.parse(x.t)<=cfg.daily_history_days*DAY).sort((a,b)=>Date.parse(a.t)-Date.parse(b.t));
-  monitor.updated_at=at;monitor.last_at=at;monitor.last_price=Number(price);monitor.last_cash_annual_pct=finite(cashAnnualPct)?Number(cashAnnualPct):null;monitor.cash_yield_available=finite(cashAnnualPct);
+  monitor.updated_at=at;monitor.last_at=at;monitor.last_price=Number(price);monitor.last_cash_quote_pct=finite(cashQuotePct)?Number(cashQuotePct):null;monitor.last_cash_quote_basis=cashQuoteBasis;delete monitor.last_cash_annual_pct;monitor.cash_yield_available=finite(cashQuotePct);
+  monitor.assumptions={...(monitor.assumptions||{}),transaction_cost_bps_per_full_turnover:cfg.transaction_cost_bps_per_full_turnover,cash_yield_source:"FRED DTB3, discount basis converted to effective annual yield (91-day convention)",cash_yield_basis:"3-month Treasury bill discount quote; ACT/360 price conversion, effective ACT/365.25 annualization",timezone:cfg.timezone,observation_mode:cfg.observation_mode};
   monitor.days_elapsed=Math.max(0,Math.floor((now-Date.parse(monitor.started_at))/DAY));monitor.observation_days=monitor.daily.length;monitor.review_schedule_days=cfg.review_days;monitor.next_review_day=cfg.review_days.find(x=>x>monitor.days_elapsed)??null;monitor.trend_vol_context=simple.trend_vol_context;
   monitor.revision_alerts=[...(monitor.revision_alerts||[]),...revisionAlerts.map(x=>({...x,detected_at:at}))].slice(-100);
   monitor.performance=Object.fromEntries(Object.entries(monitor.strategies).map(([name,strategy])=>[name,strategyStats(strategy,monitor.daily,name)]));
