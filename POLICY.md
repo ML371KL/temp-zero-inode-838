@@ -50,8 +50,9 @@ Every input packet has an observed time, fetch time, data hash and schema hash. 
 the same vintage, changes overlapping historical rows while appending a new observation, or changes
 schema, the event is recorded rather than silently treated as the value that was known earlier.
 The current UTC-day partition is explicitly treated as open: its normal intraday updates are not
-historical revisions. Once a row's UTC day has closed, a change to that row is revision evidence and
-degrades decision quality.
+historical revisions. Once a row's UTC day has closed, a change to that row is retained as revision
+evidence in the audit log. A time-series restatement alone does not lower the operational quality of
+the current packet; schema changes and non-temporal same-vintage rewrites do.
 Public hashes prove that recorded inputs did not change and reproduce the final allocation; full raw
 provider payloads remain in the rolling internal cache and cannot be reconstructed from the public
 snapshot alone.
