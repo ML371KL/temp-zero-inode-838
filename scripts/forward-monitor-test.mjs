@@ -62,7 +62,18 @@ assert.equal(openDecision.decision.quality.status,"good","an open-period update 
 
 const closedRewrite=sourcePacket("2026-07-19T00:00:00.000Z","2026-07-19T13:00:00.000Z",[{t:"2026-07-18T00:00:00.000Z",v:999},{t:"2026-07-19T00:00:00.000Z",v:102}]);
 const closedAlerts=sourceRevisionAlertsV1(openPrevious.vintages,closedRewrite.vintages,openPrevious.datasets,closedRewrite.datasets);
-assert.ok(closedAlerts.some(x=>x.type==="same_vintage_rewritten"&&x.changed_rows===1),"a rewrite to a closed row must still degrade quality");
+assert.ok(closedAlerts.some(x=>x.type==="same_vintage_rewritten"&&x.changed_rows===1&&x.quality_impact==="audit"),"a rewrite to a closed row must remain visible in the audit log");
+const closedDecision=buildDecisionRecordV1({generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:{},metrics,blocks,detectors:[],scores,sourceVintages:closedRewrite.vintages,revisionAlerts:closedAlerts});
+assert.equal(closedDecision.decision.quality.status,"good","a historical time-series restatement alone must not mislabel current operational data");
+assert.equal(closedDecision.decision.quality.audit_revision_alerts,1);
+assert.equal(closedDecision.decision.quality.quality_affecting_revision_alerts,0);
+
+const scalarPrevious=sourcePacket("2026-07-19T00:00:00.000Z","2026-07-19T12:00:00.000Z",{value:100});
+const scalarCurrent=sourcePacket("2026-07-19T00:00:00.000Z","2026-07-19T13:00:00.000Z",{value:101});
+const scalarAlerts=sourceRevisionAlertsV1(scalarPrevious.vintages,scalarCurrent.vintages,scalarPrevious.datasets,scalarCurrent.datasets);
+assert.ok(scalarAlerts.some(x=>x.quality_impact==="degraded"),"a non-temporal same-vintage rewrite must remain quality-affecting");
+const scalarDecision=buildDecisionRecordV1({generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:{},metrics,blocks,detectors:[],scores,sourceVintages:scalarCurrent.vintages,revisionAlerts:scalarAlerts});
+assert.equal(scalarDecision.decision.quality.status,"degraded");
 const advancingPrevious=sourcePacket("2026-07-19T12:00:00.000Z","2026-07-19T12:00:00.000Z",openPrevious.datasets.market.data);
 const advancingCurrent=sourcePacket("2026-07-19T13:00:00.000Z","2026-07-19T13:00:00.000Z",openCurrent.datasets.market.data);
 assert.deepEqual(sourceRevisionAlertsV1(advancingPrevious.vintages,advancingCurrent.vintages,advancingPrevious.datasets,advancingCurrent.datasets),[],"an advancing intraday vintage must ignore changes confined to today's open row");

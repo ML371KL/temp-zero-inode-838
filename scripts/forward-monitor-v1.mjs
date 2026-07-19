@@ -99,14 +99,14 @@ export function sourceRevisionAlertsV1(previousVintages,currentVintages,previous
         const affected=[...diff.changed,...diff.added,...diff.removed];
         // Keep the legacy hash-only safeguard for scalar/non-temporal packets. For
         // time-series packets, alert only when an already closed row changed.
-        if(!diff.has_timed_rows)alerts.push({source:key,type:"same_vintage_rewritten",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
-        else if(affected.length)alerts.push({source:key,type:"same_vintage_rewritten",observed_at:current.observed_at,changed_rows:diff.changed.length,added_rows:diff.added.length,removed_rows:diff.removed.length,...revisionRange(affected),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+        if(!diff.has_timed_rows)alerts.push({source:key,type:"same_vintage_rewritten",quality_impact:"degraded",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+        else if(affected.length)alerts.push({source:key,type:"same_vintage_rewritten",quality_impact:"audit",observed_at:current.observed_at,changed_rows:diff.changed.length,added_rows:diff.added.length,removed_rows:diff.removed.length,...revisionRange(affected),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
       }else if(diff.changed.length){
-        alerts.push({source:key,type:"historical_overlap_rewritten",changed_rows:diff.changed.length,...revisionRange(diff.changed),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+        alerts.push({source:key,type:"historical_overlap_rewritten",quality_impact:"audit",changed_rows:diff.changed.length,...revisionRange(diff.changed),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
       }
     }
     if(current.schema_sha256&&prior.schema_sha256&&current.schema_sha256!==prior.schema_sha256)
-      alerts.push({source:key,type:"schema_changed",previous_schema_sha256:prior.schema_sha256,current_schema_sha256:current.schema_sha256});
+      alerts.push({source:key,type:"schema_changed",quality_impact:"degraded",previous_schema_sha256:prior.schema_sha256,current_schema_sha256:current.schema_sha256});
   }
   return alerts;
 }
@@ -158,14 +158,20 @@ export function buildDecisionRecordV1({generatedAt,regime,regimeMeta,metrics,blo
   const inputPayload={generated_at:generatedAt,regime,regime_meta:regimeMeta,allocation_inputs:allocation.inputs,input_summary:inputSummary};
   const inputHash=sha256(inputPayload),policyHash=policySuiteDigestV1();
   const staleSources=Object.values(sourceVintages?.sources||{}).filter(x=>["stale","partial","fail"].includes(x.state)).length;
-  const quality=!scores.critical_coverage_ok||allocation.status==="paused"?"paused":staleSources||revisionAlerts.length?"degraded":"good";
+  // Historical time-series restatements are provenance evidence, not a failure of
+  // the currently evaluated packet. They remain in the append-only audit log.
+  // Schema changes and non-temporal same-vintage rewrites still lower quality;
+  // unknown/legacy alert types fail conservatively as quality-affecting.
+  const qualityAffectingRevisions=revisionAlerts.filter(x=>x?.quality_impact!=="audit").length;
+  const auditRevisions=revisionAlerts.length-qualityAffectingRevisions;
+  const quality=!scores.critical_coverage_ok||allocation.status==="paused"?"paused":staleSources||qualityAffectingRevisions?"degraded":"good";
   const statePayload={policy_hash:policyHash,status:allocation.status,strategic:regime.strategic,tactical:regime.tactical,base_target_pct:allocation.base_target_pct,target_pct:allocation.target_pct,binding_overlays:allocation.binding_overlays};
   const stateHash=sha256(statePayload);
   const decision={
     schema:1,decided_at:generatedAt,policy_id:POLICY_SUITE_V1.id,policy_hash:policyHash,input_hash:inputHash,state_hash:stateHash,
     status:allocation.status,strategic:regime.strategic,tactical:regime.tactical,base_target_pct:allocation.base_target_pct,target_pct:allocation.target_pct,
     regime_targets_pct:regimeTargets,binding_overlays:allocation.binding_overlays,reason_codes:allocation.reason_codes,inputs:allocation.inputs,
-    quality:{status:quality,critical_coverage_ok:!!scores.critical_coverage_ok,stale_or_partial_sources:staleSources,revision_alerts:revisionAlerts.length},
+    quality:{status:quality,critical_coverage_ok:!!scores.critical_coverage_ok,stale_or_partial_sources:staleSources,revision_alerts:revisionAlerts.length,quality_affecting_revision_alerts:qualityAffectingRevisions,audit_revision_alerts:auditRevisions},
   };
   decision.decision_hash=sha256(decision);
   return{decision,inputSummary};

@@ -105,6 +105,7 @@ assert.doesNotMatch(strategyBody,/качество .*решение|истори
 assert.match(policyStatusBody,/Историческая перекалибровка отключена/,"frozen policy explanation missing from the methodology panel");
 assert.match(policyStatusBody,/отдельная policy v2/,"methodology must explain how a future policy change is versioned");
 assert.match(policyStatusBody,/решение \$\{esc\(hash\)\}/,"decision audit hash must remain available in the methodology panel");
+assert.match(policyStatusBody,/пересмотры старых точек временного ряда сохраняются в журнале аудита/,"methodology must distinguish current data quality from historical revision evidence");
 assert.match(html,/operational_pause\.snapshot_stale_hours/,"contractual snapshot age gate missing from the strip");
 assert.match(policyStatusBody,/ступень модельной аллокации, а не вероятность/,"confidence/evidence boundary missing from the methodology panel");
 assert.match(html,/Forward\/OOS-наблюдение/,"forward evidence panel missing");
