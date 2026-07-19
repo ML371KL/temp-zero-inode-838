@@ -49,6 +49,9 @@ The live snapshot stores an append-only, hash-chained decision log and daily as-
 Every input packet has an observed time, fetch time, data hash and schema hash. If a provider rewrites
 the same vintage, changes overlapping historical rows while appending a new observation, or changes
 schema, the event is recorded rather than silently treated as the value that was known earlier.
+The current UTC-day partition is explicitly treated as open: its normal intraday updates are not
+historical revisions. Once a row's UTC day has closed, a change to that row is revision evidence and
+degrades decision quality.
 Public hashes prove that recorded inputs did not change and reproduce the final allocation; full raw
 provider payloads remain in the rolling internal cache and cannot be reconstructed from the public
 snapshot alone.
