@@ -6,8 +6,9 @@
     "snapshot": "node scripts/fetch-snapshot.mjs",
     "mock": "MOCK=1 OUT=.candidate/mock-snapshot.json STATE=.candidate/mock-state.json node scripts/fetch-snapshot.mjs",
     "unit": "node scripts/unit-test.mjs",
-    "check": "node scripts/policy-lock-test.mjs && node scripts/policy-suite-lock-test.mjs && node scripts/forward-monitor-test.mjs && node scripts/unit-test.mjs && node scripts/fixture-test.mjs && node scripts/fallback-test.mjs && node scripts/workflow-test.mjs && node scripts/static-audit.mjs && node scripts/live-regression-test.mjs && node scripts/self-test.mjs && node scripts/negative-test.mjs",
+    "check": "node scripts/policy-lock-test.mjs && node scripts/policy-suite-lock-test.mjs && node scripts/policy-exhaustive-test.mjs && node scripts/forward-monitor-test.mjs && node scripts/unit-test.mjs && node scripts/fixture-test.mjs && node scripts/fallback-test.mjs && node scripts/workflow-test.mjs && node scripts/static-audit.mjs && node scripts/live-regression-test.mjs && node scripts/self-test.mjs && node scripts/negative-test.mjs",
     "policy": "node scripts/policy-lock-test.mjs && node scripts/policy-suite-lock-test.mjs",
+    "exhaustive": "node scripts/policy-exhaustive-test.mjs",
     "forward": "node scripts/forward-monitor-test.mjs",
     "monitor": "node scripts/monitor-live.mjs",
     "fixture": "node scripts/fixture-test.mjs",
@@ -20,7 +21,7 @@
     "live-regression": "node scripts/live-regression-test.mjs",
     "fallback": "node scripts/fallback-test.mjs"
   },
-  "version": "2.10.0",
+  "version": "2.11.0",
   "engines": {
     "node": ">=24"
   }
