@@ -19,6 +19,7 @@ import { MODEL_POLICY_V1, modelPolicyMetadataV1 } from "../docs/model-policy-v1.
 import { executionPolicyMetadataV1 } from "../docs/execution-policy-v1.mjs";
 import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
 import { buildDecisionRecordV1, buildSourceVintagesV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
+import { compactHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
 const VERSION = "2.11.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
@@ -1413,13 +1414,13 @@ function compute(){
   // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
   // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
   // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.
-  const rawHistory=(previous?.history||[]).filter(h=>NOW-Date.parse(h.t)<730*DAY);
-  const recentCut=NOW-14*DAY,byDayHist=new Map();
+  const rawHistory=(previous?.history||[]).map(compactHistoryEntryV1).filter(h=>NOW-Date.parse(h.t)<HISTORY_RETENTION_DAYS*DAY);
+  const recentCut=NOW-HISTORY_HOURLY_DAYS*DAY,byDayHist=new Map();
   for(const h of rawHistory){const t=Date.parse(h.t);if(t>=recentCut)continue;byDayHist.set(dayKey(t),h);}
   const history=[...byDayHist.values(),...rawHistory.filter(h=>Date.parse(h.t)>=recentCut)].sort((a,b)=>Date.parse(a.t)-Date.parse(b.t)).slice(-4500);
   const oiByVenue=Object.fromEntries((data("derivatives")?.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
   const raw={oi_usd:sumOrNull(Object.values(oiByVenue)),oi_by_venue:oiByVenue,premium_bps:getM(metrics,"us_spot_premium")?.value_num,stable_supply:last(series(data("stablecoins")||[]))?.v,etf_20d:getM(metrics,"etf_20d")?.value_num};
-  history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,decision:{policy_id:decision.policy_id,policy_hash:decision.policy_hash,state_hash:decision.state_hash,decision_hash:decision.decision_hash,status:decision.status,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,regime_targets_pct:decision.regime_targets_pct,binding_overlays:decision.binding_overlays,quality:decision.quality},raw});
+  history.push(compactHistoryEntryV1({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,decision,raw}));
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
     schema:3,version:VERSION,policy:policyMetadataV1(),policy_suite:policySuiteMetadataV1(),policy_components:{allocation:policyMetadataV1(),model:modelPolicyMetadataV1(),execution:executionPolicyMetadataV1()},generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),

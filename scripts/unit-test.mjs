@@ -6,10 +6,32 @@ import {
   validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, stabilizeCore, severity, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
+import { compactHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const fail=[];
 const eq=(a,b,msg)=>{if(JSON.stringify(a)!==JSON.stringify(b))fail.push(`${msg}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`)};
 const ok=(x,msg)=>{if(!x)fail.push(msg)};
+
+// Public history is a compact explanatory view. Immutable policy metadata belongs at the
+// snapshot root, while the exact forward hash chain belongs in monitoring.decision_log.
+{
+  const legacy={t:"2026-07-21T00:00:00.000Z",decision:{policy_id:"btc-allocation-policy-v1",policy_hash:"policy",regime_targets_pct:{defensive:5},state_hash:"state",decision_hash:"decision",status:"actionable",base_target_pct:20,target_pct:20,binding_overlays:[],quality:{status:"good"}},raw:{oi_usd:123}};
+  const compact=compactHistoryEntryV1(legacy);
+  ok(!("policy_id" in compact.decision),"history compaction removes repeated policy id");
+  ok(!("policy_hash" in compact.decision),"history compaction removes repeated policy hash");
+  ok(!("regime_targets_pct" in compact.decision),"history compaction removes repeated target ladder");
+  eq(compact.decision.decision_hash,"decision","history compaction preserves decision hash");
+  eq(compact.decision.target_pct,20,"history compaction preserves target");
+  eq(compact.raw.oi_usd,123,"history compaction preserves internal market history");
+  ok("policy_id" in legacy.decision,"history compaction does not mutate its input");
+
+  const daily=[{x:"d".repeat(30)}],decision_log=[{x:"l".repeat(20)}],history=[compact];
+  const projected=projectedPublicSnapshotBytesV1({snapshotBytes:1000,snapshot:{monitoring:{daily,decision_log},history},dailyLimit:3,decisionLogLimit:4,historyMaxRows:5});
+  const expected=1000+2*jsonBytesV1(daily[0])+3*jsonBytesV1(decision_log[0])+4*jsonBytesV1(history[0]);
+  eq(projected,expected,"max-filled retention projection");
+  ok(HISTORY_MAX_ROWS===1066,"history retention row ceiling remains explicit");
+  ok(PUBLIC_SNAPSHOT_MAX_BYTES===3_000_000,"public snapshot byte ceiling remains explicit");
+}
 
 // Farside: a non-trading all-dash row must be skipped; an actual zero-flow trading row must stay.
 const html=`<table>

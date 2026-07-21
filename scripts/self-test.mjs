@@ -2,6 +2,7 @@ import { readFileSync, statSync, existsSync } from "node:fs";
 import { allocationDecisionV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
 import { policySuiteMetadataV1, POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
+import { PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
 const statePath=process.env.STATE||".state/cache.json";
@@ -270,7 +271,7 @@ if(!s.mock){
   if(Object.values(s.sources).every(x=>x.state==="fail"))fail.push("all live sources failed");
 }
 const bytes=statSync(path).size;
-if(bytes>2_500_000)warn.push(`snapshot is large: ${(bytes/1e6).toFixed(2)} MB`);
+if(bytes>PUBLIC_SNAPSHOT_MAX_BYTES)warn.push(`snapshot is large: ${(bytes/1e6).toFixed(2)} MB`);
 
 if(fail.length){console.error("Snapshot validation failed:\n- "+fail.join("\n- "));process.exit(1);}
 console.log(`Snapshot OK: ${s.metrics.length} metrics, ${families.size} voting families, ${s.detectors.length} detectors, ${Object.keys(s.sources||{}).length} source states, ${(bytes/1e6).toFixed(2)} MB`);
