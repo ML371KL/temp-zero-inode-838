@@ -5,6 +5,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { POLICY_V1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
+import { compactHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const root=new URL("../",import.meta.url);
 const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
@@ -44,14 +45,20 @@ try{
 assert.equal(snap.version,pkg.version,"snapshot/package version mismatch");
 assert.match(readme,new RegExp(`v${pkg.version.replaceAll(".","\\.")}`),"README version mismatch");
 assert.equal("datasets" in snap,false,"raw datasets leaked into public snapshot");
-assert.ok(statSync(new URL("../docs/snapshot.json",import.meta.url)).size<2_500_000,"public snapshot too large");
+const publicSnapshotBytes=statSync(new URL("../docs/snapshot.json",import.meta.url)).size;
+assert.ok(publicSnapshotBytes<PUBLIC_SNAPSHOT_MAX_BYTES,"public snapshot too large");
 if(snap.monitoring?.daily?.length&&snap.monitoring?.decision_log?.length&&snap.history?.length){
-  const bytes=x=>Buffer.byteLength(JSON.stringify(x)),cfg=MODEL_POLICY_V1.forward_monitoring;
-  const maxHistoryRows=730+14*24,projected=statSync(new URL("../docs/snapshot.json",import.meta.url)).size+
-    Math.max(0,cfg.daily_history_days-snap.monitoring.daily.length)*bytes(snap.monitoring.daily.at(-1))+
-    Math.max(0,cfg.observation_log_limit-snap.monitoring.decision_log.length)*bytes(snap.monitoring.decision_log.at(-1))+
-    Math.max(0,maxHistoryRows-snap.history.length)*bytes(snap.history.at(-1));
-  assert.ok(projected<2_500_000,`retention policy would eventually grow the public snapshot to ${(projected/1e6).toFixed(2)} MB`);
+  const cfg=MODEL_POLICY_V1.forward_monitoring;
+  const compactedHistory=snap.history.map(compactHistoryEntryV1);
+  const compactedSnapshotBytes=publicSnapshotBytes-jsonBytesV1(snap.history)+jsonBytesV1(compactedHistory);
+  const projected=projectedPublicSnapshotBytesV1({
+    snapshotBytes:compactedSnapshotBytes,
+    snapshot:{...snap,history:compactedHistory},
+    dailyLimit:cfg.daily_history_days,
+    decisionLogLimit:cfg.observation_log_limit,
+    historyMaxRows:HISTORY_MAX_ROWS,
+  });
+  assert.ok(projected<PUBLIC_SNAPSHOT_MAX_BYTES,`retention policy would eventually grow the public snapshot to ${(projected/1e6).toFixed(2)} MB`);
 }
 for(const m of snap.metrics||[])for(const u of m.source_urls||[])assert.equal(new URL(u).protocol,"https:",`non-HTTPS metric URL ${m.id}`);
 for(const [key,state] of Object.entries(snap.sources||{}))for(const u of state.urls||[])assert.equal(new URL(u).protocol,"https:",`non-HTTPS source URL ${key}`);
