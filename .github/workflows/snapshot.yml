@@ -16,6 +16,7 @@ permissions:
   contents: write   # коммит публичного снимка в репозиторий; raw datasets живут только в Actions Cache
   pages: write      # публикация сайта
   id-token: write   # требуется actions/deploy-pages
+  issues: write     # встроенный сторож синхронизирует инцидент-issue каждым прогоном
 
 # Развёртывание не отменяется на полпути: иначе можно оставить Pages в подвешенном состоянии.
 concurrency:
@@ -166,3 +167,15 @@ jobs:
             echo "::error::snapshot commit was not pushed after 3 attempts"
             exit 1
           fi
+
+      # 9. Встроенный сторож. Отдельный monitor.yml получает от GitHub-планировщика 2–6 тиков из
+      #    ожидаемых 12/сутки и проспал единственный реальный инцидент (протухание >3ч ночью 21.07).
+      #    Этот шаг синхронизирует инцидент-issue КАЖДЫМ ежечасным прогоном и никогда не блокирует
+      #    публикацию; monitor.yml остаётся независимым резервом (и принимает внешний dispatch).
+      - name: Проверить живой контур (не блокирует)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_ALERT: "1"
+          SNAPSHOT_URL: https://ml371kl.github.io/temp-zero-inode-838/snapshot.json
+        run: node scripts/monitor-live.mjs

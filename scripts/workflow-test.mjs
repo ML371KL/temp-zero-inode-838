@@ -19,42 +19,49 @@ assert.match(y,/npm run fred-smoke/,"FRED smoke (optional, non-blocking) step mi
 assert.match(y,/npm run probe/,"endpoint probe step missing");
 // The live candidate must never be written straight into docs/: publication happens only after
 // the candidate has passed strict verification.
-assert.match(y,/OUT:\s*\.candidate\/snapshot\.json/,"live candidate must be collected into a temporary path");
-assert.match(y,/REQUIRE_LIVE:\s*"1"/,"strict live verification step missing");
+// ЯКОРЯ: публикационно-критичные инварианты матчатся только как РЕАЛЬНЫЕ строки (^\s* + конец строки),
+// а не как подстроки. Незаякоренная регулярка удовлетворяется закомментированной строкой — мутации
+// «# REQUIRE_LIVE», «# run: npm run verify», «# cp .candidate/…» держали CI зелёным (аудит 2026-07-21).
+const CANDIDATE_OUT_LINE=/^\s*OUT:\s*\.candidate\/snapshot\.json\s*$/m;
+const REQUIRE_LIVE_LINE=/^\s*REQUIRE_LIVE:\s*"1"\s*$/m;
+const VERIFY_RUN_LINE=/^\s*run:\s*npm run verify\s*$/m;
+const PROMOTE_LINE=/^\s*cp \.candidate\/snapshot\.json docs\/snapshot\.json\s*$/m;
+assert.match(y,CANDIDATE_OUT_LINE,"live candidate must be collected into a temporary path");
+assert.match(y,REQUIRE_LIVE_LINE,"strict live verification step missing");
 {
   // Шлюз обязан стоять ВНУТРИ шага верификации и смотреть на КАНДИДАТА. Иначе его можно обойти
   // вхолостую, перенацелив OUT на уже опубликованный снимок: проверка станет проверять сама себя.
   const i=y.indexOf("Проверить live-кандидата");
   assert.ok(i>0,"шаг верификации кандидата пропал из пайплайна");
   const step=y.slice(i,i+700);
-  assert.match(step,/REQUIRE_LIVE:\s*"1"/,"шлюз REQUIRE_LIVE обязан жить внутри шага верификации");
-  assert.match(step,/OUT:\s*\.candidate\/snapshot\.json/,"верификация обязана смотреть на КАНДИДАТА, а не на опубликованный снимок");
-  assert.match(step,/npm run verify/,"шаг верификации обязан запускать verify");
+  assert.match(step,REQUIRE_LIVE_LINE,"шлюз REQUIRE_LIVE обязан жить внутри шага верификации");
+  assert.match(step,CANDIDATE_OUT_LINE,"верификация обязана смотреть на КАНДИДАТА, а не на опубликованный снимок");
+  assert.match(step,VERIFY_RUN_LINE,"шаг верификации обязан запускать verify");
 }
-assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"verified candidate is never promoted");
-// Сравнение порядка обязано опираться на СУЩЕСТВОВАНИЕ обоих шагов: при удалении шага indexOf
-// возвращает -1, и проверка «раньше» становится тождественно истинной — снимок, не прошедший
-// REQUIRE_LIVE, опубликовался бы на продакшен-страницу при зелёном CI.
-assert.match(y,/npm run verify/,"шаг верификации пропал из пайплайна");
-assert.ok(y.indexOf("cp .candidate/snapshot.json")>0,"шаг промоушена кандидата пропал из пайплайна");
-assert.ok(y.indexOf("npm run verify")<y.indexOf("cp .candidate/snapshot.json"),"publication must happen after verification");
+assert.match(y,PROMOTE_LINE,"verified candidate is never promoted");
+// Сравнение порядка обязано опираться на ЗАЯКОРЕННЫЕ совпадения (match.index), а не на indexOf по
+// тексту: indexOf находит и комментарий, а при удалении шага возвращает -1 и «раньше» становится
+// тождественно истинным — снимок, не прошедший REQUIRE_LIVE, опубликовался бы при зелёном CI.
+const verifyRunAt=y.match(VERIFY_RUN_LINE),promoteAt=y.match(PROMOTE_LINE);
+assert.ok(verifyRunAt,"шаг верификации пропал из пайплайна");
+assert.ok(promoteAt,"шаг промоушена кандидата пропал из пайплайна");
+assert.ok(verifyRunAt.index<promoteAt.index,"publication must happen after verification");
 assert.doesNotMatch(y,/fetch-depth:\s*0/,"a full clone gets slower every day and is not needed for a rebase");
 assert.match(y,/continue-on-error:\s*true/,"probe must never block publication");
-assert.match(y,/REQUIRE_LIVE:\s*"1"/);
-assert.match(y,/branch="\$\{GITHUB_REF_NAME:-main\}"/,"branch must not be hardcoded");
+assert.match(y,/^\s*branch="\$\{GITHUB_REF_NAME:-main\}"\s*$/m,"branch must not be hardcoded");
 assert.doesNotMatch(y,/pull --rebase origin main/,"hardcoded main branch remains");
-assert.match(y,/git push origin "HEAD:\$branch"/);
+assert.match(y,/^\s*if git push origin "HEAD:\$branch"; then/m,"snapshot push line missing");
 // Коммит снимка обязан разрешать гонку ДЕТЕРМИНИРОВАННО: ребейз снимка на разошедшийся origin
 // конфликтует одинаково на каждой попытке, поэтому ретраи ребейза = три гарантированных падения.
 assert.doesNotMatch(y,/git rebase/,"ребейз в шаге коммита снимка приводит к неразрешимому конфликту docs/snapshot.json");
-assert.match(y,/git reset -q "origin\/\$branch"/,"пропал перенос свежего снимка поверх origin");
+assert.match(y,/^\s*git reset -q "origin\/\$branch"/m,"пропал перенос свежего снимка поверх origin");
 // `--soft` здесь — тихий откат чужой работы: он двигает только HEAD, оставляя ИНДЕКС с деревом
 // старого коммита, и последующий `git commit` фиксирует это старое дерево целиком. Всё, что кто-то
 // запушил, пока шёл получасовой прогон, исчезает без следа и без конфликта. Воспроизведено на
 // тестовом репозитории: правка в scripts/ откатывалась до предыдущей версии.
 assert.doesNotMatch(y,/git reset[^\n]*--soft/,"смешанный reset обязателен: --soft оставляет индекс со старым деревом и откатывает чужие пуши");
-assert.match(y,/cp \.candidate\/snapshot\.json docs\/snapshot\.json/,"побеждать обязан снимок этого прогона, уже опубликованный на Pages");
-assert.match(y,/git add docs\/snapshot\.json/,"public snapshot must be committed");
+assert.ok([...y.matchAll(new RegExp(PROMOTE_LINE.source,"gm"))].length>=2,"побеждать обязан снимок этого прогона (промоушен и в шаге коммита), уже опубликованный на Pages");
+assert.match(y,/^\s*git add docs\/snapshot\.json\s*$/m,"public snapshot must be committed");
 assert.doesNotMatch(y,/git add[^\n]*\.state\/cache\.json/,"raw internal state must not be committed");
 assert.match(y,/"package\.json"/,"package changes must trigger workflow");
 assert.match(y,/"docs\/\*\*"/,"every deployed policy/frontend file under docs must trigger the workflow");
@@ -106,14 +113,31 @@ assert.match(y,/path:\s*docs/,"the Pages artifact must be the docs/ folder");
 assert.match(y,/pages:\s*write/,"pages: write permission missing");
 assert.match(y,/id-token:\s*write/,"id-token: write permission missing");
 assert.match(y,/name:\s*github-pages/,"the github-pages environment is required by deploy-pages");
-assert.ok(y.indexOf("cp .candidate/snapshot.json")<y.indexOf("upload-pages-artifact"),"the artifact must be uploaded AFTER the verified candidate is promoted");
+assert.ok(promoteAt.index<y.match(/^\s*uses:\s*actions\/upload-pages-artifact/m).index,"the artifact must be uploaded AFTER the verified candidate is promoted");
 // Honest partial verdicts must publish rather than freeze the site, so the production gate is
 // REQUIRE_LIVE only. REQUIRE_COMPLETE stays an opt-in capability (self-test.mjs), not a workflow gate.
 assert.doesNotMatch(y,/REQUIRE_COMPLETE/,"the production publish gate must not force both regimes complete");
-assert.match(monitorY,/cron:\s*"53 \*\/2 \* \* \*"/,"independent two-hour live monitor schedule missing");
-assert.match(monitorY,/issues:\s*write/,"monitor cannot open/close an external incident issue");
-assert.match(monitorY,/node scripts\/monitor-live\.mjs/,"monitor runner missing");
-assert.match(monitorY,/MONITOR_ALERT:\s*"1"/,"GitHub issue alerting is not enabled");
+assert.match(monitorY,/^\s*-\s*cron:\s*"53 \*\/2 \* \* \*"\s*$/m,"independent two-hour live monitor schedule missing");
+assert.match(monitorY,/^\s*workflow_dispatch:\s*$/m,"monitor must accept an external dispatch (cron-job.org backup trigger)");
+assert.match(monitorY,/^\s*issues:\s*write\s*$/m,"monitor cannot open/close an external incident issue");
+assert.match(monitorY,/^\s*run:\s*node scripts\/monitor-live\.mjs\s*$/m,"monitor runner missing");
+assert.match(monitorY,/^\s*MONITOR_ALERT:\s*"1"\s*$/m,"GitHub issue alerting is not enabled");
 assert.match(monitorY,/ml371kl\.github\.io\/temp-zero-inode-838\/snapshot\.json/,"monitor must check the published Pages artifact, not a local file");
+// Сторож продублирован ВНУТРИ ежечасного прогона: GitHub-планировщик отдаёт монитору 2–6 тиков из
+// ожидаемых, и единственный реальный инцидент (протухание >3ч ночью 21.07) пришёлся на несработавший
+// тик. Встроенный шаг не блокирует публикацию, но синхронизирует инцидент каждым прогоном.
+assert.match(y,/^\s*run:\s*node scripts\/monitor-live\.mjs\s*$/m,"in-run live monitor step missing from snapshot workflow");
+assert.match(y,/^\s*issues:\s*write\s*(#.*)?$/m,"snapshot workflow needs issues:write for the in-run monitor");
+{
+  const inRunMonitorAt=y.indexOf("Проверить живой контур");
+  assert.ok(inRunMonitorAt>0,"in-run monitor step missing");
+  const inRunMonitor=y.slice(inRunMonitorAt,inRunMonitorAt+600);
+  assert.match(inRunMonitor,/continue-on-error:\s*true/,"in-run monitor must never block publication");
+  assert.match(inRunMonitor,/^\s*MONITOR_ALERT:\s*"1"\s*$/m,"in-run monitor must sync the incident issue");
+  // Сторож обязан стоять ПОСЛЕ деплоя и коммита: перенесённый выше, он каждый час сравнивал бы
+  // свежий кандидат со СТАРОЙ ещё-не-передеплоенной страницей и открывал/закрывал ложный инцидент.
+  assert.ok(inRunMonitorAt>y.match(/^\s*uses:\s*actions\/deploy-pages/m).index,"in-run monitor must run AFTER the Pages deploy");
+  assert.ok(inRunMonitorAt>y.indexOf("Сохранить снимок в репозиторий"),"in-run monitor must run AFTER the snapshot commit");
+}
 for(const asset of ["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs"])assert.ok(monitorScript.includes(`"${asset}"`),`external monitor does not check ${asset}`);
 console.log("Workflow static tests OK");

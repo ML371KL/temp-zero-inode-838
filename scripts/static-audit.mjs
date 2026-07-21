@@ -63,11 +63,28 @@ if(snap.monitoring?.daily?.length&&snap.monitoring?.decision_log?.length&&snap.h
 for(const m of snap.metrics||[])for(const u of m.source_urls||[])assert.equal(new URL(u).protocol,"https:",`non-HTTPS metric URL ${m.id}`);
 for(const [key,state] of Object.entries(snap.sources||{}))for(const u of state.urls||[])assert.equal(new URL(u).protocol,"https:",`non-HTTPS source URL ${key}`);
 
+// Forward-monitor graft pack: if present, it must be intact — a corrupted pack silently disables
+// the P0 chain restoration (fetch-snapshot loads it inside try/catch). Absence is legitimate ONLY
+// after a deliberate future monitor genesis (delete the pack in the same commit — see README).
+{
+  const packUrl=new URL("../docs/monitor-graft-v1.json",import.meta.url);
+  const {existsSync}=await import("node:fs");
+  if(existsSync(packUrl)){
+    const pack=JSON.parse(readFileSync(packUrl,"utf8"));
+    assert.ok(pack?.archive?.monitor?.decision_log?.length>0,"graft pack: archive chain missing");
+    assert.ok(pack?.era?.started_at&&pack?.era?.strategies,"graft pack: era boot record missing");
+    const {verifyDecisionLogChainV1}=await import("./forward-monitor-v1.mjs");
+    assert.equal(verifyDecisionLogChainV1(pack.archive.monitor.decision_log).ok,true,"graft pack: archive hash chain invalid");
+  }
+}
+// Governance contract must ship with the repo (РАЗВЁРТЫВАНИЕ.md lists it as required).
+assert.ok((await import("node:fs")).existsSync(new URL("../POLICY.md",import.meta.url)),"POLICY.md missing");
+
 // Workflow/state separation and operational invariants.
 assert.match(workflow,/actions\/cache@v5/,"Actions cache missing");
 assert.match(workflow,/path:\s*\.state\/cache\.json/,"internal state cache path missing");
 assert.doesNotMatch(workflow,/git add[^\n]*\.state\/cache\.json/,"raw state is committed");
-assert.match(workflow,/REQUIRE_LIVE:\s*["']1["']/,"strict live validation missing");
+assert.match(workflow,/^\s*REQUIRE_LIVE:\s*["']1["']\s*$/m,"strict live validation missing (anchored: a commented-out gate must not satisfy this)");
 
 // Secret scan: common token shapes and accidental literal FRED secret assignment.
 const files={html,collector,workflow,readme};
@@ -86,7 +103,7 @@ const requiredDocs=[
   "publicreporting.cftc.gov","docs.deribit.com","bybit-exchange.github.io",
   "okx.com","docs.cdp.coinbase.com","docs.kraken.com",
   "docs.coingecko.com","mempool.space","bitstamp.net","blockchain.com","blockstream","gemini.com",
-  "theblock.co","bitcoin-data.com","hyperliquid"
+  "theblock.co","bitcoin-data.com","hyperliquid","fiscaldata.treasury.gov"
 ];
 for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation/source host missing: ${host}`);
 

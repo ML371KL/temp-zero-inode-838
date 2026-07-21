@@ -226,12 +226,16 @@ ok(src.includes("report_date_as_yyyy_mm_dd desc"),"CFTC latest-first query missi
 // не только их совпадение, но и связь порога с реальным календарём публикации.
 const DAY_H=24;
 for(const [id,cfg] of Object.entries(FRED_SERIES)){
-  ok(["daily","weekly-batch"].includes(cfg.release),`FRED ${id}: не объявлен календарь публикации (release)`);
+  ok(["daily","weekly-batch","monthly-batch"].includes(cfg.release),`FRED ${id}: не объявлен календарь публикации (release)`);
   const ttlH=cfg.ttl/36e5;
   if(cfg.release==="daily")ok(ttlH<=7*DAY_H,`FRED ${id}: дневной релиз, порог ${ttlH/24}д — должен быть ≤7д`);
   // weekly-batch: последняя точка штатно доживает до 11д20ч (праздничный перенос) → нужен ≥12д,
   // но не более 21д, иначе тихо замёрзший ряд будет считаться валидным больше трёх недель.
   if(cfg.release==="weekly-batch")ok(ttlH>=12*DAY_H&&ttlH<=21*DAY_H,`FRED ${id}: недельный пакет, порог ${ttlH/24}д — должен быть 12–21д`);
+  // monthly-batch (JPNASSETS): точка датируется ПЕРВЫМ числом месяца и публикуется в начале
+  // следующего — перед самым обновлением её штатная старость достигает ~62 дней (замерено вживую:
+  // 2026-06-01 на 2026-07-21 = 50д). Порог 65–90д; дальше ряд считается замёрзшим.
+  if(cfg.release==="monthly-batch")ok(ttlH>=65*DAY_H&&ttlH<=90*DAY_H,`FRED ${id}: месячный пакет, порог ${ttlH/24}д — должен быть 65–90д`);
 }
 // Пороги коллектора и гейта публикации обязаны совпадать по ВСЕМ источникам.
 {
@@ -254,6 +258,28 @@ for(const [id,cfg] of Object.entries(FRED_SERIES)){
     if(gate[k]!==undefined)ok(c<=gate[k],`РАССИНХРОН ${k}: коллектор ${c}ч > гейт ${gate[k]}ч → кандидат будет отвергнут, сайт замрёт`);
   }
 }
+// ---- Байтовый бюджет истории согласован с жёстким капом файла ----
+{
+  const {HISTORY_BYTE_BUDGET,boundedPublicHistoryV1}=await import("./public-snapshot-contract.mjs");
+  const {MODEL_POLICY_V1}=await import("../docs/model-policy-v1.mjs");
+  const snap=JSON.parse(readFileSync(new URL("../docs/snapshot.json",import.meta.url),"utf8"));
+  const bytes=v=>Buffer.byteLength(JSON.stringify(v));
+  const dailyRow=snap.monitoring?.daily?.at(-1),logRow=snap.monitoring?.decision_log?.at(-1);
+  if(dailyRow&&logRow){
+    const cfg=MODEL_POLICY_V1.forward_monitoring;
+    const steadyOthers=bytes(dailyRow)*cfg.daily_history_days+bytes(logRow)*cfg.observation_log_limit+(bytes(snap)-bytes(snap.history||[])-bytes(snap.monitoring.daily)-bytes(snap.monitoring.decision_log));
+    ok(steadyOthers+HISTORY_BYTE_BUDGET<PUBLIC_SNAPSHOT_MAX_BYTES,`бюджет истории + прочие компоненты на лимитах (${((steadyOthers+HISTORY_BYTE_BUDGET)/1e6).toFixed(2)}МБ) обязаны помещаться в кап ${(PUBLIC_SNAPSHOT_MAX_BYTES/1e6).toFixed(1)}МБ — иначе мёртвая зона дедлока публикации возвращается`);
+  }
+  const rows=Array.from({length:200},(_,i)=>({t:new Date(Date.UTC(2026,0,1)+i*86400000).toISOString(),strategic:-10,tactical:0,price:60000,pad:"x".repeat(50)}));
+  const bounded=boundedPublicHistoryV1(rows,{budget:bytes(rows.slice(100))+2,minRows:48});
+  ok(bounded.trimmed>0&&bounded.history.length<rows.length,"бюджет обязан отбрасывать строки при переполнении");
+  eq(bounded.history.at(-1).t,rows.at(-1).t,"отбрасываются САМЫЕ СТАРЫЕ строки, свежие сохраняются");
+  const untouched=boundedPublicHistoryV1(rows,{budget:1e9,minRows:48});
+  eq(untouched.trimmed,0,"при запасе бюджета история не режется");
+  const floor=boundedPublicHistoryV1(rows,{budget:1,minRows:48});
+  eq(floor.history.length,48,"минимум строк сохраняется даже при нулевом бюджете");
+}
+
 // ---- Неполная семья предупреждает, но не поддерживает ----
 eq(componentScore([2,0]),1,"полная семья считается как прежде");
 eq(componentScore([2,null]),0,"1 из 2 ног: положительный голос срезается до 0");

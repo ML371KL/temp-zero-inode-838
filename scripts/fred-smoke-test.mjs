@@ -1,10 +1,9 @@
 /* FRED connectivity check. FRED_KEY is OPTIONAL: without it the collector reads FRED through the
-import { readFileSync as __rf } from "node:fs";
-const PKG_VERSION = JSON.parse(__rf(new URL("../package.json", import.meta.url), "utf8")).version;
-
    keyless CSV endpoint (fredgraph.csv). This step validates a provided key when present and always
    confirms the keyless CSV path is alive. It must NEVER fail the build merely because no key is set —
    the workflow runs it non-blocking and the real publish gate is `npm run verify`. */
+import { readFileSync as __rf } from "node:fs";
+const PKG_VERSION = JSON.parse(__rf(new URL("../package.json", import.meta.url), "utf8")).version;
 const key=String(process.env.FRED_KEY||"").trim();
 const hasKey=/^[a-z0-9]{32}$/.test(key);
 let apiError=null;

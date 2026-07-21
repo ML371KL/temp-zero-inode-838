@@ -18,10 +18,17 @@ import { POLICY_V1, applyStrategicDetectorPolicyV1, policyMetadataV1 } from "../
 import { MODEL_POLICY_V1, modelPolicyMetadataV1 } from "../docs/model-policy-v1.mjs";
 import { executionPolicyMetadataV1 } from "../docs/execution-policy-v1.mjs";
 import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
-import { buildDecisionRecordV1, buildSourceVintagesV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
-import { compactHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
+import { buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
 
-const VERSION = "2.11.1";
+// Одноразовый графт-пакет восстановления форвард-монитора (инцидент 2026-07-21): криптографически
+// провалидированный архив доинцидентной цепи + параметры генезиса новой эры. Файл статичен и
+// закоммичен; после первой успешной склейки graftForwardMonitorV1 становится инертной (идемпотентность
+// по started_at). Отсутствие файла — штатный режим без графта.
+let MONITOR_GRAFT_V1=null;
+try{MONITOR_GRAFT_V1=JSON.parse(readFileSync(new URL("../docs/monitor-graft-v1.json",import.meta.url),"utf8"));}catch{}
+import { boundedPublicHistoryV1, compactHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
+
+const VERSION = "2.12.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -66,6 +73,7 @@ const SOURCE_URLS = {
   blockchain: "https://www.blockchain.com/explorer/api/charts_api",
   blockstream: "https://github.com/Blockstream/esplora/blob/master/API.md",
   bitcoindata: "https://bitcoin-data.com/bguser/free-features.html",
+  fiscaldata: "https://fiscaldata.treasury.gov/api-documentation/",
   sosovalue: "https://sosovalue.gitbook.io/soso-value-api-doc",
 };
 const SOURCE_URL_GROUPS = {
@@ -113,6 +121,12 @@ const FRED_SERIES = {
   VIXCLS: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   VXVCLS: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   NASDAQ100: { limit: 1200, ttl: 7 * DAY, release: "daily" },
+  // Теневой слой (shadow:true): карточки без голоса, отказ источника НЕ деградирует quality решения.
+  // ECBASSETSW — недельный; JPNASSETS — МЕСЯЧНЫЙ пакет (штатная старость до ~6 недель); DEX* — дневные курсы.
+  ECBASSETSW: { limit: 260, ttl: 14 * DAY, release: "weekly-batch", shadow: true },
+  JPNASSETS: { limit: 120, ttl: 70 * DAY, release: "monthly-batch", shadow: true },
+  DEXUSEU: { limit: 1200, ttl: 7 * DAY, release: "daily", shadow: true },
+  DEXJPUS: { limit: 1200, ttl: 7 * DAY, release: "daily", shadow: true },
 };
 
 const CM_METRICS = [
@@ -208,6 +222,19 @@ let previous=null;
 for(const path of [PREVIOUS_STATE,PREVIOUS_PUBLIC]){
   try{if(path&&existsSync(path)){previous=JSON.parse(readFileSync(path,"utf8"));break;}}catch{}
 }
+// Испорченная строка режима в переносимом состоянии (битый кэш, ручная правка) публиковалась бы
+// ДОСЛОВНО — вплоть до вердикта «undefined · …» на все 48 часов удержания. Неизвестные метки
+// вычищаются ДО гистерезиса; вычищенная нога ведёт себя как холодный старт. Санация здесь,
+// у загрузки состояния: stabilizeCore лежит в POLICY-LOCK и меняться не должен.
+{
+  const KNOWN_REGIMES=new Set(["constructive","unconfirmed_positive","transition","deteriorating","defensive","insufficient","emergency","spot_led","balanced","overheated_supported","fragile","demand_break","deleveraging","short_squeeze"]);
+  if(previous?.regime)for(const horizon of ["strategic","tactical"])if(previous.regime[horizon]!=null&&!KNOWN_REGIMES.has(previous.regime[horizon]))delete previous.regime[horizon];
+  if(previous?.regime_meta)for(const horizon of ["strategic","tactical"]){
+    const meta=previous.regime_meta[horizon];
+    if(!meta||typeof meta!=="object")continue;
+    for(const key of ["state","candidate","anchor"])if(meta[key]!=null&&!KNOWN_REGIMES.has(meta[key]))delete meta[key];
+  }
+}
 
 function retryAfterMs(value,now=Date.now()){
   if(value==null||value==="")return null;
@@ -274,7 +301,7 @@ function oldDataset(key,ttl,maxObservedAge=ttl){
   const fetched=new Date(old.fetched_at||previous.generated_at||0).getTime();
   return NOW-fetched<=ttl&&validObservationAge(old,maxObservedAge)?old:null;
 }
-async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl}={}){
+async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true}={}){
   try{
     const payload=await loader();
     const packet=payload?.data!==undefined&&payload?.observed_at?payload:{data:payload,observed_at:iso(NOW)};
@@ -292,6 +319,9 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
     if(old){const u=old.source_url||SOURCE_URLS[source],urls=uniqueHttps(old.source_urls?.length?old.source_urls:[u]);datasets[key]=old;sourceStates[key]={state:"stale",source:old.source||source,url:u,urls,observed_at:old.observed_at,fetched_at:old.fetched_at,error:String(e.message||e)};}
     else {const u=SOURCE_URLS[source];sourceStates[key]={state:"fail",source,url:u,urls:uniqueHttps([u]),observed_at:null,fetched_at:null,error:String(e.message||e)};}
   }
+  // Теневые источники (vote:false-слой) наблюдаемы в диагностике, но их отказ не имеет права
+  // деградировать quality РЕШЕНИЯ: решающее правило их не читает (см. buildDecisionRecordV1).
+  if(!decisionRelevant&&sourceStates[key])sourceStates[key].decision_relevant=false;
 }
 function data(key){return datasets[key]?.data;}
 function obs(key){return datasets[key]?.observed_at||null;}
@@ -742,6 +772,68 @@ function parseCoinbaseCandles(rows){
     .map(x=>({t:Date.parse(dayKey(x.t)+"T00:00:00Z"),v:x.v,volume:finite(x.volume)?x.volume:null}))
     .filter(x=>finite(x.t));
 }
+// ===== ТЕНЕВОЙ СЛОЙ (аудит 2026-07-21, policy_v2-кандидаты) =====
+// Карточки без голоса: копят форвард-доказательства по POLICY.md и не участвуют в решении.
+
+// Дневное закрытие TGA из Daily Treasury Statement (T+1). Голосующая нога семьи liquidity —
+// НЕДЕЛЬНОЕ СРЕДНЕЕ (WTREGEN) со штатной старостью до ~12 дней; дневной ряд опережает её на
+// эпизодах резких движений счёта (налоговые даты, восстановление после потолка долга).
+async function fetchTgaDaily(){
+  const filter=encodeURIComponent("account_type:eq:Treasury General Account (TGA) Closing Balance");
+  const u=`https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/dts/operating_cash_balance?fields=record_date,account_type,close_today_bal,open_today_bal&filter=${filter}&sort=-record_date&page[size]=600`;
+  const payload=await request(u,{tries:2});
+  // Квирк DTS: у строк «TGA Closing Balance» значение лежит в open_today_bal, а close_today_bal —
+  // строка "null" (проверено живым запросом 2026-07-21: open_today_bal=815418 = $815.4 млрд).
+  const rows=(payload?.data||[]).map(r=>{
+    const raw=[r.close_today_bal,r.open_today_bal].map(Number).find(finite);
+    return{t:Date.parse(String(r.record_date)+"T00:00:00Z"),v:raw/1000};
+  }).filter(r=>finite(r.t)&&finite(r.v)&&r.v>0&&r.v<3000).sort((a,b)=>a.t-b.t);
+  if(rows.length<100)throw new Error(`fiscaldata TGA too short: ${rows.length}`);
+  return{data:rows,observed_at:iso(last(rows).t),source:"Treasury FiscalData",source_url:SOURCE_URLS.fiscaldata,source_urls:[SOURCE_URLS.fiscaldata]};
+}
+
+// Когортный ончейн-слой BGeometrics (провайдер уже служит резервом MVRV): себестоимость
+// краткосрочных держателей и реализованный P&L. Значения приходят СТРОКАМИ — обязателен Number().
+// Запросы СТРОГО последовательные с паузой: три конкурентных запроса теневого слоя съедали
+// free-tier-лимит хоста и валили ГОЛОСУЮЩИЙ MVRV-fallback того же прогона (ревью 2026-07-21).
+async function fetchSthOnchain(){
+  const grab=async path=>{
+    const rows=await request(`https://bitcoin-data.com/v1/${path}`,{tries:2});
+    if(!Array.isArray(rows))throw new Error(`${path}: not an array`);
+    const out=rows.map(r=>{
+      const dateRaw=String(r.d||r.day||r.date||"");
+      const t=Date.parse(dateRaw.includes("T")?dateRaw:dateRaw+"T00:00:00Z");
+      const v=Number(Object.entries(r).find(([k,x])=>!["d","day","date","unixTs","ts","time"].includes(k)&&finite(x))?.[1]);
+      return{t,v};
+    }).filter(r=>finite(r.t)&&finite(r.v)&&r.v>0).sort((a,b)=>a.t-b.t);
+    if(out.length<180)throw new Error(`${path} too short: ${out.length}`);
+    return out;
+  };
+  const sthRp=await grab("sth-realized-price");await sleep(900);
+  const sopr=await grab("sopr");await sleep(900);
+  const lthSopr=await grab("lth-sopr");
+  return{data:{sth_rp:sthRp,sopr,lth_sopr:lthSopr},observed_at:iso(Math.max(last(sthRp).t,last(sopr).t,last(lthSopr).t)),source:"bitcoin-data.com",source_url:SOURCE_URLS.bitcoindata,source_urls:[SOURCE_URLS.bitcoindata]};
+}
+
+// Ось store-of-value: золото через PAXG-USD на уже используемой Coinbase Exchange (трекинг фьючерса
+// ~0.3%). FRED больше не отдаёт LBMA-ряды, Stooq закрыт JS-challenge — это единственный живой
+// бесплатный маршрут из Actions-раннера.
+async function fetchPaxgHistory(days=420){
+  const rows=[],chunk=250*DAY;
+  for(let a=NOW-days*DAY;a<NOW;a+=chunk){
+    const b=Math.min(NOW,a+chunk);
+    const u=`https://api.exchange.coinbase.com/products/PAXG-USD/candles?granularity=86400&start=${new Date(a).toISOString()}&end=${new Date(b).toISOString()}`;
+    const payload=await request(u,{tries:2});
+    for(const c of payload||[])if(Array.isArray(c)&&c.length>=5){const t=Number(c[0])*1000,close=Number(c[4]);if(finite(t)&&finite(close)&&close>500&&close<20000)rows.push({t,v:close});}
+    await sleep(150);
+  }
+  const byDay=new Map();for(const r of rows.sort((a,b)=>a.t-b.t))byDay.set(dayKey(r.t),r);
+  const out=[...byDay.values()].sort((a,b)=>a.t-b.t);
+  if(out.length<200)throw new Error(`PAXG history too short: ${out.length}`);
+  return{data:out,observed_at:iso(last(out).t),source:"Coinbase Exchange",source_url:SOURCE_URLS.coinbase_candles,source_urls:[SOURCE_URLS.coinbase_candles]};
+}
+// ===== конец теневого слоя =====
+
 async function fetchCoinbaseHistory(days=1825){
   const byDay=new Map(),chunk=280*DAY;
   for(let a=NOW-days*DAY;a<NOW;a+=chunk){
@@ -908,9 +1000,18 @@ async function fetchDerivatives(){
   const ex=opt.length?Math.min(...opt.map(x=>x.expiry)):null,near=opt.filter(x=>x.expiry===ex),under=median(near.map(x=>x.underlying_price));
   const pIv=under?median(near.filter(x=>x.type==="P"&&x.strike/under>.84&&x.strike/under<.94).map(x=>x.mark_iv)):null;
   const cIv=under?median(near.filter(x=>x.type==="C"&&x.strike/under>1.06&&x.strike/under<1.16).map(x=>x.mark_iv)):null;
+  // Теневой слой: терм-структура IV и put/call OI из ТОГО ЖЕ ответа опционов — ноль новых запросов.
+  // Бэквордация IV (ближний ATM дороже дальнего) отличает «дорогая вола из-за события сейчас» от
+  // «хронически высокая», дополняя УРОВЕНЬ DVOL формой поверхности. Не голосует (corr с DVOL).
+  const optAll=options.map(x=>{const p=String(x.instrument_name||"").split("-");return{expiry:expiryFromName("BTC-"+p[1]),strike:Number(p[2]),type:p[3],iv:Number(x.mark_iv),under:Number(x.underlying_price),oi:num(x.open_interest)||0};}).filter(x=>finite(x.expiry)&&finite(x.iv)&&finite(x.under)&&x.under>0);
+  const atmBand=x=>x.strike/x.under>.95&&x.strike/x.under<1.05;
+  const nearAtm=optAll.filter(x=>x.expiry>NOW+14*DAY&&x.expiry<=NOW+35*DAY&&atmBand(x)&&x.oi>=1);
+  const farAtm=optAll.filter(x=>x.expiry>NOW+55*DAY&&x.expiry<=NOW+130*DAY&&atmBand(x)&&x.oi>=1);
+  const ivNear=nearAtm.length?median(nearAtm.map(x=>x.iv)):null,ivFar=farAtm.length?median(farAtm.map(x=>x.iv)):null;
+  const putOi=optAll.filter(x=>x.type==="P").reduce((a,x)=>a+x.oi,0),callOi=optAll.filter(x=>x.type==="C").reduce((a,x)=>a+x.oi,0);
   const times=[der.timestamp,okf.ts,oko.ts,Date.parse(kf.serverTime||"")].map(Number).filter(t=>Number.isFinite(t)&&t>Date.UTC(2020,0,1)&&t<NOW+HOUR);
   const observedAt=times.length?iso(Math.min(...times)):iso(NOW);
-  return {data:{funding,basis,basisSource,dvol:last(dvolSeries)?.v??null,dvolSeries,skew:finite(pIv)&&finite(cIv)?pIv-cIv:null,optionExpiry:ex?iso(ex):null,components:tasks.map(x=>({name:x.label,ok:x.ok}))},observed_at:observedAt,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,partial:errors.length>0,errors};
+  return {data:{funding,basis,basisSource,dvol:last(dvolSeries)?.v??null,dvolSeries,skew:finite(pIv)&&finite(cIv)?pIv-cIv:null,optionExpiry:ex?iso(ex):null,iv_term:{near:ivNear,far:ivFar,spread:finite(ivNear)&&finite(ivFar)?ivNear-ivFar:null},putcall_oi:callOi>0?putOi/callOi:null,components:tasks.map(x=>({name:x.label,ok:x.ok}))},observed_at:observedAt,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,partial:errors.length>0,errors};
 }
 async function fetchSpot(){
   const tasks=await Promise.all([
@@ -954,7 +1055,7 @@ async function collect(){
   const fredEntries=Object.entries(FRED_SERIES);
   for(let i=0;i<fredEntries.length;i+=4){
     await Promise.all(fredEntries.slice(i,i+4).map(async([id,cfg])=>{
-      await loadDataset("fred_"+id,"fred",cfg.ttl,()=>fetchFredSeries(id,cfg),x=>x?.length>20,{maxObservedAge:cfg.ttl});
+      await loadDataset("fred_"+id,"fred",cfg.ttl,()=>fetchFredSeries(id,cfg),x=>x?.length>20,{maxObservedAge:cfg.ttl,decisionRelevant:!cfg.shadow});
     }));
   }
   await Promise.all([
@@ -972,7 +1073,13 @@ async function collect(){
     loadDataset("cftc","cftc",15*DAY,fetchCftc,x=>x?.length>20,{maxObservedAge:15*DAY}),
     loadDataset("derivatives","deribit",18*HOUR,fetchDerivatives,x=>x?.funding?.length>=1&&x.funding.filter(r=>finite(r.oiUsd)&&Number(r.oiUsd)>1e6&&Number(r.oiUsd)<1e12&&Math.abs(Number(r.rate8h))<.05).length>=1,{maxObservedAge:18*HOUR}),
     loadDataset("spot","coinbase",18*HOUR,fetchSpot,x=>["USD","USDT"].some(g=>quoteGroupPrices(x,g).length>=2),{maxObservedAge:18*HOUR}),
+    // Теневой слой: отказ любого из этих источников не деградирует quality решения.
+    loadDataset("tga_daily","fiscaldata",4*DAY,fetchTgaDaily,x=>x?.length>100,{maxObservedAge:6*DAY,decisionRelevant:false}),
+    loadDataset("gold","coinbase",4*DAY,fetchPaxgHistory,x=>x?.length>=200,{maxObservedAge:5*DAY,decisionRelevant:false}),
   ]);
+  // bitcoin-data.com — ПОСЛЕ основного пакета: голосующий MVRV-fallback (blockchain_onchain)
+  // ходит на тот же хост, и теневой слой не имеет права конкурировать с ним за free-tier-лимит.
+  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false});
 }
 
 function metric(def){return{
@@ -1375,12 +1482,98 @@ function stabilizeCore(candidate,prevState,prevMetaIn,now,{hard=false,fresh=fals
 }
 // POLICY-LOCK:hysteresis_v1:END
 
+// ===== ТЕНЕВОЙ СЛОЙ: 8 карточек без голоса (аудит 2026-07-21) =====
+// Живёт ВНЕ POLICY-LOCK:scoring_and_regimes_v1 сознательно: слой не голосует, не входит в детекторы
+// и не может менять решающее правило — его правки не требуют policy v2. Копит форвард-доказательства
+// по процедуре POLICY.md; отказ его источников не деградирует quality решения (decision_relevant:false).
+function buildShadowMetrics(){
+  const m=[],add=d=>m.push(metric(d));
+  const price=marketSeries("price"),priceLast=referencePrice();
+
+  // 1. Дневная TGA против недельной ноги семьи liquidity.
+  const tgaDailySeries=series(data("tga_daily")||[]);
+  const tgaLast=last(tgaDailySeries)?.v,tgaWeekly=last(fred("WTREGEN"))?.v;
+  const tgaGap=finite(tgaLast)&&finite(tgaWeekly)?tgaLast-tgaWeekly/1000:null;
+  add({id:"tga_daily",block:"macro",family:"liquidity",name:"TGA · дневное закрытие (T+1)",horizon:"short",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:tgaLast,value:finite(tgaLast)?`$${tgaLast.toFixed(0)} млрд`:"—",delta:finite(tgaGap)?`к недельной ноге ${tgaGap>=0?"+":""}${tgaGap.toFixed(0)} млрд`:"",note:"Дневное закрытие Казначейского счёта (Daily Treasury Statement, лаг T+1). Голосующая нога net-liquidity использует НЕДЕЛЬНОЕ СРЕДНЕЕ (WTREGEN) со штатной старостью до ~12 дней; большой разрыв означает, что семья ещё не увидела движение счёта. Теневой кандидат на замену ноги в policy v2 после форвард-наблюдения.",score:null,source:"fiscaldata",...sourceMeta("tga_daily"),series:tgaDailySeries.slice(-180)});
+
+  // 2. G3-ликвидность: ФРС + ЕЦБ + Банк Японии в долларах.
+  const ecbSeries=fred("ECBASSETSW"),jpSeries=fred("JPNASSETS"),eurSeries=fred("DEXUSEU"),jpySeries=fred("DEXJPUS"),walclSeries=fred("WALCL");
+  const g3Series=ecbSeries.map(p=>{
+    const eur=nearestAtOrBefore(eurSeries,p.t),jp=nearestAtOrBefore(jpSeries,p.t),jpy=nearestAtOrBefore(jpySeries,p.t),w=nearestAtOrBefore(walclSeries,p.t);
+    if(!eur||!jp||!jpy||!w||!(jpy.v>0))return null;
+    // WALCL млн $ и ECBASSETSW млн EUR -> трлн: /1e6; JPNASSETS в 100 млн иен -> иены ×1e8, в $ по DEXJPUS, -> трлн /1e12.
+    return{t:p.t,v:w.v/1e6+p.v*eur.v/1e6+jp.v*1e8/jpy.v/1e12};
+  }).filter(Boolean);
+  const g3Last=last(g3Series)?.v;
+  const g3Base13=nearestAtOrBefore(g3Series,(last(g3Series)?.t??NOW)-91*DAY)?.v;
+  const g3_13w=finite(g3Last)&&finite(g3Base13)?pct(g3Last,g3Base13):null;
+  add({id:"g3_liquidity",block:"macro",family:"liquidity",name:"G3-ликвидность · ФРС+ЕЦБ+BoJ",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:g3Last,value:finite(g3Last)?`$${g3Last.toFixed(1)} трлн`:"—",delta:finite(g3_13w)?`13н ${g3_13w>=0?"+":""}${g3_13w.toFixed(1)}%`:"",note:"Суммарные балансы трёх ЦБ в долларах. Голосующая нога считает только США и сама признаёт эту слепоту; G3-слой ловит эпизоды «США сжимаются, мир — нет». Баланс BoJ — месячный пакет, наблюдение штатно старше остальных ног.",score:null,source:"fred",source_url:fredSeriesUrl("ECBASSETSW"),source_urls:links(fredSeriesUrl("ECBASSETSW"),fredSeriesUrl("JPNASSETS"),SOURCE_URLS.fred),...sourceMetaMany(["fred_ECBASSETSW","fred_JPNASSETS","fred_WALCL"]),series:g3Series.slice(-180)});
+
+  // 3. Золотая ось: corr BTC ↔ PAXG.
+  const goldSeries=series(data("gold")||[]);
+  const goldByDay=new Map(goldSeries.map(x=>[dayKey(x.t),x.v]));
+  const goldPairs=[];for(const pt of price.slice(-70)){const g=goldByDay.get(dayKey(pt.t));if(finite(g)&&g>0&&pt.v>0)goldPairs.push([pt.v,g]);}
+  const goldBtcRet=[],goldRet=[];for(let i=1;i<goldPairs.length;i++){goldBtcRet.push(Math.log(goldPairs[i][0]/goldPairs[i-1][0]));goldRet.push(Math.log(goldPairs[i][1]/goldPairs[i-1][1]));}
+  const goldCorr=corr(goldBtcRet.slice(-60),goldRet.slice(-60));
+  const goldRel30=(()=>{const pb=priorByDays(price,30)?.v,pg=priorByDays(goldSeries,30)?.v,gl=last(goldSeries)?.v;return finite(pb)&&finite(pg)&&finite(gl)&&finite(priceLast)&&pb>0&&pg>0?pct(priceLast,pb)-pct(gl,pg):null;})();
+  add({id:"gold_axis",block:"macro",family:"macro_lens",name:"BTC ↔ золото · режим корреляции",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:goldCorr,value:finite(goldCorr)?goldCorr.toFixed(2):"—",delta:finite(goldRel30)?`относительная сила 30д ${goldRel30>=0?"+":""}${goldRel30.toFixed(1)} п.п.`:"",note:"Вторая корреляционная линза к оси Nasdaq: торгуется ли BTC как золото (store-of-value) или как риск-актив. Золото — PAXG-USD на Coinbase (трекинг фьючерса ~0.3%); FRED и Stooq этот ряд бесплатно больше не отдают.",score:null,source:"Coinbase Exchange",source_url:SOURCE_URLS.coinbase_candles,source_urls:links(SOURCE_URLS.coinbase_candles,SOURCE_URLS.fred),...sourceMetaMany(["gold","market"]),series:goldSeries.slice(-180)});
+
+  // 4. Себестоимость краткосрочных держателей.
+  const sthData=data("sth_onchain")||{};
+  const sthRpSeries=series(sthData.sth_rp||[]);
+  const sthRpLast=last(sthRpSeries)?.v;
+  const sthMvrv=finite(priceLast)&&finite(sthRpLast)&&sthRpLast>0?priceLast/sthRpLast:null;
+  add({id:"sth_pricing",block:"cycle",family:"valuation",name:"Себестоимость STH · STH-MVRV",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:sthMvrv,value:finite(sthMvrv)?sthMvrv.toFixed(2):"—",delta:finite(sthRpLast)?`STH realized price $${Math.round(sthRpLast).toLocaleString("en-US")}`:"",note:"Цена относительно себестоимости краткосрочных держателей — практический водораздел режимов: в восходящем уровень выкупается, в нисходящем служит сопротивлением. Дополняет 4-летний перцентиль агрегатного MVRV более быстрой когортной осью. Из задокументированных exclusions — принят в теневой слой решением владельца.",score:null,source:"bitcoin-data.com",source_url:SOURCE_URLS.bitcoindata,...sourceMeta("sth_onchain"),series:sthRpSeries.slice(-180)});
+
+  // 5. Реализованный P&L: SOPR и LTH-SOPR.
+  const soprSeries=series(sthData.sopr||[]),lthSoprSeries=series(sthData.lth_sopr||[]);
+  const sopr7=soprSeries.length>=7?mean(soprSeries.slice(-7).map(x=>x.v)):null;
+  const lthLast=last(lthSoprSeries)?.v;
+  add({id:"realized_pnl",block:"cycle",family:"valuation",name:"Реализованный P&L · SOPR",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:sopr7,value:finite(sopr7)?sopr7.toFixed(4):"—",delta:finite(lthLast)?`LTH-SOPR ${lthLast.toFixed(2)}`:"",note:"Продают ли монеты в прибыль или в убыток — прямое измерение того, что детекторы дистрибуции и восстановления проксируют косвенно: устойчивый SOPR<1 — капитуляция в процессе, возврат к 1 снизу — классический маркер её завершения; LTH-SOPR≫1 при высоком MVRV — раздача долгосрочных держателей. 7-дневное среднее.",score:null,source:"bitcoin-data.com",source_url:SOURCE_URLS.bitcoindata,...sourceMeta("sth_onchain"),series:soprSeries.slice(-180)});
+
+  // 6. Опционная структура: терм IV + put/call OI.
+  const derivData=data("derivatives")||{};
+  const ivTerm=derivData.iv_term||{};
+  add({id:"options_structure",block:"leverage",family:"volatility",name:"Опционная структура · терм IV",horizon:"short",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:finite(ivTerm.spread)?ivTerm.spread:null,value:finite(ivTerm.spread)?`${ivTerm.spread>=0?"+":""}${ivTerm.spread.toFixed(1)} п.п.`:"—",delta:finite(derivData.putcall_oi)?`put/call OI ${derivData.putcall_oi.toFixed(2)}`:"",note:"Ближняя ATM-IV минус дальняя из того же опционного ответа Deribit (ноль новых запросов). Бэквордация (плюс) — стресс «здесь и сейчас», контанго — обычный режим; отличает событийную дороговизну волы от хронической, которую уже меряет DVOL-перцентиль. Голоса не имеет из-за корреляции с DVOL.",score:null,source:"Deribit",source_url:SOURCE_URLS.deribit,...sourceMeta("derivatives"),series:[]});
+
+  // 7. Суточный сброс OI из собственной истории снимков.
+  const oiHistory=(previous?.history||[]).filter(h=>h?.raw?.oi_by_venue&&finite(Date.parse(h.t)));
+  const oiNowByVenue=Object.fromEntries((derivData.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
+  const oiDayAgo=oiHistory.filter(h=>{const t=Date.parse(h.t);return t<=NOW-22*HOUR&&t>=NOW-30*HOUR;}).at(-1);
+  const oi24=Object.keys(oiNowByVenue).length&&oiDayAgo?percentChangeCommonVenues(oiNowByVenue,oiDayAgo.raw.oi_by_venue):null;
+  const priceDay=finite(priceLast)?pct(priceLast,priorByDays(price,1)?.v):null;
+  add({id:"oi_purge_24h",block:"leverage",family:"oi",name:"OI · суточный сброс",horizon:"short",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:oi24,value:finite(oi24)?`${oi24>=0?"+":""}${oi24.toFixed(1)}% / 24ч`:"—",delta:finite(priceDay)?`цена ${priceDay>=0?"+":""}${priceDay.toFixed(1)}% / 24ч`:"",note:"Прокси каскада ликвидаций из собственной почасовой истории OI (агрегированные ликвидации бесплатно из CI недоступны). Резкое падение суммарного OI при падающей цене означает, что каскад СОСТОЯЛСЯ и плечо вымыто; голосующая семья смотрит 7-дневное окно и однодневный каскад размазывает.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,...sourceMeta("derivatives"),series:[]});
+
+  // 8. Hash ribbons: восстановительный крест SMA30/60 хешрейта.
+  const hrSeries=series(data("network")?.hashrate||[]);
+  const hrSma=n=>hrSeries.length>=n?mean(hrSeries.slice(-n).map(x=>x.v)):null;
+  const hr30=hrSma(30),hr60=hrSma(60);
+  let hrCrossDaysAgo=null;
+  for(let i=hrSeries.length-1;i>=60;i--){
+    if(NOW-hrSeries[i].t>150*DAY)break;
+    const upTo=hrSeries.slice(0,i+1),before=hrSeries.slice(0,i);
+    const a30=mean(upTo.slice(-30).map(x=>x.v)),a60=mean(upTo.slice(-60).map(x=>x.v));
+    const b30=mean(before.slice(-30).map(x=>x.v)),b60=mean(before.slice(-60).map(x=>x.v));
+    if(a30>=a60&&b30<b60){hrCrossDaysAgo=Math.round((NOW-hrSeries[i].t)/DAY);break;}
+  }
+  const hrRatio=finite(hr30)&&finite(hr60)&&hr60>0?hr30/hr60:null;
+  add({id:"hash_ribbons",block:"cycle",family:"network",name:"Hash ribbons · SMA30/60",horizon:"medium",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:hrRatio,value:finite(hrRatio)?`SMA30/60 ${hrRatio.toFixed(3)}`:"—",delta:hrCrossDaysAgo!=null&&finite(hrRatio)&&hrRatio>=1?`восстановительный крест ${hrCrossDaysAgo} дн назад`:(finite(hrRatio)&&hrRatio<1?"лента инвертирована · капитуляция майнеров":""),note:"Восстановительная сторона майнерской ноги: голосующая семья наказывает за падение хешрейта, но конец капитуляции (SMA30 пересекает SMA60 снизу вверх) не размечает. Окна 30/60 — канонические из литературы, НЕ калиброваны по истории (запрещено POLICY.md). Сигнал запаздывающий и известен рынку с 2019 — ожидания скромные.",score:null,source:"mempool",source_url:SOURCE_URLS.mempool,...sourceMeta("network"),series:hrSeries.slice(-180)});
+
+  return m;
+}
+// ===== конец теневого слоя =====
+
 function behaviors(s,t){
   const medium={constructive:"Базовая экспозиция режимно оправдана; добавления лучше делать ступенчато и не игнорировать тактический перегрев.",unconfirmed_positive:"Не наращивать экспозицию агрессивно: макро и цикл поддерживают рынок, но реальный маржинальный спрос недостаточен.",transition:"Сохранять умеренную экспозицию и ждать согласования потоков, макро и структуры предложения.",deteriorating:"Сократить риск новых добавлений, повысить запас ликвидности и требовать восстановления спроса перед увеличением позиции.",defensive:"Приоритет — сохранение капитала; увеличение экспозиции только после разворота потоков и восстановления ценовых опор.",insufficient:"Не делать вывод из панели: критические блоки покрыты недостаточно.",emergency:"Приоритет — контроль контрагентского и ликвидностного риска; обычный скоринг временно недействителен."}[s];
   const short={spot_led:"Краткосрочные добавления допустимы после обычных откатов, пока ETF/спот и чистое плечо подтверждают движение.",balanced:"Не форсировать вход: структура нейтральна, решения лучше привязывать к среднесрочному режиму.",overheated_supported:"Среднесрочную позицию не путать с новым входом: избегать погони за ценой и ждать очистки funding/OI.",fragile:"Новые добавления отложить; рынок уязвим к каскаду даже без изменения среднесрочной картины.",demand_break:"Маржинальный спрос сломан при спокойном плече: не покупать откаты и не ждать «очистки» — падению без плеча нечего очищать; дождаться стабилизации ETF-потоков и спот-премии.",deleveraging:"Тактически защитный режим: дождаться сброса OI, стабилизации funding и возвращения спот-поддержки.",short_squeeze:"Возможен резкий отскок, но он не является подтверждением нового среднесрочного бычьего режима.",insufficient:"Краткосрочный вывод недоступен из-за неполных данных.",emergency:"Не полагаться на обычные котировки и сигналы до восстановления паритета и синхронности площадок."}[t];
   return{medium,short};
 }
-function phase(s,t,detectors){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(detectors?.find(x=>x.id==="recovery")?.state==="good"&&["transition","deteriorating","defensive"].includes(s))return"Фаза 0 · капитуляция позади? восстановление подтверждается потоками";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["balanced","short_squeeze"].includes(t))return"Фаза 1 · конструктивный режим, тактика нейтральна";if(["transition","unconfirmed_positive"].includes(s)&&t==="spot_led")return"Фаза 1 → · спот ведёт, среднесрок ещё не подтвердил";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging","demand_break"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";return"Фаза перехода · сигналы не согласованы";}
+// Заголовок фазы обязан согласовываться с policy-слоем той же страницы: (1) сработавший macro_shock
+// сознательно блокирует recovery-лифт и пол 80% (applyStrategicDetectorPolicyV1) — объявлять
+// «капитуляция позади» при активном шоке значит противоречить вердикту и аллокации; (2) нейтральная
+// тактика при любом среднесроке — связная картина, а не «рассинхрон»: заглушка «сигналы не
+// согласованы» оставлена только действительно противоречивым парам (аудит 2026-07-21).
+function phase(s,t,detectors){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(detectors?.find(x=>x.id==="recovery")?.state==="good"&&detectors?.find(x=>x.id==="macro_shock")?.state!=="fired"&&["transition","deteriorating","defensive"].includes(s))return"Фаза 0 · капитуляция позади? восстановление подтверждается потоками";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["balanced","short_squeeze"].includes(t))return"Фаза 1 · конструктивный режим, тактика нейтральна";if(["transition","unconfirmed_positive"].includes(s)&&t==="spot_led")return"Фаза 1 → · спот ведёт, среднесрок ещё не подтвердил";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging","demand_break"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";if(t==="balanced"&&s==="deteriorating")return"Фаза 3 · среднесрок ухудшается, тактика нейтральна";if(t==="balanced"&&s==="transition")return"Фаза перехода · среднесрок неустойчив, тактика нейтральна";if(t==="balanced"&&s==="unconfirmed_positive")return"Фаза 1− · фон положительный, маржинальный спрос не подтвердил";if(["transition","deteriorating","unconfirmed_positive"].includes(s)&&t==="overheated_supported")return"Фаза 2 · перегрев плеча без поддержки среднесрока";return"Фаза перехода · сигналы не согласованы";}
 
 // Годится ли запись переносимой истории. Эталон — независимый дневной ряд цены (карта день->цена).
 // Отбраковка: непарсящаяся метка; демо-затравка (phase "демо"); нефинитные баллы; отсутствие цены
@@ -1404,7 +1597,9 @@ function compute(){
   // ИИ-разбор добросовестно «объяснял» обвал, которого не было. Самоочистка на следующем прогоне.
   const priceByDay=new Map(series(data("market")?.price||[]).map(x=>[dayKey(x.t),x.v]));
   if(Array.isArray(previous?.history))previous.history=previous.history.filter(h=>plausibleHistoryRecord(h,priceByDay));
-  const metrics=buildMetrics(),blocks={};
+  // Теневой слой конкатенируется ПОСЛЕ голосующих карточек: familyStats/детекторы фильтруют по
+  // vote, поэтому порядок и состав решающего контура не меняются.
+  const metrics=[...buildMetrics(),...buildShadowMetrics()],blocks={};
   for(const [k,b] of Object.entries(BLOCKS))blocks[k]={...b,strategic:familyStats(metrics,k,"strategic"),tactical:familyStats(metrics,k,"tactical")};
   const {detectors,hardOverride}=buildDetectors(metrics);
   let strategicRaw=0,sw=0,tacticalRaw=0,tw=0;
@@ -1431,7 +1626,17 @@ function compute(){
   const sourceVintages=buildSourceVintagesV1(datasets,sourceStates);sourceVintages.captured_at=iso(NOW);
   const revisionAlerts=sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages,previous?.datasets,datasets);
   const {decision,inputSummary}=buildDecisionRecordV1({generatedAt:iso(NOW),regime,regimeMeta:{strategic:stableS,tactical:stableT},metrics,blocks,detectors,scores,sourceVintages,revisionAlerts});
-  const monitoring=updateForwardMonitorV1({previousMonitor:previous?.monitoring,now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price")});
+  // Теневые события для policy-v2-кандидатов гистерезиса (аудит 2026-07-21): фиксируем, когда
+  // одиночный degraded-снимок стёр бы идущее 48ч-удержание повышения и когда risk-off подтвердился
+  // парой снимков с разносом <30 минут (бурст двойного планировщика). На решение не влияют.
+  const prevStrategicMeta=previous?.regime_meta?.strategic||{};
+  const prevGeneratedAt=Date.parse(previous?.generated_at||"");
+  const upgradeWasHeld=Boolean(prevStrategicMeta.hold_until&&prevStrategicMeta.candidate&&prevStrategicMeta.candidate!==prevStrategicMeta.state);
+  const shadowHysteresis={
+    upgrade_hold_reset_by_degraded:upgradeWasHeld&&["insufficient","emergency"].includes(stableS.candidate)?1:0,
+    risk_off_confirmed_under_30m:previous?.regime?.strategic&&stableS.state===stableS.candidate&&stableS.state!==previous.regime.strategic&&severity(stableS.state)<severity(previous.regime.strategic)&&finite(prevGeneratedAt)&&NOW-prevGeneratedAt<30*60_000?1:0,
+  };
+  const monitoring=updateForwardMonitorV1({previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta:{strategic:stableS,tactical:stableT},shadowHysteresis});
   // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
   // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
   // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.
@@ -1442,12 +1647,17 @@ function compute(){
   const oiByVenue=Object.fromEntries((data("derivatives")?.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
   const raw={oi_usd:sumOrNull(Object.values(oiByVenue)),oi_by_venue:oiByVenue,premium_bps:getM(metrics,"us_spot_premium")?.value_num,stable_supply:last(series(data("stablecoins")||[]))?.v,etf_20d:getM(metrics,"etf_20d")?.value_num};
   history.push(compactHistoryEntryV1({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,decision,raw}));
+  // Байтовый бюджет истории: строки растут по мере эволюции схемы, и счётный ретеншен один
+  // не удерживает проекцию файла под жёстким лимитом — публикация вставала намертво
+  // (падения 02:50–04:50 21.07, класс дедлока c913472). Жертвуем самыми старыми дневными строками.
+  const boundedHistory=boundedPublicHistoryV1(history);
+  if(boundedHistory.trimmed)console.error(`history byte budget: dropped ${boundedHistory.trimmed} oldest rows`);
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
     schema:3,version:VERSION,policy:policyMetadataV1(),policy_suite:policySuiteMetadataV1(),policy_components:{allocation:policyMetadataV1(),model:modelPolicyMetadataV1(),execution:executionPolicyMetadataV1()},generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
     regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
-    sources:sourceStates,source_vintages:sourceVintages,source_revision_alerts:revisionAlerts,monitoring,history,datasets,
+    sources:sourceStates,source_vintages:sourceVintages,source_revision_alerts:revisionAlerts,monitoring,history:boundedHistory.history,datasets,
     methodology:{
       indicator_scale:"−2…+2; числовые баллы вторичны относительно гейтов",
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
@@ -1460,7 +1670,8 @@ function compute(){
       model_policy:`${MODEL_POLICY_V1.id}; decision sections locked by SHA-256`,
       point_in_time:"forward evidence stores hash commitments plus exact daily decision inputs; they verify recorded inputs and reproduce the allocation, but the public snapshot does not retain full raw provider payloads",
       forward_monitoring:"policy v1, previous policy and simple benchmarks are observed prospectively; monitoring never recalibrates live thresholds",
-      exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
+      exclusions:["NUPL and labelled cohort metrics (near-monotone transform of MVRV — would triple-count valuation)","liquidation heatmaps and aggregated liquidations (no reliable free source from CI)","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
+      shadow_context:"Non-voting shadow cards (vote:false, score:null) accumulate forward evidence for a possible policy v2 per POLICY.md: daily TGA, G3 central-bank liquidity, BTC-gold correlation, STH cost basis, SOPR/LTH-SOPR, IV term structure with put/call OI, 24h OI purge, hash-ribbon recovery cross. They never vote, never enter detectors, and their source failures never degrade decision quality (decision_relevant:false). STH/SOPR moved here from exclusions by owner decision 2026-07-21.",
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),
       tactical_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.tacticalWeight])),
     }
@@ -1476,7 +1687,7 @@ function atomicJson(path,value){
   renameSync(temp,path);
 }
 
-if(import.meta.url===pathToFileURL(process.argv[1]).href){
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   await collect();
   const snapshot=compute();
   const publicSnapshot={...snapshot,history:(snapshot.history||[]).map(({raw,...h})=>h)};

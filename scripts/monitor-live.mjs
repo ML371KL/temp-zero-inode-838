@@ -4,7 +4,7 @@ import { allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
-import { policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
+import { policySuiteDigestV1, sha256, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
 
 const DEFAULT_URL="https://ml371kl.github.io/temp-zero-inode-838/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
@@ -30,9 +30,11 @@ export async function validatePublishedAssetsV1(snapshotUrl,fetchImpl=fetch){
 export function validateSnapshotV1(snapshot,now=Date.now()){
   const issues=[];
   if(snapshot?.schema!==3)issues.push(`schema:${snapshot?.schema}`);
-  if(snapshot?.version!==PACKAGE_VERSION)issues.push(`snapshot_version_mismatch:${snapshot?.version||"missing"}:${PACKAGE_VERSION}`);
   const generated=Date.parse(snapshot?.generated_at||"");
   const ageHours=(now-generated)/36e5,maxAge=MODEL_POLICY_V1.forward_monitoring.operational_pause.snapshot_stale_hours;
+  // Окно релиза: бамп версии в main опережает переопубликование страницы на один цикл коллектора.
+  // Свежий рассинхрон версий — штатная гонка, а не инцидент; протухший — реальная проблема.
+  if(snapshot?.version!==PACKAGE_VERSION&&!(ageHours<=1.5))issues.push(`snapshot_version_mismatch:${snapshot?.version||"missing"}:${PACKAGE_VERSION}`);
   const actionGate=evaluateActionGateV1({generatedAt:snapshot?.generated_at,now,staleLimitHours:maxAge,decision:snapshot?.decision,operationalStatus:snapshot?.monitoring?.health?.operational_status});
   if(actionGate.code==="time_invalid")issues.push("generated_at_invalid");
   else if(actionGate.code==="snapshot_in_future")issues.push("generated_at_in_future");
@@ -55,7 +57,12 @@ export function validateSnapshotV1(snapshot,now=Date.now()){
   if(snapshot?.monitoring?.health?.operational_status!=="healthy")issues.push(`forward_monitor_not_healthy:${(snapshot?.monitoring?.health?.operational_issues||[]).join(",")}`);
   const lastLog=snapshot?.monitoring?.decision_log?.at(-1);
   if(!lastLog||lastLog.decision_hash!==d?.decision_hash){issues.push("decision_log_missing_or_stale");}
-  else{const copy={...lastLog};delete copy.log_hash;if(lastLog.log_hash!==sha256(copy))issues.push("decision_log_hash_mismatch");}
+  else{
+    // «Append-only» обязан проверяться по ВСЕЙ retained-цепи: валидатор одной последней записи
+    // пропускал переписывание, усечение и полную замену прошлого (подтверждено мутациями в аудите).
+    const chain=verifyDecisionLogChainV1(snapshot.monitoring.decision_log);
+    if(!chain.ok)issues.push(`decision_log_chain_invalid:${chain.issues.slice(0,3).join("|")}`);
+  }
   const vintage=snapshot?.source_vintages;
   if(!vintage?.sources||vintage.contract_sha256!==sha256(vintage.sources))issues.push("source_vintage_contract_invalid");
   return{ok:issues.length===0,checked_at:new Date(now).toISOString(),generated_at:snapshot?.generated_at||null,age_hours:Number.isFinite(ageHours)?ageHours:null,issues,decision_hash:d?.decision_hash||null};
@@ -84,10 +91,47 @@ async function syncAlert(result){
   }
 }
 
+// Регресс started_at против опорной копии = потеря состояния монитора (класс инцидента 2026-07-21:
+// молчаливый генезис уничтожил 58-записный журнал, и ни одна проверка этого не заметила). Опора —
+// последний закоммиченный docs/snapshot.json из checkout самого сторожа: живой снимок может быть
+// только РАВЕН ему или ПРОДОЛЖАТЬ его цепь, но никогда — начинать более молодую.
+export function monitorResetIssues(liveMonitoring,referenceMonitoring){
+  const issues=[];
+  const liveStarted=Date.parse(liveMonitoring?.started_at||""),refStarted=Date.parse(referenceMonitoring?.started_at||"");
+  if(referenceMonitoring&&!liveMonitoring){issues.push("monitor_state_lost");return issues;}
+  // Эталон НОВЕЕ живой страницы = окно деплоя (свежий коммит ещё не раздан Pages/CDN), а не сброс:
+  // настоящая молчаливая потеря состояния всегда даёт live.updated_at >= reference.updated_at.
+  // Без этого гарда первый же тик сторожа после пуша графта открывал ложный инцидент (ревью 2026-07-21).
+  const liveUpdated=Date.parse(liveMonitoring?.updated_at||""),refUpdated=Date.parse(referenceMonitoring?.updated_at||"");
+  if(Number.isFinite(liveUpdated)&&Number.isFinite(refUpdated)&&refUpdated>liveUpdated)return issues;
+  if(Number.isFinite(liveStarted)&&Number.isFinite(refStarted)&&liveStarted>refStarted)issues.push(`monitor_state_reset:${liveMonitoring.started_at}>${referenceMonitoring.started_at}`);
+  const freshReset=(liveMonitoring?.reset_events||[]).at(-1);
+  if(freshReset&&Date.now()-Date.parse(freshReset.t)<26*36e5)issues.push(`monitor_reset_event:${freshReset.t}:${freshReset.reason}`);
+  // Непрерывность append-only между прогонами: голова опорной цепи обязана присутствовать в живой
+  // (по log_hash либо по original_log_hash после явного графта-рестейтмента) — если её время всё ещё
+  // внутри retained-окна живого лога. Отсутствие = усечение или переписывание прошлого.
+  const referenceHead=(referenceMonitoring?.decision_log||[]).at(-1);
+  const liveLog=liveMonitoring?.decision_log||[];
+  if(referenceHead&&liveLog.length){
+    const known=new Set(liveLog.flatMap(x=>[x.log_hash,x.original_log_hash].filter(Boolean)));
+    const windowCovers=Date.parse(liveLog[0].t||"")<=Date.parse(referenceHead.t||"");
+    if(windowCovers&&!known.has(referenceHead.log_hash))issues.push(`decision_log_history_rewritten:${referenceHead.t}`);
+  }
+  return issues;
+}
+
 async function main(){
   const snapshotUrl=process.env.SNAPSHOT_URL||DEFAULT_URL;
   const snapshot=process.env.SNAPSHOT_FILE?JSON.parse(readFileSync(process.env.SNAPSHOT_FILE,"utf8")):await fetch(snapshotUrl,{headers:{"cache-control":"no-cache"}}).then(async r=>{if(!r.ok)throw new Error(`snapshot HTTP ${r.status}`);return r.json()});
   const result=validateSnapshotV1(snapshot);
+  if(!process.env.SNAPSHOT_FILE||process.env.MONITOR_REPO_SNAPSHOT){
+    try{
+      const referencePath=process.env.MONITOR_REPO_SNAPSHOT||new URL("../docs/snapshot.json",import.meta.url);
+      const reference=JSON.parse(readFileSync(referencePath,"utf8"));
+      result.issues.push(...monitorResetIssues(snapshot?.monitoring,reference?.monitoring));
+      result.ok=result.issues.length===0;
+    }catch{}
+  }
   if(!process.env.SNAPSHOT_FILE||process.env.DASHBOARD_BASE_URL){
     const assets=await validatePublishedAssetsV1(process.env.DASHBOARD_BASE_URL?new URL("snapshot.json",process.env.DASHBOARD_BASE_URL).href:snapshotUrl);
     result.asset_checks=assets.checked_assets;result.issues.push(...assets.issues);result.ok=result.issues.length===0;

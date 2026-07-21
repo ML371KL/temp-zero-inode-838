@@ -43,6 +43,9 @@ const sourceMaxAgeH={
   fred_DGS2:24*7,fred_DGS10:24*7,fred_DTWEXBGS:24*14,fred_BAMLH0A0HYM2:24*7,
   fred_VIXCLS:24*7,fred_VXVCLS:24*7,fred_NASDAQ100:24*7,fred_DTB3:24*7,
   coinmetrics:24*4,blockchain_onchain:24*4,market:24*4,network:24*4,etf:24*7,stablecoins:24*4,pegs:18,cftc:24*15,derivatives:18,spot:18,
+  // Теневой слой (vote:false): свежесть проверяется так же строго, но отказ не деградирует решение.
+  fred_ECBASSETSW:24*14,fred_JPNASSETS:24*70,fred_DEXUSEU:24*7,fred_DEXJPUS:24*7,
+  tga_daily:24*6,sth_onchain:24*5,gold:24*5,
 };
 
 if(s.schema!==3)fail.push("schema must be 3");
@@ -127,7 +130,10 @@ for(const m of s.metrics||[]){
     if(m.score===null)warn.push(`voting metric unavailable:${m.id}`);
     if(m.stale===true)warn.push(`voting metric stale/partial:${m.id}`);
   }
-  if(forbidden.test(`${m.id} ${m.name}`))fail.push(`forbidden/research metric:${m.id}`);
+  // Исследовательские метрики запрещены В РЕШАЮЩЕМ КОНТУРЕ. Решением владельца (2026-07-21,
+  // «бери в работу все пункты» по предложениям аудита) STH/SOPR допущены в ТЕНЕВОЙ слой:
+  // строго vote:false и score:null — карточка-контекст, копящая форвард-доказательства для policy v2.
+  if(forbidden.test(`${m.id} ${m.name}`)&&(m.vote||m.score!=null))fail.push(`forbidden/research metric in the decision path:${m.id}`);
   if(m.observed_at&&!isDate(m.observed_at))fail.push(`bad observed_at:${m.id}`);
   if(m.source_url&&!/^https:\/\//.test(m.source_url))fail.push(`non-https source:${m.id}`);
   if(!Array.isArray(m.source_urls)||!m.source_urls.length||m.source_urls.some(u=>!/^https:\/\//.test(u)))fail.push(`bad source_urls:${m.id}`);

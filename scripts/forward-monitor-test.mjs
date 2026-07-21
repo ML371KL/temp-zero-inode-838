@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { POLICY_V1, allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
-import { buildDecisionRecordV1, buildSourceVintagesV1, sha256, sourceRevisionAlertsV1, treasuryBillDiscountToEffectiveAnnualPct, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
-import { validatePublishedAssetsV1, validateSnapshotV1 } from "./monitor-live.mjs";
+import { buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, previousPolicyTargetV1, sha256, sourceRevisionAlertsV1, treasuryBillDiscountToEffectiveAnnualPct, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
+import { monitorResetIssues, validatePublishedAssetsV1, validateSnapshotV1 } from "./monitor-live.mjs";
 
 const generatedAt="2026-07-19T00:00:00.000Z";
 const sourceStates={market:{state:"ok",source:"fixture",observed_at:generatedAt,fetched_at:generatedAt}};
@@ -148,4 +148,74 @@ assert.deepEqual((await validatePublishedAssetsV1("https://example.test/dashboar
 const brokenFetch=async url=>new Response(String(url).endsWith("index.html")?"broken":remoteAssets[String(url)]??"",{status:200});
 assert.ok((await validatePublishedAssetsV1("https://example.test/dashboard/snapshot.json",brokenFetch)).issues.some(x=>x.startsWith("asset_content_mismatch:index.html")),"a broken published frontend must trip the external monitor");
 
-console.log("Forward monitor scenarios OK: server decision, costs, shadows, vintages, hash chain, live alarm");
+// Shadow v0: оверлеи не применяются в emergency (замороженная семантика v0, backtest/patch6.py).
+assert.equal(previousPolicyTargetV1({strategic:"emergency",recoveryState:"good",macroShockState:"calm",mvrvPercentile:5}),0,"v0 shadow must not lift emergency with recovery/capitulation floors");
+assert.equal(previousPolicyTargetV1({strategic:"defensive",recoveryState:"good",macroShockState:"calm",mvrvPercentile:50}),70,"v0 recovery floor outside emergency must stay intact");
+assert.equal(previousPolicyTargetV1({strategic:"insufficient",recoveryState:"calm",macroShockState:"calm",mvrvPercentile:50}),null);
+
+// input_hash обязан воспроизводиться из ОПУБЛИКОВАННОЙ формы даже при hold_until:undefined в метаданных.
+const holdMeta={strategic:{state:"defensive",candidate:"transition",count:3,since:generatedAt,hold_until:undefined},tactical:{state:"balanced",candidate:"balanced",count:9,since:generatedAt,hold_until:undefined}};
+const holdBuilt=buildDecisionRecordV1({generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:holdMeta,metrics,blocks,detectors:[],scores,sourceVintages:vintages,revisionAlerts:[]});
+const publishedForm=JSON.parse(JSON.stringify({generated_at:generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regime_meta:holdMeta,allocation_inputs:holdBuilt.decision.inputs,input_summary:holdBuilt.inputSummary}));
+assert.equal(holdBuilt.decision.input_hash,sha256(publishedForm),"input_hash must be reproducible from the published (JSON-serialized) snapshot fields");
+
+// Полная верификация цепи: переписывание/обрыв прошлого обязаны детектироваться.
+const chainOk=verifyDecisionLogChainV1(monitor.decision_log);
+assert.equal(chainOk.ok,true,"untouched log must verify");
+const tamperedPast=structuredClone(monitor.decision_log);tamperedPast[0].target_pct=99;
+assert.ok(!verifyDecisionLogChainV1(tamperedPast).ok,"rewriting an old record must fail full-chain verification");
+const rehashedPast=structuredClone(monitor.decision_log);rehashedPast[1].target_pct=99;{const c={...rehashedPast[1]};delete c.log_hash;rehashedPast[1].log_hash=sha256(c);}
+assert.ok(!verifyDecisionLogChainV1(rehashedPast).ok,"re-hashing a rewritten record must break linkage downstream");
+const tamperedSnapshot=structuredClone(snapshot);tamperedSnapshot.monitoring.decision_log[0].target_pct=99;
+assert.ok(validateSnapshotV1(tamperedSnapshot,targetAt+60_000).issues.some(x=>x.startsWith("decision_log_chain_invalid")),"external monitor must walk the whole retained chain");
+
+// Hysteresis-телеметрия в записи леджера.
+const metaTick=updateForwardMonitorV1({previousMonitor:monitor,now:targetAt+3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],regimeMeta:{strategic:{state:"deteriorating",candidate:"transition",count:5,since:generatedAt,hold_until:"2026-07-24T00:00:00.000Z"},tactical:{state:"demand_break",candidate:"demand_break",count:2,since:generatedAt}}});
+const metaEntry=metaTick.decision_log.at(-1);
+assert.equal(metaEntry.hysteresis.strategic_candidate,"transition");
+assert.equal(metaEntry.hysteresis.strategic_hold_until,"2026-07-24T00:00:00.000Z");
+assert.equal(metaEntry.hysteresis.tactical_hold_until,null,"absent hold must serialize as explicit null, never undefined");
+{const c={...metaEntry};delete c.log_hash;assert.equal(metaEntry.log_hash,sha256(c),"hysteresis block must be content-addressed with the record");}
+
+// Теневые счётчики гистерезиса накапливаются и не влияют на решение.
+let shadowTick=updateForwardMonitorV1({previousMonitor:metaTick,now:targetAt+2*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:1,risk_off_confirmed_under_30m:0}});
+shadowTick=updateForwardMonitorV1({previousMonitor:shadowTick,now:targetAt+3*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:0,risk_off_confirmed_under_30m:1}});
+assert.deepEqual([shadowTick.shadow_hysteresis.upgrade_hold_resets_by_degraded,shadowTick.shadow_hysteresis.risk_off_confirmed_under_30m],[1,1]);
+assert.equal(shadowTick.strategies.policy_v1.current_target_pct,metaTick.strategies.policy_v1.current_target_pct,"shadow counters must not move the allocation");
+
+// Молчаливый генезис при живом previous обязан оставлять reset-событие (класс инцидента 2026-07-21).
+const resetMonitor=updateForwardMonitorV1({now:targetAt+5*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:null,priceSeries,previousSnapshotPresent:true});
+assert.equal(resetMonitor.reset_events?.length,1);
+assert.equal(resetMonitor.reset_events[0].reason,"previous_snapshot_without_monitoring");
+assert.ok(monitorResetIssues(resetMonitor,monitor).some(x=>x.startsWith("monitor_state_reset:")),"younger genesis against the committed reference must raise an incident");
+assert.ok(monitorResetIssues(null,monitor).includes("monitor_state_lost"));
+assert.ok(monitorResetIssues(structuredClone(monitor),{...structuredClone(monitor),decision_log:[...monitor.decision_log.slice(0,-1),{...monitor.decision_log.at(-1),log_hash:"beef".repeat(16)}]}).some(x=>x.startsWith("decision_log_history_rewritten")),"a reference head missing from the live chain must be reported");
+assert.deepEqual(monitorResetIssues(structuredClone(monitor),structuredClone(monitor)),[],"an identical chain must not alarm");
+
+// Графт: восстановление доинцидентной цепи после молчаливого генезиса.
+let archiveMonitor=updateForwardMonitorV1({now:Date.parse(generatedAt),price:100,decision,inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries});
+archiveMonitor=updateForwardMonitorV1({previousMonitor:archiveMonitor,now:Date.parse("2026-07-20T00:00:00.000Z"),price:104,decision:nextBuilt.decision,inputSummary:nextBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries});
+const eraAt=Date.parse("2026-07-20T02:00:00.000Z");
+const eraDecision=buildDecisionRecordV1({generatedAt:new Date(eraAt).toISOString(),regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:{},metrics,blocks,detectors:[],scores,sourceVintages:vintages,revisionAlerts:[]});
+let eraMonitor=updateForwardMonitorV1({now:eraAt,price:105,decision:eraDecision.decision,inputSummary:eraDecision.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries,previousSnapshotPresent:true});
+eraMonitor=updateForwardMonitorV1({previousMonitor:eraMonitor,now:eraAt+3_600_000,price:106,decision:eraDecision.decision,inputSummary:eraDecision.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries});
+const graftPack={
+  schema:1,reason:"test_restore",invalid_window:["2026-07-20T01:00:00Z","2026-07-20T02:00:00Z"],
+  orphaned_genesis_log_hashes:[eraMonitor.decision_log[0].log_hash],
+  archive:{source_commit:"fixture",monitor:archiveMonitor},
+  era:{started_at:eraMonitor.started_at,price:105,strategies:Object.fromEntries(Object.entries(eraMonitor.strategies).map(([k,v])=>[k,{initial_target_pct:v.current_target_pct,initial_nav:1-Math.abs(v.current_target_pct)/100*(10/10_000),initial_turnover_pct:Math.abs(v.current_target_pct),initial_cost_pct:Math.abs(v.current_target_pct)/100*(10/10_000)*100}])),},
+};
+const grafted=graftForwardMonitorV1(eraMonitor,graftPack);
+assert.equal(grafted.started_at,archiveMonitor.started_at,"graft must restore the pre-incident start");
+assert.equal(grafted.decision_log.length,archiveMonitor.decision_log.length+eraMonitor.decision_log.length);
+assert.equal(verifyDecisionLogChainV1(grafted.decision_log).ok,true,"grafted chain must verify end-to-end");
+assert.equal(grafted.decision_log.at(-1).original_log_hash,eraMonitor.decision_log.at(-1).log_hash,"restatement must keep the original hash as evidence");
+assert.deepEqual(grafted.decision_log[archiveMonitor.decision_log.length].graft.orphaned_genesis_log_hashes,graftPack.orphaned_genesis_log_hashes);
+assert.ok(Math.abs(grafted.strategies.buy_and_hold.nav-archiveMonitor.strategies.buy_and_hold.nav*(105/104)*(106/105))<1e-9,"NAV must be continuous across the graft (bridge by prior target, no double entry cost)");
+assert.equal(graftForwardMonitorV1(grafted,graftPack),grafted,"graft must be idempotent on a continuous chain");
+assert.equal(graftForwardMonitorV1(archiveMonitor,graftPack),archiveMonitor,"an already continuous monitor must pass through untouched");
+const foreignEra={...structuredClone(eraMonitor),started_at:"2026-07-21T00:00:00.000Z"};
+assert.ok(graftForwardMonitorV1(foreignEra,graftPack).graft_skipped,"an unexpected genesis must be skipped, not blindly merged");
+assert.equal(graftForwardMonitorV1(null,graftPack).started_at,archiveMonitor.started_at,"absent previous must adopt the archive");
+
+console.log("Forward monitor scenarios OK: server decision, costs, shadows, vintages, hash chain, graft, reset alarm, live alarm");
