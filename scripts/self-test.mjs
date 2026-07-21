@@ -1,4 +1,8 @@
 import { readFileSync, statSync, existsSync } from "node:fs";
+import { allocationDecisionV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
+import { policySuiteMetadataV1, POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
+import { policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
+import { PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
 const statePath=process.env.STATE||".state/cache.json";
@@ -29,18 +33,45 @@ const sorted=a=>(a||[]).every((x,i)=>i===0||Number(x.t)>=Number(a[i-1].t));
 const last=a=>a?.length?a[a.length-1]:null;
 const requiredBlocks=["macro","demand","cycle","leverage","market"];
 const allowedSourceStates=new Set(["ok","partial","stale","fail","mock"]);
+const expectedPolicy=policyMetadataV1();
+const expectedSuite=policySuiteMetadataV1();
 // ВНИМАНИЕ: пороги обязаны совпадать с FRED_SERIES[*].ttl в коллекторе — unit-test это проверяет.
 // Рассинхрон не «мягкая» ошибка: коллектор примет наблюдение, self-test под REQUIRE_LIVE отвергнет
 // кандидата, и сайт замрёт на прошлом снимке до конца недели.
 const sourceMaxAgeH={
   fred_WALCL:24*14,fred_WTREGEN:24*14,fred_RRPONTSYD:24*7,fred_DFII10:24*7,
   fred_DGS2:24*7,fred_DGS10:24*7,fred_DTWEXBGS:24*14,fred_BAMLH0A0HYM2:24*7,
-  fred_VIXCLS:24*7,fred_VXVCLS:24*7,fred_NASDAQ100:24*7,
+  fred_VIXCLS:24*7,fred_VXVCLS:24*7,fred_NASDAQ100:24*7,fred_DTB3:24*7,
   coinmetrics:24*4,blockchain_onchain:24*4,market:24*4,network:24*4,etf:24*7,stablecoins:24*4,pegs:18,cftc:24*15,derivatives:18,spot:18,
 };
 
-if(s.schema!==2)fail.push("schema must be 2");
+if(s.schema!==3)fail.push("schema must be 3");
 if(String(s.version||"")!==String(pkg.version||""))fail.push(`snapshot/package version mismatch:${s.version}/${pkg.version}`);
+if(s.policy===undefined){
+  if(process.env.REQUIRE_LIVE==="1")fail.push("live snapshot missing frozen policy-v1 metadata");
+  else warn.push("published snapshot predates policy-v1 metadata; next successful live run will add it");
+}else if(JSON.stringify(s.policy)!==JSON.stringify(expectedPolicy))fail.push(`snapshot policy mismatch:${JSON.stringify(s.policy)}`);
+if(JSON.stringify(s.policy_suite)!==JSON.stringify(expectedSuite))fail.push(`snapshot policy suite mismatch:${JSON.stringify(s.policy_suite)}`);
+if(POLICY_SUITE_V1.contract_sha256!==policySuiteDigestV1())fail.push("local policy suite digest mismatch");
+if(!s.decision||s.decision.policy_id!==POLICY_SUITE_V1.id||s.decision.policy_hash!==POLICY_SUITE_V1.contract_sha256)fail.push("server decision/policy hash missing or mismatched");
+else{
+  const copy={...s.decision};delete copy.decision_hash;
+  if(s.decision.decision_hash!==sha256(copy))fail.push("server decision hash mismatch");
+  const reproduced=allocationDecisionV1({strategic:s.decision.inputs?.strategic,recoveryState:s.decision.inputs?.recovery_state,macroShockState:s.decision.inputs?.macro_shock_state,mvrvPercentile:s.decision.inputs?.mvrv_percentile});
+  if(JSON.stringify({status:reproduced.status,base:reproduced.base_target_pct,target:reproduced.target_pct,binding:reproduced.binding_overlays})!==JSON.stringify({status:s.decision.status,base:s.decision.base_target_pct,target:s.decision.target_pct,binding:s.decision.binding_overlays}))fail.push("server decision cannot be reproduced from recorded inputs");
+  if(s.decision.status==="actionable"&&!strictFinite(s.decision.target_pct))fail.push("actionable decision has no target");
+}
+if(s.source_vintages?.mode!=="as_collected"||!s.source_vintages?.sources||s.source_vintages.contract_sha256!==sha256(s.source_vintages.sources))fail.push("point-in-time source vintage contract invalid");
+if(!s.monitoring||!Array.isArray(s.monitoring.daily)||!Array.isArray(s.monitoring.decision_log)||!s.monitoring.health)fail.push("forward/OOS monitor missing");
+else{
+  for(const name of ["policy_v1","previous_policy_shadow","buy_and_hold","fixed_50","cash","trend_vol_25"])if(!s.monitoring.performance?.[name])fail.push(`shadow performance missing:${name}`);
+  const log=s.monitoring.decision_log.at(-1),copy=log?{...log}:null;if(copy)delete copy.log_hash;
+  if(!log||log.decision_hash!==s.decision?.decision_hash||log.log_hash!==sha256(copy))fail.push("decision audit log missing, stale or corrupt");
+  if(s.monitoring.health.automatic_recalibration!==false)fail.push("forward monitor must never recalibrate policy automatically");
+  if(s.monitoring.counter_semantics_version!==2)fail.push("forward monitor target-change counter semantics are obsolete");
+  if(!Number.isInteger(s.monitoring.target_changes)||s.monitoring.target_changes<0||!Number.isInteger(s.monitoring.state_changes)||s.monitoring.state_changes<s.monitoring.target_changes)fail.push("forward monitor change counters invalid");
+  if(!String(s.monitoring.assumptions?.cash_yield_source||"").includes("converted to effective annual yield"))fail.push("cash benchmark basis/conversion is not declared");
+}
 if(!isDate(s.generated_at))fail.push("generated_at invalid");
 if(!isDate(s.price_observed_at))fail.push("price_observed_at invalid");
 if(process.env.REQUIRE_LIVE==="1"&&s.mock)fail.push("workflow produced mock snapshot");
@@ -137,7 +168,7 @@ for(const [k,state] of Object.entries(s.sources||{})){
 if((s.sources?.derivatives?.urls||[]).length<3)fail.push("derivatives source state must expose three documentation links");
 if((s.sources?.spot?.urls||[]).length<5)fail.push("spot source state must expose five documentation links");
 
-const requiredSourceKeys=["fred_WALCL","fred_WTREGEN","fred_RRPONTSYD","fred_DFII10","market","network","etf","stablecoins","pegs","cftc","derivatives","spot"];
+const requiredSourceKeys=["fred_WALCL","fred_WTREGEN","fred_RRPONTSYD","fred_DFII10","fred_DTB3","market","network","etf","stablecoins","pegs","cftc","derivatives","spot"];
 for(const k of requiredSourceKeys)if(!s.sources?.[k])fail.push(`critical source state absent:${k}`);
 
 if(!hasInternal){
@@ -154,7 +185,7 @@ if(!hasInternal){
     if(Array.isArray(d?.data)&&d.data.length&&d.data[0]?.t!==undefined&&!sorted(d.data))fail.push(`unsorted dataset:${k}`);
   }
 
-  for(const id of ["WALCL","WTREGEN","RRPONTSYD","DFII10","DGS2","DGS10","DTWEXBGS","BAMLH0A0HYM2","VIXCLS","VXVCLS","NASDAQ100"]){
+  for(const id of ["WALCL","WTREGEN","RRPONTSYD","DFII10","DGS2","DGS10","DTB3","DTWEXBGS","BAMLH0A0HYM2","VIXCLS","VXVCLS","NASDAQ100"]){
     const d=internal.datasets?.[`fred_${id}`];
     if(d?.data?.length){
       const latest=d.data[d.data.length-1]?.t;
@@ -236,11 +267,11 @@ if(Array.isArray(s.history)){
 
 if(!s.mock){
   const age=ageHours(s.generated_at);
-  if(age>12)warn.push(`snapshot age ${age.toFixed(1)}h`);
+  if(age>3)warn.push(`snapshot age ${age.toFixed(1)}h`);
   if(Object.values(s.sources).every(x=>x.state==="fail"))fail.push("all live sources failed");
 }
 const bytes=statSync(path).size;
-if(bytes>2_500_000)warn.push(`snapshot is large: ${(bytes/1e6).toFixed(2)} MB`);
+if(bytes>PUBLIC_SNAPSHOT_MAX_BYTES)warn.push(`snapshot is large: ${(bytes/1e6).toFixed(2)} MB`);
 
 if(fail.length){console.error("Snapshot validation failed:\n- "+fail.join("\n- "));process.exit(1);}
 console.log(`Snapshot OK: ${s.metrics.length} metrics, ${families.size} voting families, ${s.detectors.length} detectors, ${Object.keys(s.sources||{}).length} source states, ${(bytes/1e6).toFixed(2)} MB`);
