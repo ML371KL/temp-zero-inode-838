@@ -9,7 +9,7 @@ on:
     paths:
       - ".github/workflows/snapshot.yml"
       - "scripts/**"
-      - "docs/**"
+      - "docs/index.html"
       - "package.json"
 
 permissions:

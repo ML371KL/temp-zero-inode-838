@@ -3,35 +3,13 @@ import assert from "node:assert/strict";
 import {
   parseFarside, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank,
   normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory,
-  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, stabilizeCore, severity, componentScore,
+  validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
-import { compactHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const fail=[];
 const eq=(a,b,msg)=>{if(JSON.stringify(a)!==JSON.stringify(b))fail.push(`${msg}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`)};
 const ok=(x,msg)=>{if(!x)fail.push(msg)};
-
-// Public history is a compact explanatory view. Immutable policy metadata belongs at the
-// snapshot root, while the exact forward hash chain belongs in monitoring.decision_log.
-{
-  const legacy={t:"2026-07-21T00:00:00.000Z",decision:{policy_id:"btc-allocation-policy-v1",policy_hash:"policy",regime_targets_pct:{defensive:5},state_hash:"state",decision_hash:"decision",status:"actionable",base_target_pct:20,target_pct:20,binding_overlays:[],quality:{status:"good"}},raw:{oi_usd:123}};
-  const compact=compactHistoryEntryV1(legacy);
-  ok(!("policy_id" in compact.decision),"history compaction removes repeated policy id");
-  ok(!("policy_hash" in compact.decision),"history compaction removes repeated policy hash");
-  ok(!("regime_targets_pct" in compact.decision),"history compaction removes repeated target ladder");
-  eq(compact.decision.decision_hash,"decision","history compaction preserves decision hash");
-  eq(compact.decision.target_pct,20,"history compaction preserves target");
-  eq(compact.raw.oi_usd,123,"history compaction preserves internal market history");
-  ok("policy_id" in legacy.decision,"history compaction does not mutate its input");
-
-  const daily=[{x:"d".repeat(30)}],decision_log=[{x:"l".repeat(20)}],history=[compact];
-  const projected=projectedPublicSnapshotBytesV1({snapshotBytes:1000,snapshot:{monitoring:{daily,decision_log},history},dailyLimit:3,decisionLogLimit:4,historyMaxRows:5});
-  const expected=1000+2*jsonBytesV1(daily[0])+3*jsonBytesV1(decision_log[0])+4*jsonBytesV1(history[0]);
-  eq(projected,expected,"max-filled retention projection");
-  ok(HISTORY_MAX_ROWS===1066,"history retention row ceiling remains explicit");
-  ok(PUBLIC_SNAPSHOT_MAX_BYTES===3_000_000,"public snapshot byte ceiling remains explicit");
-}
 
 // Farside: a non-trading all-dash row must be skipped; an actual zero-flow trading row must stay.
 const html=`<table>
@@ -449,6 +427,30 @@ ok(ETF_BLOCK_MIRRORS[0].url.includes("theblock.co"),"канонический ch
   const futureDay=[{t:nextTrading(ahead.at(-1).t-ahead.at(-1).t%864e5)+12*H,v:3e8}];
   ok(futureDay[0].t>NOWMS,"фикстура обязана дать день в БУДУЩЕМ, иначе проверка ничего не проверяет");
   eq(reviveSplicedDays(canon,{days:futureDay,at:new Date(NOWMS-H).toISOString()}),null,"день из будущего не имеет права оживать");
+}
+// САНАЦИЯ ПЕРЕНОСИМОЙ ИСТОРИИ. Прогон теста однажды оставил в опубликованной истории записи с
+// выдуманной ценой $131k; история переносится вперёд 730 дней, поэтому мусор жил неделю и ИИ-разбор
+// «объяснял» несуществовавший обвал. Эталон — независимый дневной ряд цены.
+{
+  const ref=new Map([["2026-07-13",62265],["2026-07-14",64989],["2026-07-15",64800]]);
+  const rec=(o)=>({t:"2026-07-14T12:00:00.000Z",strategic:-13,tactical:-18,price:64500,phase:"Фаза 4 · защитный режим",...o});
+  ok(plausibleHistoryRecord(rec({}),ref),"нормальная запись обязана проходить");
+  ok(!plausibleHistoryRecord(rec({price:131330}),ref),"выдуманная цена 131k против эталона 65k обязана отбраковываться");
+  ok(!plausibleHistoryRecord(rec({price:82432}),ref),"цена, расходящаяся с эталоном на треть, тоже мусор");
+  ok(!plausibleHistoryRecord(rec({price:null,phase:"демо"}),ref),"демо-затравка без цены обязана отбраковываться");
+  ok(!plausibleHistoryRecord(rec({phase:"демо"}),ref),"запись фазы «демо» обязана отбраковываться даже с валидной ценой");
+  ok(!plausibleHistoryRecord(rec({strategic:null}),ref),"нефинитный стратегический балл — мусор");
+  ok(!plausibleHistoryRecord(rec({t:"не дата"}),ref),"непарсящаяся метка — мусор");
+  ok(plausibleHistoryRecord(rec({price:66000}),ref),"нормальный внутридневной разброс (2%) не должен отбраковываться");
+  // Если эталона на этот день нет, проверка по цене пропускается (нельзя судить без опоры).
+  ok(plausibleHistoryRecord(rec({t:"2020-01-01T12:00:00.000Z",price:7200}),ref),"без эталона на день запись проходит по остальным признакам");
+  // ПРИВЯЗКА (структурная, не логическая): сама логика доказана выше поведением и мутациями, но
+  // санитайзер бесполезен, если сборщик его не вызывает при постройке истории. Проверяем именно
+  // регион постройки — грепом по всему файлу это можно было бы удовлетворить где угодно.
+  const collector=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
+  const region=collector.slice(collector.indexOf("САНАЦИЯ ПЕРЕНОСИМОЙ ИСТОРИИ"),collector.indexOf("buildMetrics(),blocks"));
+  ok(/previous\.history=previous\.history\.filter\(h=>plausibleHistoryRecord\(h,priceByDay\)\)/.test(region),"санитайзер обязан применяться к previous.history ДО первого потребителя, иначе мусор влияет на балл в тот же прогон");
+  ok(/series\(data\("market"\)\?\.price/.test(region),"эталон обязан браться из независимого дневного ряда цены");
 }
 // ГИСТЕРЕЗИС РЕЖИМА. Это то, что решает, КОГДА панель меняет торговую рекомендацию, и до сих пор
 // его семантику не защищал ни один тест: обе стороны асимметрии можно было сломать незаметно.

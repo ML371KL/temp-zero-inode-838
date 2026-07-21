@@ -14,21 +14,15 @@
 */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { POLICY_V1, applyStrategicDetectorPolicyV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
-import { MODEL_POLICY_V1, modelPolicyMetadataV1 } from "../docs/model-policy-v1.mjs";
-import { executionPolicyMetadataV1 } from "../docs/execution-policy-v1.mjs";
-import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
-import { buildDecisionRecordV1, buildSourceVintagesV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
-import { compactHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
-const VERSION = "2.11.0";
+const VERSION = "2.9.9";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
 // immediate; being late INTO a positive regime costs little (positive regimes persisted for months).
-const UPGRADE_HOLD_H = MODEL_POLICY_V1.hysteresis.risk_on_hold_hours;
+const UPGRADE_HOLD_H = 48;
 // ...and at least this many observed snapshots: wall-clock alone would let a pipeline gap skip the hold.
-const UPGRADE_MIN_SNAPSHOTS = MODEL_POLICY_V1.hysteresis.risk_on_min_snapshots;
+const UPGRADE_MIN_SNAPSHOTS = 12;
 const OUT = process.env.OUT || "docs/snapshot.json";
 const STATE = process.env.STATE || ".state/cache.json";
 // The live candidate is written to temporary paths and only copied into docs/ after it passes
@@ -82,14 +76,20 @@ const uniqueHttps = values => [...new Set((values||[]).filter(x=>typeof x==="str
 const fredSeriesUrl = id => `https://fred.stlouisfed.org/series/${encodeURIComponent(id)}`;
 const fredSeriesUrls = ids => ids.map(fredSeriesUrl);
 
-const BLOCKS = MODEL_POLICY_V1.blocks;
+const BLOCKS = {
+  macro: { roman: "I", title: "Глобальный режим", subtitle: "ликвидность · ставки · доллар · кредит", strategicWeight: 30, tacticalWeight: 10 },
+  demand: { roman: "II", title: "Маржинальный спрос и доступное предложение", subtitle: "ETF · стейблкоины · биржевые потоки · CFTC", strategicWeight: 40, tacticalWeight: 25 },
+  cycle: { roman: "III", title: "Цикл, сеть и майнеры", subtitle: "MVRV · активность · экономика майнинга · тренд", strategicWeight: 30, tacticalWeight: 10 },
+  leverage: { roman: "IV", title: "Плечо и волатильность", subtitle: "funding · OI · basis · DVOL · skew", strategicWeight: 0, tacticalWeight: 45 },
+  market: { roman: "V", title: "Качество цены", subtitle: "премия США · синхронность площадок · объём", strategicWeight: 0, tacticalWeight: 10 },
+};
 
 // Cycle drops to 0.40 because two of its five families (valuation, activity) and part of a third
 // (miners) come from Coin Metrics, which is now optional. The two vendor-independent legs —
 // network security and price trend — are instead made explicitly REQUIRED below, so a low coverage
 // number can never mean "we lost the reliable half". Leverage and market thresholds are only used
 // for display: the tactical gate no longer depends on the leverage block at all.
-const CRITICAL_MIN = MODEL_POLICY_V1.critical_min;
+const CRITICAL_MIN = { macro: 0.60, demand: 0.60, cycle: 0.40, leverage: 0.25, market: 0.50 };
 
 // release — фактический КАЛЕНДАРЬ ПУБЛИКАЦИИ, а не частота точек внутри ряда. Именно он задаёт
 // максимально допустимый возраст последнего наблюдения (ttl служит и сроком кэша, и maxObservedAge):
@@ -107,7 +107,6 @@ const FRED_SERIES = {
   DFII10: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   DGS2: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   DGS10: { limit: 1200, ttl: 7 * DAY, release: "daily" },
-  DTB3: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   DTWEXBGS: { limit: 1200, ttl: 14 * DAY, release: "weekly-batch" },
   BAMLH0A0HYM2: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   VIXCLS: { limit: 1200, ttl: 7 * DAY, release: "daily" },
@@ -200,9 +199,7 @@ function changeOfAverage(s,recent=30,previous=30){ const a=s.map(x=>x.v).filter(
 function nearestAtOrBefore(s,t){ let found=null; for(const p of s){ if(p.t<=t)found=p; else break; } return found; }
 function customScore(v,bands){ if(!finite(v))return null; for(const [test,score] of bands)if(test(Number(v)))return score; return 0; }
 function percentChangeCommonVenues(current,prior,minVenues=2){if(!current||!prior)return null;const venues=Object.keys(current).filter(k=>finite(current[k])&&finite(prior[k]));if(venues.length<minVenues)return null;return pct(sum(venues.map(k=>current[k])),sum(venues.map(k=>prior[k])));}
-// POLICY-LOCK:market_integrity_v1:START
 function classifyIntegrity({peg,disp,majorDevs=[],usdSpread=null,usdtSpread=null}){const catastrophicPeg=majorDevs.some(x=>finite(x)&&Number(x)>=10),extremePeg=majorDevs.some(x=>finite(x)&&Number(x)>=5),doublePeg=majorDevs.length===2&&majorDevs.every(x=>finite(x)&&Number(x)>=1),doubleDisp=finite(usdSpread)&&finite(usdtSpread)&&Number(usdSpread)>=100&&Number(usdtSpread)>=100,extremeDisp=[usdSpread,usdtSpread].filter(finite).some(x=>Number(x)>=300),marketConfirm=doubleDisp||extremeDisp||(finite(disp)&&Number(disp)>=50),confirmed=catastrophicPeg||((extremePeg||doublePeg)&&marketConfirm)||doubleDisp||extremeDisp;return confirmed?"fired":((extremePeg||doublePeg)||(finite(peg)&&Number(peg)>=.5)||(finite(disp)&&Number(disp)>=50)?"watch":"calm");}
-// POLICY-LOCK:market_integrity_v1:END
 
 let previous=null;
 for(const path of [PREVIOUS_STATE,PREVIOUS_PUBLIC]){
@@ -512,6 +509,19 @@ function cachedEtfCanon(packet){
   if(!rows.length||!validateEtfSeries(rows,7*DAY))return null;
   return rows;
 }
+// Годится ли запись переносимой истории. Эталон — независимый дневной ряд цены (карта день->цена).
+// Отбраковка: непарсящаяся метка; демо-затравка (phase "демо"); нефинитные баллы; отсутствие цены
+// (у реальной публикуемой записи цена всегда есть — иначе self-test под REQUIRE_LIVE её не пустит);
+// цена, расходящаяся с эталоном более чем на 25% (внутридневная против дневного закрытия у BTC так
+// не гуляет — это признак подмены). Если эталона на этот день нет, проверка по цене пропускается.
+function plausibleHistoryRecord(h,priceByDay){
+  if(!h||!finite(Date.parse(h.t)))return false;
+  if(h.phase==="демо")return false;
+  if(!finite(h.strategic)||!finite(h.tactical)||!finite(h.price))return false;
+  const ref=priceByDay?.get(dayKey(h.t));
+  if(finite(ref)&&ref>0&&Math.abs(h.price/ref-1)>0.25)return false;
+  return true;
+}
 // Ряд ETF между часовыми прогонами может стать ХУЖЕ двумя способами, и оба обязаны быть видны.
 // Откат последнего дня двигает возраст наблюдения назад; усечение истории не трогает свежесть, но
 // меняет перцентили, а через них — балл семьи, которая стоит у самой границы детектора слома
@@ -702,7 +712,7 @@ function makeMock(){
   const price=mockWalk(1500,26000,.0010,.035,11),mcap=price.map(p=>({t:p.t,v:p.v*19_800_000}));
   const cm={PriceUSD:price,CapMrktCurUSD:mcap,CapMVRVCur:mockWalk(1500,1.05,.0007,.018,12),FlowInExNtv:mockWalk(1500,18000,0,.22,13),FlowOutExNtv:mockWalk(1500,18500,0,.22,14),SplyExNtv:mockWalk(1500,2_900_000,-.00012,.004,15),HashRate:mockWalk(1500,6e8,.0008,.025,16),IssTotUSD:price.map(p=>({t:p.t,v:p.v*450})),FeeTotNtv:mockWalk(1500,18,0,.35,17),AdrActCnt:mockWalk(1500,700000,.0001,.12,18),TxCnt:mockWalk(1500,420000,.0001,.10,19),TxTfrCnt:mockWalk(1500,850000,.0001,.12,20),volume_reported_spot_usd_1d:mockWalk(1500,7e9,.0001,.28,21),SplyCur:price.map((p,i)=>({t:p.t,v:19_700_000+i*450}))};
   const fred={};
-  fred.WALCL=mockWalk(900,7.2e6,.00002,.001,31);fred.WTREGEN=mockWalk(900,650000,.0001,.08,32);fred.RRPONTSYD=mockWalk(900,120,-.001,.15,33);fred.DFII10=mockWalk(900,1.7,0,.025,34);fred.DGS2=mockWalk(900,4.0,0,.018,35);fred.DGS10=mockWalk(900,4.2,0,.015,36);fred.DTB3=mockWalk(900,3.8,0,.012,42);fred.DTWEXBGS=mockWalk(900,123,0,.006,37);fred.BAMLH0A0HYM2=mockWalk(900,3.3,0,.025,38);fred.VIXCLS=mockWalk(900,17,0,.12,39);fred.VXVCLS=mockWalk(900,19,0,.07,40);fred.NASDAQ100=mockWalk(900,18000,.0006,.018,41);
+  fred.WALCL=mockWalk(900,7.2e6,.00002,.001,31);fred.WTREGEN=mockWalk(900,650000,.0001,.08,32);fred.RRPONTSYD=mockWalk(900,120,-.001,.15,33);fred.DFII10=mockWalk(900,1.7,0,.025,34);fred.DGS2=mockWalk(900,4.0,0,.018,35);fred.DGS10=mockWalk(900,4.2,0,.015,36);fred.DTWEXBGS=mockWalk(900,123,0,.006,37);fred.BAMLH0A0HYM2=mockWalk(900,3.3,0,.025,38);fred.VIXCLS=mockWalk(900,17,0,.12,39);fred.VXVCLS=mockWalk(900,19,0,.07,40);fred.NASDAQ100=mockWalk(900,18000,.0006,.018,41);
   for(const [k,v] of Object.entries(fred)){datasets["fred_"+k]={data:v,observed_at:iso(last(v).t),fetched_at:iso(NOW),source:"fred",source_url:SOURCE_URLS.fred};sourceStates["fred_"+k]={state:"mock",source:"fred",url:SOURCE_URLS.fred,observed_at:iso(last(v).t),fetched_at:iso(NOW)};}
   datasets.coinmetrics={data:cm,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"coinmetrics",source_url:SOURCE_URLS.coinmetrics};sourceStates.coinmetrics={state:"mock",source:"coinmetrics",url:SOURCE_URLS.coinmetrics,observed_at:iso(last(price).t),fetched_at:iso(NOW)};
   const bc={MVRV:cm.CapMVRVCur,AdrActCnt:cm.AdrActCnt,TxCnt:cm.TxCnt,MinerRevUSD:cm.IssTotUSD.map((x,i)=>({t:x.t,v:x.v+(cm.FeeTotNtv[i]?.v||0)*price[i].v}))};datasets.blockchain_onchain={data:bc,observed_at:iso(last(price).t),fetched_at:iso(NOW),source:"blockchain",source_url:SOURCE_URLS.blockchain};sourceStates.blockchain_onchain={state:"mock",source:"blockchain",url:SOURCE_URLS.blockchain,observed_at:iso(last(price).t),fetched_at:iso(NOW)};
@@ -1003,7 +1013,6 @@ function links(...values){return uniqueHttps(values.flat());}
 // балл и так ≤0. Проверено на реконструкции 2013–2026: срабатываний ноль — это страховка от тихой
 // смерти отдельного ряда, а не изменение поведения. Семья при этом НЕ обнуляется: null отдал бы
 // одному ряду право погасить обязательную семью и весь среднесрочный вердикт.
-// POLICY-LOCK:scoring_and_regimes_v1:START
 function componentScore(parts){const a=parts.filter(finite).map(Number);if(!a.length)return null;const s=clamp(Math.round(mean(a)*2)/2,-2,2);return a.length*2<=parts.length&&s>0?0:s;}
 function highGood(p){return !finite(p)?null:p>=90?2:p>=65?1:p>=35?0:p>=10?-1:-2;}
 function lowGood(p){return !finite(p)?null:p<=10?2:p<=35?1:p<=65?0:p<=90?-1:-2;}
@@ -1216,9 +1225,9 @@ function familyStats(metrics,block,horizon){
   const fam=Object.fromEntries(Object.entries(groups).map(([k,a])=>[k,mean(a)]));
   return{score:Object.keys(fam).length?mean(Object.values(fam))/2*100:null,coverage:expected.length?Object.keys(fam).length/expected.length:1,families:fam,expected};
 }
-function band(score){const b=MODEL_POLICY_V1.regime_bands;return score==null?"unknown":score>=b.supportive_min?"supportive":score<=b.adverse_max?"adverse":"neutral";}
+function band(score){return score==null?"unknown":score>=20?"supportive":score<=-20?"adverse":"neutral";}
 function fastDemand(metrics){const ids=["etf_regime","stablecoin_regime","exchange_supply","us_spot_premium"];const a=metrics.filter(x=>ids.includes(x.id)&&x.score!=null).map(x=>x.score);return a.length?mean(a)/2*100:null;}
-function detectorState(hit,total,good=false){const d=MODEL_POLICY_V1.detector_state;if(hit>=Math.max(d.fired_min_hits,total-1,d.fired_all_but_one_min))return good?"good":"fired";if(hit>=d.watch_min_hits)return"watch";return"calm";}
+function detectorState(hit,total,good=false){if(hit>=Math.max(3,total-1))return good?"good":"fired";if(hit>=2)return"watch";return"calm";}
 function getM(metrics,id){return metrics.find(x=>x.id===id);}
 
 function buildDetectors(metrics){
@@ -1303,9 +1312,11 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   //    with hit-rate 0.82 — a defensive/deteriorating verdict is lifted to "transition" so the
   //    accumulate window after a capitulation is not reported as "stay defensive".
   const shockState=detectors.find(x=>x.id==="macro_shock")?.state,recoveryState=detectors.find(x=>x.id==="recovery")?.state,distState=detectors.find(x=>x.id==="distribution")?.state;
-  // Detector effects are part of the frozen policy-v1 contract. Historical backtest output is never
-  // imported here and cannot silently rewrite the live decision rule.
-  strategic=applyStrategicDetectorPolicyV1({strategic,macroShockState:shockState,distributionState:distState,recoveryState});
+  if(shockState==="fired"&&["constructive","unconfirmed_positive","transition"].includes(strategic))strategic="deteriorating";
+  // Distribution fired = expensive valuation + exchange supply returning + broken trend: the panel
+  // may not stay optimistic while holders demonstrably sell into strength.
+  if(distState==="fired"&&["constructive","unconfirmed_positive","transition"].includes(strategic))strategic="deteriorating";
+  if(recoveryState==="good"&&shockState!=="fired"&&["defensive","deteriorating"].includes(strategic))strategic="transition";
 
   const L=blocks.leverage.tactical.score,Q=fastDemand(metrics),K=blocks.market.tactical.score;
   const levDet=detectors.find(x=>x.id==="leverage")?.state,demandDet=detectors.find(x=>x.id==="demand_break")?.state;
@@ -1326,11 +1337,9 @@ function candidateRegimes(blocks,metrics,detectors,hardOverride){
   else if(L!=null&&L>=-10&&Q!=null&&Q>=15&&K>=-20)tactical="spot_led";
   return{strategic,tactical,criticalStrategic,criticalTactical,missingS,missingT,valuationAvailable};
 }
-// POLICY-LOCK:scoring_and_regimes_v1:END
 
 const STRATEGIC_TEXT={constructive:"КОНСТРУКТИВНЫЙ СРЕДНЕСРОЧНЫЙ РЕЖИМ",unconfirmed_positive:"ПОЛОЖИТЕЛЬНО, НО СПРОС НЕ ПОДТВЕРДИЛ",transition:"ПЕРЕХОДНЫЙ СРЕДНЕСРОЧНЫЙ РЕЖИМ",deteriorating:"СРЕДНЕСРОЧНЫЙ РЕЖИМ УХУДШАЕТСЯ",defensive:"ЗАЩИТНЫЙ СРЕДНЕСРОЧНЫЙ РЕЖИМ",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
 const TACTICAL_TEXT={spot_led:"СПОТ-ВЕДОМАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",balanced:"СБАЛАНСИРОВАННАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",demand_break:"СЛОМ МАРЖИНАЛЬНОГО СПРОСА",overheated_supported:"БЫЧИЙ ФОН, НО ПЛЕЧО ПЕРЕГРЕТО",fragile:"ХРУПКАЯ КРАТКОСРОЧНАЯ СТРУКТУРА",deleveraging:"ДЕЛЕВЕРИДЖ · ТАКТИЧЕСКАЯ ЗАЩИТА",short_squeeze:"УСЛОВИЯ ДЛЯ SHORT SQUEEZE",insufficient:"НЕДОСТАТОЧНО ДАННЫХ",emergency:"АВАРИЙНЫЙ РЕЖИМ"};
-// POLICY-LOCK:hysteresis_v1:START
 function severity(x){return{constructive:2,unconfirmed_positive:1,transition:0,deteriorating:-1,defensive:-2,spot_led:2,balanced:0,overheated_supported:-1,fragile:-1,demand_break:-1,deleveraging:-2,short_squeeze:1,insufficient:0,emergency:-3}[x]??0;}
 function stabilize(candidate,type,hard){
   return stabilizeCore(candidate,previous?.regime?.[type],previous?.regime_meta?.[type],NOW,{hard,fresh:!previous,mock:!!previous?.mock});
@@ -1360,8 +1369,7 @@ function stabilizeCore(candidate,prevState,prevMetaIn,now,{hard=false,fresh=fals
   // Exiting a degraded state with no real anchor is not an "upgrade" — only the 2-snapshot rule applies.
   const upgrade=severity(candidate)>sevRef&&!DEGRADED.includes(ref);
   const heldLongEnough=now-Date.parse(since)>=UPGRADE_HOLD_H*HOUR&&count>=UPGRADE_MIN_SNAPSHOTS;
-  const confirm=MODEL_POLICY_V1.hysteresis.risk_off_confirm_snapshots;
-  const adopt=(count>=confirm&&(!upgrade||heldLongEnough))||(worse&&downStreak>=confirm);
+  const adopt=(count>=2&&(!upgrade||heldLongEnough))||(worse&&downStreak>=2);
   // While an upgrade out of a degraded state is held, publish the anchor — but NEVER an anchor that
   // is better than today's candidate: degradation must not resurrect stale optimism («deterioration
   // is fast» applies to the anchor path too).
@@ -1373,7 +1381,6 @@ function stabilizeCore(candidate,prevState,prevMetaIn,now,{hard=false,fresh=fals
   const hold_until=!adopt&&upgrade?iso(Date.parse(since)+UPGRADE_HOLD_H*HOUR):undefined;
   return{state,candidate,count,since,downStreak,anchor:DEGRADED.includes(state)?anchor:state,hold_until};
 }
-// POLICY-LOCK:hysteresis_v1:END
 
 function behaviors(s,t){
   const medium={constructive:"Базовая экспозиция режимно оправдана; добавления лучше делать ступенчато и не игнорировать тактический перегрев.",unconfirmed_positive:"Не наращивать экспозицию агрессивно: макро и цикл поддерживают рынок, но реальный маржинальный спрос недостаточен.",transition:"Сохранять умеренную экспозицию и ждать согласования потоков, макро и структуры предложения.",deteriorating:"Сократить риск новых добавлений, повысить запас ликвидности и требовать восстановления спроса перед увеличением позиции.",defensive:"Приоритет — сохранение капитала; увеличение экспозиции только после разворота потоков и восстановления ценовых опор.",insufficient:"Не делать вывод из панели: критические блоки покрыты недостаточно.",emergency:"Приоритет — контроль контрагентского и ликвидностного риска; обычный скоринг временно недействителен."}[s];
@@ -1383,6 +1390,14 @@ function behaviors(s,t){
 function phase(s,t,detectors){if(s==="emergency"||t==="emergency")return"Аварийная фаза · обычный режимный скоринг временно недействителен";if(s==="insufficient"||t==="insufficient")return"Фаза не определена · недостаточно критических данных";if(detectors?.find(x=>x.id==="recovery")?.state==="good"&&["transition","deteriorating","defensive"].includes(s))return"Фаза 0 · капитуляция позади? восстановление подтверждается потоками";if(s==="constructive"&&t==="spot_led")return"Фаза 1 · спот-ведомое расширение";if(s==="constructive"&&["balanced","short_squeeze"].includes(t))return"Фаза 1 · конструктивный режим, тактика нейтральна";if(["transition","unconfirmed_positive"].includes(s)&&t==="spot_led")return"Фаза 1 → · спот ведёт, среднесрок ещё не подтвердил";if(s==="constructive"&&["overheated_supported","fragile"].includes(t))return"Фаза 2 · конструктивный цикл, накопление тактической хрупкости";if(["deteriorating","transition"].includes(s)&&["fragile","deleveraging","demand_break"].includes(t))return"Фаза 3 · дистрибуция / переход";if(s==="defensive")return"Фаза 4 · защитный режим";if(t==="short_squeeze")return"Фаза 0 · попытка восстановления / squeeze";return"Фаза перехода · сигналы не согласованы";}
 
 function compute(){
+  // САНАЦИЯ ПЕРЕНОСИМОЙ ИСТОРИИ — один раз и ДО первого потребителя. previous.history читают оба:
+  // buildMetrics (oi_quality ищет исторический базис OI) и постройка публикуемой истории; обоим
+  // нужен уже очищенный ряд, иначе мусор влияет на балл в тот же прогон, а не только на след.
+  // Эталон — независимый дневной ряд цены. Однажды прогон теста оставил ~50 записей с выдуманной
+  // ценой $131k; история переносится вперёд 730 дней, поэтому мусор жил неделю, а ИИ-разбор
+  // добросовестно «объяснял» обвал, которого не было. Самоочистка на следующем же прогоне.
+  const priceByDay=new Map(series(data("market")?.price||[]).map(x=>[dayKey(x.t),x.v]));
+  if(Array.isArray(previous?.history))previous.history=previous.history.filter(h=>plausibleHistoryRecord(h,priceByDay));
   const metrics=buildMetrics(),blocks={};
   for(const [k,b] of Object.entries(BLOCKS))blocks[k]={...b,strategic:familyStats(metrics,k,"strategic"),tactical:familyStats(metrics,k,"tactical")};
   const {detectors,hardOverride}=buildDetectors(metrics);
@@ -1407,26 +1422,23 @@ function compute(){
   scores.onchain_coverage=onchainAvailable/onchainIds.length;scores.onchain_status=onchainAvailable===4?"full":onchainAvailable>=2?"partial":"minimal";
   const factors={strategic:metrics.filter(x=>x.vote&&x.strategic&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value})),tactical:metrics.filter(x=>x.vote&&x.tactical&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value}))};
   const price=referencePrice();
-  const sourceVintages=buildSourceVintagesV1(datasets,sourceStates);sourceVintages.captured_at=iso(NOW);
-  const revisionAlerts=sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages,previous?.datasets,datasets);
-  const {decision,inputSummary}=buildDecisionRecordV1({generatedAt:iso(NOW),regime,regimeMeta:{strategic:stableS,tactical:stableT},metrics,blocks,detectors,scores,sourceVintages,revisionAlerts});
-  const monitoring=updateForwardMonitorV1({previousMonitor:previous?.monitoring,now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price")});
   // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
   // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
   // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.
-  const rawHistory=(previous?.history||[]).map(compactHistoryEntryV1).filter(h=>NOW-Date.parse(h.t)<HISTORY_RETENTION_DAYS*DAY);
-  const recentCut=NOW-HISTORY_HOURLY_DAYS*DAY,byDayHist=new Map();
+  // previous.history уже очищена в начале compute() (санация по независимому ряду цены).
+  const rawHistory=(previous?.history||[]).filter(h=>NOW-Date.parse(h.t)<730*DAY);
+  const recentCut=NOW-14*DAY,byDayHist=new Map();
   for(const h of rawHistory){const t=Date.parse(h.t);if(t>=recentCut)continue;byDayHist.set(dayKey(t),h);}
   const history=[...byDayHist.values(),...rawHistory.filter(h=>Date.parse(h.t)>=recentCut)].sort((a,b)=>Date.parse(a.t)-Date.parse(b.t)).slice(-4500);
   const oiByVenue=Object.fromEntries((data("derivatives")?.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
   const raw={oi_usd:sumOrNull(Object.values(oiByVenue)),oi_by_venue:oiByVenue,premium_bps:getM(metrics,"us_spot_premium")?.value_num,stable_supply:last(series(data("stablecoins")||[]))?.v,etf_20d:getM(metrics,"etf_20d")?.value_num};
-  history.push(compactHistoryEntryV1({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,decision,raw}));
+  history.push({t:iso(NOW),strategic:scores.strategic,tactical:scores.tactical,price,phase:phase(regime.strategic,regime.tactical,detectors),regime,raw});
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
-    schema:3,version:VERSION,policy:policyMetadataV1(),policy_suite:policySuiteMetadataV1(),policy_components:{allocation:policyMetadataV1(),model:modelPolicyMetadataV1(),execution:executionPolicyMetadataV1()},generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
+    schema:2,version:VERSION,generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
-    regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
-    sources:sourceStates,source_vintages:sourceVintages,source_revision_alerts:revisionAlerts,monitoring,history,datasets,
+    regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,
+    sources:sourceStates,history,datasets,
     methodology:{
       indicator_scale:"−2…+2; числовые баллы вторичны относительно гейтов",
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
@@ -1435,10 +1447,6 @@ function compute(){
       family_completeness:"a family that lost half or more of its inputs may warn but not support: its positive vote is capped at 0 (the family is never nulled — that would let one series switch off a required family)",
       hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h AND at least 12 observed snapshots; hard override is immediate",
       detector_power:"macro_shock or distribution fired cap the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; all three keep anchor+confirmation structure",
-      allocation_policy:`${POLICY_V1.id}; frozen ${POLICY_V1.frozen_at}; historical recalibration ${POLICY_V1.historical_recalibration}`,
-      model_policy:`${MODEL_POLICY_V1.id}; decision sections locked by SHA-256`,
-      point_in_time:"forward evidence stores hash commitments plus exact daily decision inputs; they verify recorded inputs and reproduce the allocation, but the public snapshot does not retain full raw provider payloads",
-      forward_monitoring:"policy v1, previous policy and simple benchmarks are observed prospectively; monitoring never recalibrates live thresholds",
       exclusions:["STH/LTH cost basis and SOPR","NUPL and labelled cohort metrics","liquidation heatmaps and aggregated liquidations","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),
       tactical_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.tacticalWeight])),
@@ -1446,7 +1454,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
