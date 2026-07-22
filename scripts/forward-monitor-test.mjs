@@ -81,7 +81,7 @@ assert.deepEqual(sourceRevisionAlertsV1(advancingPrevious.vintages,advancingCurr
 const priceSeries=Array.from({length:250},(_,i)=>({t:Date.UTC(2025,10,12+i),v:80+i*.08}));
 let monitor=updateForwardMonitorV1({now:Date.parse(generatedAt),price:100,decision,inputSummary,sourceVintages:vintages,cashQuotePct:null,priceSeries});
 assert.equal(monitor.cash_yield_available,false,"missing cash yield must be disclosed, not presented as a real 0% quote");
-assert.deepEqual(Object.keys(monitor.strategies).sort(),["buy_and_hold","cash","fixed_50","policy_v1","previous_policy_shadow","trend_vol_25"].sort());
+assert.deepEqual(Object.keys(monitor.strategies).sort(),["buy_and_hold","cash","fixed_50","policy_v1","policy_v2_shadow","previous_policy_shadow","static_theta","trend_vol_25"].sort(),"v2 shadow and static-theta strategies must be tracked alongside the frozen set");
 assert.equal(monitor.strategies.policy_v1.current_target_pct,5);
 assert.equal(monitor.strategies.previous_policy_shadow.current_target_pct,10);
 assert.equal(monitor.decision_log.length,1);
@@ -142,6 +142,7 @@ const remoteAssets={
   "https://example.test/dashboard/execution-policy-v1.mjs":readFileSync(new URL("../docs/execution-policy-v1.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/policy-suite-v1.mjs":readFileSync(new URL("../docs/policy-suite-v1.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/action-gate-v1.mjs":readFileSync(new URL("../docs/action-gate-v1.mjs",import.meta.url),"utf8"),
+  "https://example.test/dashboard/policy-v2-candidate.mjs":readFileSync(new URL("../docs/policy-v2-candidate.mjs",import.meta.url),"utf8"),
 };
 const fetchAssets=async url=>new Response(remoteAssets[String(url)]??"",{status:String(url) in remoteAssets?200:404});
 assert.deepEqual((await validatePublishedAssetsV1("https://example.test/dashboard/snapshot.json",fetchAssets)).issues,[],"matching published HTML/modules must pass");

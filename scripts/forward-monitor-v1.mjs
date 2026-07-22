@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1, policySuiteContractV1 } from "../docs/policy-suite-v1.mjs";
+import { POLICY_V2_CANDIDATE, allocationTargetV2Candidate, evaluateAcceptanceV2, evaluateReviewV2, policyV2CandidateMetadata, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
 
 const DAY=86_400_000,YEAR_DAYS=365.25;
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
@@ -231,7 +232,10 @@ function strategyStats(strategy,daily,name){
   // Тождественно нулевой excess (стратегия шла в ногу с cash — в т.ч. сам cash и полный кэш policy
   // в затяжном emergency) — это НУЛЕВОЙ excess-Sharpe, а не «неопределённость»: null здесь
   // превращался в -Infinity в evaluateHealth и давал ложный investigate ровно в кризисном режиме.
-  const sharpeExcess=excess.length>=2?(sdExcess?mean(excess)/sdExcess*Math.sqrt(perYear):(mean(excess)===0?0:null)):null;
+  // EPSILON-гард (челлендж 2026-07-22): «почти нулевая» дисперсия из остатков плавающей точки
+  // (sdExcess≈1e-16) истинностно truthy и делала Sharpe мусорным; вырожденный excess-ряд — это 0.
+  const EPS=1e-12;
+  const sharpeExcess=excess.length>=2?(sdExcess>EPS?mean(excess)/sdExcess*Math.sqrt(perYear):(Math.abs(mean(excess))<=EPS?0:null)):null;
   return{
     nav:Number(strategy.nav),net_return_pct:(Number(strategy.nav)-1)*100,max_drawdown_pct:Number(strategy.max_drawdown_pct||0),
     annualized_volatility_pct:sd==null?null:sd*Math.sqrt(perYear)*100,
@@ -357,11 +361,14 @@ export function graftForwardMonitorV1(liveMonitor,pack){
   merged.counter_semantics_version=2;
   merged.revision_alerts=[...(merged.revision_alerts||[]),...(live.revision_alerts||[])].slice(-100);
   merged.reset_events=[...(merged.reset_events||[]),...(live.reset_events||[])].slice(-10);
+  // Состояние тени v2 живёт у ЖИВОЙ линии (архив 5165340 его не знает): без переноса графт молча
+  // обнулял бы идущую градуировку пола и стрики ревью — потеря acceptance-evidence (ревью 2026-07-22).
+  for(const key of ["v2_shadow_state","v2_theta","v2_review","v2_candidate"])if(live[key]!==undefined)merged[key]=live[key];
   merged.graft={applied_at:live.updated_at,reason:pack.reason,invalid_window:pack.invalid_window,orphaned_genesis_log_hashes:pack.orphaned_genesis_log_hashes,archive_source_commit:pack.archive.source_commit||null};
   return merged;
 }
 
-export function updateForwardMonitorV1({previousMonitor,now,price,decision,inputSummary,sourceVintages,revisionAlerts=[],cashQuotePct=null,cashQuoteBasis="treasury_bill_discount",priceSeries=[],previousSnapshotPresent=false,regimeMeta=null,shadowHysteresis=null}){
+export function updateForwardMonitorV1({previousMonitor,now,price,decision,inputSummary,sourceVintages,revisionAlerts=[],cashQuotePct=null,cashQuoteBasis="treasury_bill_discount",priceSeries=[],previousSnapshotPresent=false,regimeMeta=null,shadowHysteresis=null,v2Inputs=null}){
   if(!finite(price)||Number(price)<=0)throw new Error("forward monitor requires a positive price");
   const cfg=MODEL_POLICY_V1.forward_monitoring,at=new Date(now).toISOString(),date=at.slice(0,10),simple=simpleTargets(priceSeries);
   const desired={
@@ -378,6 +385,24 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // сторож дополнительно ловит регресс started_at против HEAD репозитория.
   if(previousMonitor?.schema!==1&&previousSnapshotPresent)
     monitor.reset_events=[...(previousMonitor?.reset_events||[]),{t:at,reason:"previous_snapshot_without_monitoring"}].slice(-10);
+  // ТЕНЕВОЙ КАНДИДАТ v2 (см. docs/policy-v2-candidate.mjs): вычисляется параллельно, живое
+  // решение НЕ трогает. Градуировка пола считается по дневным закрытиям UTC из переносимого
+  // состояния. static_theta — честный нуль R2: до первого формального ревью (90 дн) — скользящее
+  // среднее целей политики (окно ограничено ретеншеном daily, ≤370 дн), с 90-го дня Θ ФИКСИРУЕТСЯ
+  // и перефиксируется только на ревью-границах — дрейфующая Θ была бы лаггированной копией самой
+  // политики и теряла бы мощность R2 (ревью 2026-07-22). Цель округляется до 0.1пп: микрообороты
+  // от дрожащего среднего — фиктивные издержки и лишние байты в каждой daily-строке.
+  monitor.v2_shadow_state=updateV2ShadowState(monitor.v2_shadow_state,now,decision.inputs?.recovery_state==="good");
+  const v2Target=allocationTargetV2Candidate({strategic:decision.strategic,recoveryState:decision.inputs?.recovery_state,macroShockState:decision.inputs?.macro_shock_state,mvrvPercentile:decision.inputs?.mvrv_percentile,mvrvPercentileDeep:v2Inputs?.mvrv_percentile_deep??null,recoveryCloses:monitor.v2_shadow_state.closes});
+  const daysElapsedNow=Math.max(0,Math.floor((now-Date.parse(monitor.started_at))/DAY));
+  const trailingTheta=()=>{const rows=(monitor.daily||[]).slice(-370).map(x=>Number(x.targets?.policy_v1)).filter(finite);return rows.length?Math.round(mean(rows)*10)/10:(finite(decision.target_pct)?Number(decision.target_pct):0);};
+  const thetaState=monitor.v2_theta&&typeof monitor.v2_theta==="object"?monitor.v2_theta:{pct:null,fixed_at_day:null};
+  const reviewBoundaries=[...(cfg.review_days||[90,180,365])];
+  const dueBoundary=reviewBoundaries.filter(d=>daysElapsedNow>=d).at(-1)??null;
+  if(dueBoundary!==null&&(thetaState.fixed_at_day===null||dueBoundary>thetaState.fixed_at_day)){thetaState.pct=trailingTheta();thetaState.fixed_at_day=dueBoundary;}
+  monitor.v2_theta=thetaState;
+  desired.policy_v2_shadow=v2Target;
+  desired.static_theta=finite(thetaState.pct)?thetaState.pct:trailingTheta();
   const costRate=cfg.transaction_cost_bps_per_full_turnover/10_000;
   const priorPrice=Number(monitor.last_price),dt=Math.max(0,now-Date.parse(monitor.last_at||at)),btcReturn=priorPrice>0?Number(price)/priorPrice-1:0;
   const legacyCashQuote=finite(monitor.last_cash_annual_pct)?Number(monitor.last_cash_annual_pct):null;
@@ -418,11 +443,17 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     tactical_candidate:regimeMeta.tactical?.candidate??null,tactical_count:regimeMeta.tactical?.count??null,
     tactical_since:regimeMeta.tactical?.since??null,tactical_hold_until:regimeMeta.tactical?.hold_until??null,
   }:null;
-  const logEntry={t:at,previous_log_hash:priorLogHash,policy_hash:decision.policy_hash,decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,status:decision.status,strategic:decision.strategic,tactical:decision.tactical,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,quality:decision.quality.status,source_vintages_sha256:sourceVintages?.contract_sha256||null,hysteresis};
+  // Провенанс тени v2 в hash-цепи: цель кандидата, входы градуировки и глубокий перцентиль
+  // хэшируются вместе с записью — доказательства для решения о переключении воспроизводимы из
+  // леджера, а не из ничем не покрытого бокового поля. Все значения ??null (см. класс input_hash).
+  const v2Ledger={target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state?.closes??null,mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,theta_pct:finite(monitor.v2_theta?.pct)?Number(monitor.v2_theta.pct):null};
+  const logEntry={t:at,previous_log_hash:priorLogHash,policy_hash:decision.policy_hash,decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,status:decision.status,strategic:decision.strategic,tactical:decision.tactical,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,quality:decision.quality.status,source_vintages_sha256:sourceVintages?.contract_sha256||null,hysteresis,v2:v2Ledger};
   logEntry.log_hash=sha256(logEntry);
   monitor.decision_log.push(logEntry);
   monitor.decision_log=monitor.decision_log.slice(-cfg.observation_log_limit);
-  const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
+  // v2_diverged фиксируется из СЫРЫХ целей этого тика: клампованные carry-forward цели стратегий
+  // во время insufficient расходились бы фиктивно и завышали days_diverged (ревью 2026-07-22).
+  const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,v2_diverged:finite(v2Target)&&finite(decision.target_pct)&&Number(v2Target)!==Number(decision.target_pct),input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
   const sameDay=monitor.daily.findIndex(x=>x.date===date);if(sameDay>=0)monitor.daily[sameDay]=dailyRow;else monitor.daily.push(dailyRow);
   monitor.daily=monitor.daily.filter(x=>now-Date.parse(x.t)<=cfg.daily_history_days*DAY).sort((a,b)=>Date.parse(a.t)-Date.parse(b.t));
   monitor.updated_at=at;monitor.last_at=at;monitor.last_price=Number(price);monitor.last_cash_quote_pct=finite(cashQuotePct)?Number(cashQuotePct):null;monitor.last_cash_quote_basis=cashQuoteBasis;delete monitor.last_cash_annual_pct;monitor.cash_yield_available=finite(cashQuotePct);
@@ -441,5 +472,15 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   }
   monitor.performance=Object.fromEntries(Object.entries(monitor.strategies).map(([name,strategy])=>[name,strategyStats(strategy,monitor.daily,name)]));
   monitor.health=evaluateHealth(monitor,decision);
+  // Публичный блок кандидата v2: цель тени, состояние градуировки, ревью-триада, машинная оценка
+  // критериев приёмки/фальсификации и расхождение с живой политикой — весь материал будущего
+  // решения о переключении в одном месте. Sharpe-нога R2 питается от performance (посчитан выше).
+  monitor.v2_review=evaluateReviewV2(monitor.daily,monitor.v2_review,monitor.performance);
+  const divergedDays=(monitor.daily||[]).filter(x=>x.v2_diverged===true).length;
+  // Recovery-эпизод тени: непрерывный отрезок дней, где градуированный пол реально держал цель
+  // кандидата (>= первой ступени лестницы пола).
+  const floorRung1=POLICY_V2_CANDIDATE.floor_ladder_pct[0];
+  const episodesObserved=(()=>{let n=0,inEpisode=false;for(const x of (monitor.daily||[])){const on=finite(x.targets?.policy_v2_shadow)&&Number(x.targets.policy_v2_shadow)>=floorRung1&&Number(x.targets.policy_v2_shadow)>Number(x.targets?.policy_v1??100);if(on&&!inEpisode){n++;inEpisode=true;}else if(!on)inEpisode=false;}return n;})();
+  monitor.v2_candidate={...policyV2CandidateMetadata(),target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state.closes,inputs:{mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,deep_window_used:finite(v2Inputs?.mvrv_percentile_deep),theta_pct:finite(monitor.v2_theta?.pct)?monitor.v2_theta.pct:null,theta_fixed_at_day:monitor.v2_theta?.fixed_at_day??null},diverges_now:finite(v2Target)&&v2Target!==decision.target_pct,days_diverged:divergedDays,acceptance:POLICY_V2_CANDIDATE.decision_record.acceptance_criteria,acceptance_status:evaluateAcceptanceV2({performance:monitor.performance,shadowDays:monitor.days_elapsed,recoveryEpisodesObserved:episodesObserved})};
   return monitor;
 }

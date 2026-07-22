@@ -81,3 +81,55 @@ independent two-hour monitor.
 
 Personal position sizing remains outside this contract; percentages retain their existing meaning as
 a share of the user-defined BTC risk limit `B`.
+
+## Policy v2 candidate (shadow, 2026-07-22)
+
+`btc-decision-suite-v2-candidate` ([`docs/policy-v2-candidate.mjs`](docs/policy-v2-candidate.mjs))
+runs **in shadow only**: the live target is still produced by frozen v1; the candidate's target,
+its graduation state, the R1/R2/R3 review triad and the divergence record are published under
+`monitoring.v2_candidate` / `monitoring.v2_review`, and its NAV is tracked as the
+`policy_v2_shadow` strategy next to a `static_theta` benchmark (the policy's own realized average
+exposure — the honest null).
+
+The candidate changes exactly three things, each backed by the adversarial policy challenge of
+2026-07-22 (76 agents; every high-confidence claim verified by two independent lenses):
+
+1. **Directional resolution rule.** Risk-on transitions (the recovery floor) must be confirmed by
+   UTC daily closes — the resolution the backtests actually tested; risk-off stays instant, where
+   the hourly/daily gap works toward safety. v1 executed the floor on a single hourly tick, a
+   semantics no backtest ever covered.
+2. **Time-graduated recovery floor 40/60/80** by consecutive daily closes with the detector good
+   (statistically indistinguishable from the instant 80 floor, p≈0.76, while removing the +60pp
+   single-tick jump). Rejected with measurements, do not resurrect: strict `>0` legs (misses
+   2019-03, fwd90 +222%), leg-count graduation (top rung never occurred in 14 years),
+   dwell filters ≥5 days (cut fwd30 from +10.2% to +0.5%).
+3. **Review triad R1/R2/R3** replacing v1's investigate/retirement rules, whose measured
+   diagnostic power was zero and inverted (a broken "always 100%" policy alarmed *less* often than
+   the healthy one; 44.5% false-alarm days). R1 protection test: in any 180d window where HODL
+   drawdown ≤ −25%, the policy drawdown must stay ≤ 0.7× (historically 0% false alarms, 100% catch
+   of disabled protection); R2 timing vs `static_theta` over 365d (net-return gap ≥10pp AND excess
+   Sharpe gap ≥0.35, both machine-evaluated); R3 upside capture in bull windows. Persistence is
+   denominated in **review days** (UTC-day changes), never in collector invocations. Every
+   criterion must pass a power test against broken variants — R1, R2 and R3 power tests are part
+   of the candidate's test suite. `static_theta` runs as a trailing mean of the policy's own
+   targets until the first formal review (day 90) and is then **frozen, re-fixed only at review
+   boundaries** — a continuously drifting Θ would lag-copy the policy and lose R2's power.
+
+The ladder, weights, gates and verdict hysteresis are unchanged; the mid-ladder values are hereby
+documented as **ordinal, not optimal** (plateau: deteriorating 10–35 / transition 30–60 within
+0.06 Sharpe in-sample) and must not be re-tuned on the same history. The capitulation floor in the
+candidate additionally requires agreement of the 4-year and the **full available depth** MVRV
+windows (no truncation; the deep window needs ≥1200 points and a last observation ≤5 days old —
+otherwise it is honestly null and the floor falls back to the single 4-year window, i.e. v1
+behavior, with `v2_candidate.inputs.deep_window_used` recording the state). The euphoria cap
+stays single-window (a safety rule is not weakened). A day confirms the recovery detector only if
+the detector is good at the day's **last observation and on the majority of its observations** —
+a lone late-night tick cannot confirm a day. The candidate's target, graduation state and deep
+percentile are hashed into every decision-log record (`v2` block), so shadow evidence is
+reproducible from the ledger.
+
+**Pre-declared acceptance (switch to v2 requires all):** ≥90 shadow days; shadow Sharpe ≥ v1 − 0.10;
+≥1 recovery episode observed in shadow or ≥180 days elapsed; green tests and zero operational
+incidents attributable to the candidate; explicit owner approval in a separate release.
+**Falsified if** the shadow trails v1 by >0.25 Sharpe over ≥120 days — the candidate is then
+rejected and the record kept. Shadow evidence never recalibrates v1.

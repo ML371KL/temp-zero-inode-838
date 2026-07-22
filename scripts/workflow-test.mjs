@@ -139,5 +139,5 @@ assert.match(y,/^\s*issues:\s*write\s*(#.*)?$/m,"snapshot workflow needs issues:
   assert.ok(inRunMonitorAt>y.match(/^\s*uses:\s*actions\/deploy-pages/m).index,"in-run monitor must run AFTER the Pages deploy");
   assert.ok(inRunMonitorAt>y.indexOf("Сохранить снимок в репозиторий"),"in-run monitor must run AFTER the snapshot commit");
 }
-for(const asset of ["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs"])assert.ok(monitorScript.includes(`"${asset}"`),`external monitor does not check ${asset}`);
+for(const asset of ["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs"])assert.ok(monitorScript.includes(`"${asset}"`),`external monitor does not check ${asset}`);
 console.log("Workflow static tests OK");

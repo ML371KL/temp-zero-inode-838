@@ -28,7 +28,7 @@ let MONITOR_GRAFT_V1=null;
 try{MONITOR_GRAFT_V1=JSON.parse(readFileSync(new URL("../docs/monitor-graft-v1.json",import.meta.url),"utf8"));}catch{}
 import { boundedPublicHistoryV1, compactHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
-const VERSION = "2.12.0";
+const VERSION = "2.13.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -1636,7 +1636,16 @@ function compute(){
     upgrade_hold_reset_by_degraded:upgradeWasHeld&&["insufficient","emergency"].includes(stableS.candidate)?1:0,
     risk_off_confirmed_under_30m:previous?.regime?.strategic&&stableS.state===stableS.candidate&&stableS.state!==previous.regime.strategic&&severity(stableS.state)<severity(previous.regime.strategic)&&finite(prevGeneratedAt)&&NOW-prevGeneratedAt<30*60_000?1:0,
   };
-  const monitoring=updateForwardMonitorV1({previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta:{strategic:stableS,tactical:stableT},shadowHysteresis});
+  // Второе окно MVRV для теневого кандидата v2 (двухоконное согласие капитуляционного пола):
+  // ПОЛНАЯ доступная глубина ряда без усечения (CM ~5 лет, резерв bitcoin-data — вся история;
+  // POLICY.md обещает full-depth — ранние экстремумы MVRV и есть смысл глубокого окна). Гарды:
+  // минимум 1200 точек И свежесть последней точки ≤5 дней — протухший «более длинный» ряд другого
+  // провайдера иначе накладывал бы вето по доаварийным данным. При любом гарде → null, и пол
+  // честно работает по одному окну (v1); факт публикуется в v2_candidate.inputs.deep_window_used.
+  const mvrvDeepSeries=[cmSeries("CapMVRVCur"),bcSeries("MVRV")].sort((a,b)=>b.length-a.length)[0]||[];
+  const mvrvDeepFresh=mvrvDeepSeries.length&&NOW-last(mvrvDeepSeries).t<=5*DAY;
+  const mvrvDeepPct=mvrvDeepSeries.length>=1200&&mvrvDeepFresh?percentileRank(mvrvDeepSeries.map(x=>x.v),last(mvrvDeepSeries).v):null;
+  const monitoring=updateForwardMonitorV1({previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta:{strategic:stableS,tactical:stableT},shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}});
   // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
   // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
   // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.

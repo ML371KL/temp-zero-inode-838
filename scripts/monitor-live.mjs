@@ -10,7 +10,7 @@ const DEFAULT_URL="https://ml371kl.github.io/temp-zero-inode-838/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
 const PACKAGE_VERSION=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8")).version;
-const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs"];
+const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs"];
 const normalizedAsset=text=>String(text).replace(/\r\n/g,"\n");
 
 export async function validatePublishedAssetsV1(snapshotUrl,fetchImpl=fetch){
@@ -134,7 +134,14 @@ async function main(){
   }
   if(!process.env.SNAPSHOT_FILE||process.env.DASHBOARD_BASE_URL){
     const assets=await validatePublishedAssetsV1(process.env.DASHBOARD_BASE_URL?new URL("snapshot.json",process.env.DASHBOARD_BASE_URL).href:snapshotUrl);
-    result.asset_checks=assets.checked_assets;result.issues.push(...assets.issues);result.ok=result.issues.length===0;
+    // Окно релиза: свежий рассинхрон версий (checkout новее ещё-не-передеплоенной страницы) делает
+    // расхождения/404 ассетов той же самой гонкой деплоя, а не инцидентом — новый файл появится
+    // на Pages первым же прогоном публикации. Протухшая страница теряет этот грейс вместе с версионным.
+    const releaseWindow=snapshot?.version!==PACKAGE_VERSION&&(Date.now()-Date.parse(snapshot?.generated_at||""))/36e5<=1.5;
+    const assetIssues=releaseWindow?[]:assets.issues;
+    result.asset_checks=assets.checked_assets;result.issues.push(...assetIssues);
+    if(releaseWindow&&assets.issues.length)result.release_window_suppressed_assets=assets.issues;
+    result.ok=result.issues.length===0;
   }
   await syncAlert(result);
   console.log(JSON.stringify(result,null,2));
