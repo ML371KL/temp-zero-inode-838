@@ -1,0 +1,54 @@
+name: Уведомления в Telegram
+
+# Запускается ПОСЛЕ штатного прогона снимка: сам GitHub-cron в этом репозитории ненадёжен,
+# а снимок дёргается внешним будильником — так уведомления наследуют его такт.
+# СОЗНАТЕЛЬНО не входит в npm run check и не трогает решающий контур: уведомления читают уже
+# опубликованное состояние и не имеют права ни изменить решение, ни заморозить публикацию.
+on:
+  workflow_run:
+    workflows: ["Обновление Bitcoin-снимка"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notify
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # Состояние «что уже отправлено» живёт в Actions Cache тем же приёмом, что и .state/cache.json
+      # сборщика. Потеря кэша безопасна: скрипт увидит пустое состояние, зафиксирует базу заново
+      # и промолчит — худший исход это пропуск уведомления, а не лавина сообщений.
+      - name: Восстановить состояние уведомлений
+        uses: actions/cache@v5
+        with:
+          path: .notify/state.json
+          key: btc21m-notify-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            btc21m-notify-${{ github.ref_name }}-
+
+      - name: Тесты уведомлений
+        run: node scripts/notify-test.mjs
+
+      - name: Разослать изменения
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          NOTIFY_MODEL: ${{ vars.NOTIFY_MODEL }}
+          NOTIFY_SOURCE: json
+          NOTIFY_SNAPSHOT: docs/snapshot.json
+          NOTIFY_STATE: .notify/state.json
+        run: node scripts/notify.mjs

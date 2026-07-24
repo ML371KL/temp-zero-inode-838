@@ -4,3 +4,5 @@
 
 .candidate/
 .sandbox/
+.notify/
+node_modules/
