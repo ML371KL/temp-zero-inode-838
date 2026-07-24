@@ -344,6 +344,8 @@ function diff(prevState, panel) {
   const events = [];
   const releaseGroups = [];
   const revisedSeries = [];
+  const bounced = [];
+  const seenRevised = prevState.revised_points || {};
   const prevInd = prevState.indicators || {};
 
   if (prevState.target && panel.target && !sameNum(prevState.target.pct, panel.target.pct)) {
@@ -438,7 +440,17 @@ function diff(prevState, panel) {
     }
 
     // Переписанная история ряда: КАКАЯ точка и КАК изменилась, а не «изменено строк: 1».
-    const rewritten = seriesRevisions(was.points, i.points);
+    // Наблюдение из прода: mempool.space пересчитывает оценку хешрейта за один и тот же день
+    // туда-обратно между двумя значениями. Возврат к уже показанному значению — не новость,
+    // а качок источника, поэтому такие точки отсеиваются (факт остаётся в логе).
+    const rewritten = seriesRevisions(was.points, i.points).filter((c) => {
+      const seen = seenRevised[`${i.id}|${c.t}`]?.v;
+      if (Array.isArray(seen) && seen.some((v) => sameNum(v, c.after))) {
+        bounced.push(`${i.name} за ${ruDay(c.t)}: значение вернулось к ранее показанному`);
+        return false;
+      }
+      return true;
+    });
     if (rewritten.length) revisedSeries.push({ i, changed: rewritten });
   }
 
@@ -489,6 +501,8 @@ function diff(prevState, panel) {
           sources.size ? `источник: ${[...sources].join(", ")}` : "",
         ].filter(Boolean).join(" · "),
         moves,
+        // машинночитаемый след: из него состояние учится, какие значения точки уже показывались
+        revisedPoints: g.items.flatMap(({ i, changed }) => changed.map((c) => ({ id: i.id, t: c.t, before: c.before, after: c.after }))),
         note: g.items.map((r) => `${r.i.name}: ${r.i.note}`).join("\n").slice(0, 1200),
       });
     }
@@ -532,6 +546,10 @@ function diff(prevState, panel) {
     for (const r of freshAlerts) console.log(`  · ${r.text}`);
   }
 
+  if (bounced.length) {
+    console.log(`качки источника (в рассылку не идут): ${bounced.length}`);
+    for (const b of bounced) console.log(`  · ${b}`);
+  }
   events.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
   return events;
 }
@@ -742,6 +760,34 @@ async function sendTelegram(text) {
 const SENT_TTL_MS = 7 * 24 * 3600 * 1000;
 const sentKey = (ev) => `${ev.key}|${ev.before}→${ev.after}|${(ev.moves || []).map((m) => m.after).join(",")}`;
 
+// Память о показанных значениях переписанных точек: ключ «карточка|метка времени» → значения,
+// о которых уже сообщалось. Нужна, чтобы отличить настоящий пересмотр от качка источника
+// туда-обратно. Живёт дольше индекса доставленного: качок может вернуться и через месяц.
+const REVISED_TTL_MS = 90 * 24 * 3600 * 1000;
+const REVISED_MAX_VALUES = 6;
+
+function rememberRevised(prev, events, now) {
+  const out = {};
+  for (const [k, rec] of Object.entries(prev || {})) {
+    const at = Date.parse(rec?.at || "");
+    if (Number.isFinite(at) && now - at < REVISED_TTL_MS && Array.isArray(rec.v)) out[k] = { v: rec.v.slice(), at: rec.at };
+  }
+  for (const ev of events) {
+    for (const p of ev.revisedPoints || []) {
+      const k = `${p.id}|${p.t}`;
+      const rec = (out[k] = out[k] || { v: [], at: new Date(now).toISOString() });
+      // Помним ОБЕ стороны показанного пересмотра: качок возвращает точку именно к прежнему
+      // значению, то есть к «было», а не к «стало» — на этом первая версия фильтра и промахнулась.
+      for (const v of [p.before, p.after]) {
+        if (finite(v) && !rec.v.some((x) => sameNum(x, v))) rec.v.push(v);
+      }
+      if (rec.v.length > REVISED_MAX_VALUES) rec.v = rec.v.slice(-REVISED_MAX_VALUES);
+      rec.at = new Date(now).toISOString();
+    }
+  }
+  return out;
+}
+
 function pruneSent(sent, now) {
   const out = {};
   for (const [k, iso] of Object.entries(sent || {})) {
@@ -812,6 +858,7 @@ async function main() {
   const first = !prev.indicators;
   const now = Date.now();
   const sentIndex = pruneSent(prev.sent, now);
+  let revisedSeen = prev.revised_points || {};
   const all = first ? [] : diff(prev, panel);
   const events = all.filter((ev) => !sentIndex[sentKey(ev)]);
 
@@ -822,7 +869,7 @@ async function main() {
   let baseline = null; // сдвигается один раз в самом конце — до тех пор пишем старую базу
   const persist = async () => {
     await mkdir(dirname(STATE_PATH), { recursive: true });
-    await writeFile(STATE_PATH, JSON.stringify({ ...(baseline || prev), sent: sentIndex }, null, 1));
+    await writeFile(STATE_PATH, JSON.stringify({ ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen }, null, 1));
   };
 
   let sent = 0;
@@ -843,12 +890,14 @@ async function main() {
         await sendTelegram(text);
         sent++;
         sentIndex[sentKey(ev)] = new Date().toISOString();
+        if (ev.revisedPoints) revisedSeen = rememberRevised(revisedSeen, [ev], now);
         await persist(); // индекс доставленного — сразу на диск, база сдвинется в конце
         if (i < capped.length - 1) await sleep(SEND_GAP_MS);
       }
     }
   }
 
+  if (DRY) revisedSeen = rememberRevised(revisedSeen, events.filter((e) => e.revisedPoints), now);
   baseline = snapshotState(panel);
   await persist();
   console.log(DRY ? "dry-run: ничего не отправлено, база сравнения обновлена" : `отправлено сообщений: ${sent}`);
@@ -861,4 +910,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, pingMessage, MACRO_CADENCE };
+export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, pingMessage, MACRO_CADENCE };

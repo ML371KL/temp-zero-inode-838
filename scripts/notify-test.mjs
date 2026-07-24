@@ -1,7 +1,7 @@
 // Тесты уведомлений. Все фикстуры синтетические и НЕ зависят от текущей даты: проверяется
 // поведение диффера, а не то, что сегодня опубликовал FRED.
 import assert from "node:assert/strict";
-import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, pingMessage } from "./notify.mjs";
+import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, pingMessage } from "./notify.mjs";
 
 let passed = 0;
 const test = (name, fn) => {
@@ -221,6 +221,29 @@ test("дребезг последнего знака не выдаётся за 
   const before = stateOf(panelOf([withPoints({ [day("2026-05-27")]: 1e20, [day("2026-05-28")]: 2e20 })]));
   const after = panelOf([withPoints({ [day("2026-05-27")]: 1e20 * (1 + 1e-12), [day("2026-05-28")]: 2e20 })]);
   assert.equal(diff(before, after).length, 0);
+});
+
+test("возврат точки к уже показанному значению — не сообщение, а качок источника", () => {
+  const pts = (v) => ({ [day("2026-05-27")]: v, [day("2026-05-28")]: 200, [day("2026-05-29")]: 300 });
+  const s0 = stateOf(panelOf([withPoints(pts(100))]));
+  const first = diff(s0, panelOf([withPoints(pts(115))]));
+  assert.equal(first.length, 1, "первый пересмотр показывается");
+  const seen = rememberRevised({}, first, Date.parse("2026-07-24T00:00:00Z"));
+  const s1 = { ...stateOf(panelOf([withPoints(pts(115))])), revised_points: seen };
+  const back = diff(s1, panelOf([withPoints(pts(100))]));
+  assert.equal(back.length, 0, "источник вернул прежнее значение — новости в этом нет");
+  const s2 = { ...stateOf(panelOf([withPoints(pts(115))])), revised_points: seen };
+  assert.equal(diff(s2, panelOf([withPoints(pts(130))])).length, 1, "новое, ещё не показанное значение — событие");
+});
+
+test("память о показанных значениях протухает и не растёт бесконечно", () => {
+  const now = Date.parse("2026-07-24T00:00:00Z");
+  const old = { "x|1": { v: [1], at: "2026-01-01T00:00:00Z" }, "x|2": { v: [2], at: "2026-07-20T00:00:00Z" } };
+  const kept = rememberRevised(old, [], now);
+  assert.deepEqual(Object.keys(kept), ["x|2"], "запись старше 90 дней уходит");
+  let acc = {};
+  for (let i = 0; i < 20; i++) acc = rememberRevised(acc, [{ revisedPoints: [{ id: "x", t: 7, after: i }] }], now);
+  assert.ok(acc["x|7"].v.length <= 6, `список значений точки не должен расти без предела: ${acc["x|7"].v.length}`);
 });
 
 test("крупные и мелкие порядки печатаются читаемо", () => {
