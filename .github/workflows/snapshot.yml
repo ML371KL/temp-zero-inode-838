@@ -9,6 +9,8 @@ on:
     paths:
       - ".github/workflows/snapshot.yml"
       - "scripts/**"
+      - "!scripts/notify*.mjs"   # уведомления живут снаружи решающего контура: их правка не должна
+                                 # запускать пересборку снимка и деплой страницы
       - "docs/**"
       - "package.json"
 
