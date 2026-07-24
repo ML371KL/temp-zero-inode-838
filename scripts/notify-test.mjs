@@ -1,7 +1,7 @@
 // Тесты уведомлений. Все фикстуры синтетические и НЕ зависят от текущей даты: проверяется
 // поведение диффера, а не то, что сегодня опубликовал FRED.
 import assert from "node:assert/strict";
-import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, pingMessage } from "./notify.mjs";
+import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, pingMessage, HUMAN, MACRO_CADENCE } from "./notify.mjs";
 
 let passed = 0;
 const test = (name, fn) => {
@@ -37,8 +37,9 @@ const ind = (o) => ({
 });
 const panelOf = (indicators, extra = {}) => ({
   generated_at: "2026-07-24T10:00:00.000Z",
+  assetWord: "акций",
   verdict: { word: "ДЕРЖАТЬ", extra: "" },
-  target: null,
+  allocation: null,
   indicators,
   detectors: [],
   revisions: [],
@@ -88,7 +89,8 @@ test("одна публикация — одно сообщение на нес�
   ]);
   const ev = diff(before, after);
   assert.equal(ev.length, 2, "две разные публикации → два сообщения");
-  const fred = ev.find((e) => e.title.includes("FRED"));
+  const fred = ev.find((e) => e.title === "Данные ФРС");
+  assert.ok(fred, `заголовок обязан быть человеческим именем источника, а не ключом датасета: ${ev.map((e) => e.title)}`);
   assert.equal(fred.moves.length, 2, "две карточки одной публикации живут в одном сообщении");
 });
 
@@ -101,21 +103,19 @@ test("публикации с разной датой наблюдения не 
   assert.equal(diff(before, after).length, 2);
 });
 
-test("смена зоны идёт отдельным сообщением и не дублируется релизом", () => {
+test("внутренняя переоценка показателя сама по себе не рассылается", () => {
+  const before = stateOf(panelOf([ind({ zone: "норма", score: 1 })]));
+  const after = panelOf([ind({ zone: "стресс", score: -1 })]);
+  assert.equal(diff(before, after).length, 0, "смена зоны — кухня панели, читателю нужны данные и доля");
+});
+
+test("вышедшие данные рассылаются даже если оценка показателя сдвинулась", () => {
   const before = stateOf(panelOf([ind({ zone: "норма", score: 1, value: "1", value_num: 1 })]));
   const after = panelOf([ind({ zone: "стресс", score: -1, value: "2", value_num: 2, observed_at: "2026-07-21" })]);
   const ev = diff(before, after);
-  assert.equal(ev.length, 1, "релиз не должен дублировать смену зоны");
-  assert.equal(ev[0].kind, "zone");
-  assert.match(ev[0].detail, /1 → 2/, "сообщение о зоне обязано нести и старое, и новое значение");
-});
-
-test("смена балла без смены подписи зоны — тоже событие", () => {
-  const before = stateOf(panelOf([ind({ zone: "смешанно", score: 0 })]));
-  const after = panelOf([ind({ zone: "смешанно", score: -0.5 })]);
-  const ev = diff(before, after);
   assert.equal(ev.length, 1);
-  assert.equal(ev[0].kind, "zone");
+  assert.equal(ev[0].kind, "release");
+  assert.equal(ev[0].moves[0].after, "2");
 });
 
 test("непрерывный рыночный фид не порождает релизов", () => {
@@ -124,12 +124,16 @@ test("непрерывный рыночный фид не порождает р�
   assert.equal(diff(before, after).length, 0, "у котировок «значение изменилось» — не событие");
 });
 
-test("непрерывный фид всё ещё сообщает о смене зоны", () => {
-  const before = stateOf(panelOf([ind({ scheduled: false, zone: "спокойно", score: 0 })]));
-  const after = panelOf([ind({ scheduled: false, zone: "обвал", score: -2 })]);
+test("сдвиг оценки становится объяснением к смене доли, а не отдельным сообщением", () => {
+  const alloc = (pct) => ({ pct, blocks: {}, bands: null, hold: null });
+  const before = stateOf(panelOf([ind({ id: "hy", zone: "норма", score: 1 })], { allocation: alloc(85) }));
+  const after = panelOf([ind({ id: "hy", zone: "стресс", score: -1 })], { allocation: alloc(65) });
   const ev = diff(before, after);
   assert.equal(ev.length, 1);
-  assert.equal(ev[0].kind, "zone");
+  assert.equal(ev[0].kind, "allocation");
+  assert.equal(ev[0].before, "85%");
+  assert.equal(ev[0].after, "65%");
+  assert.ok(ev[0].causes.some((c) => /спред высокодоходных/i.test(c)), `причина должна называть показатель человеческим именем: ${ev[0].causes}`);
 });
 
 test("ревизия: та же дата, другое значение", () => {
@@ -152,29 +156,71 @@ test("дребезг чисел ниже машинной точности не 
   assert.equal(diff(before, after).length, 0);
 });
 
-test("вердикт, цель и детектор — каждое своим сообщением, в порядке важности", () => {
-  const beforePanel = panelOf([ind({})], {
-    verdict: { word: "ДЕРЖАТЬ", extra: "" },
-    target: { pct: 80, reason: "" },
-    detectors: [{ id: "d1", name: "Детектор", state: "calm", inputs: "", note: "" }],
-  });
-  const before = stateOf(beforePanel);
-  const after = panelOf([ind({})], {
-    verdict: { word: "СОКРАЩАТЬ", extra: "" },
-    target: { pct: 5, reason: "" },
-    detectors: [{ id: "d1", name: "Детектор", state: "fired", inputs: "входы", note: "" }],
-  });
+test("смена доли — ОДНО сообщение, детектор внутри него объяснением", () => {
+  const det = (state) => [{ id: "d1", name: "Слом маржинального спроса", state, inputs: "", note: "" }];
+  const before = stateOf(panelOf([ind({})], { allocation: { pct: 80 }, detectors: det("calm") }));
+  const after = panelOf([ind({})], { allocation: { pct: 5 }, detectors: det("fired") });
   const ev = diff(before, after);
-  assert.deepEqual(ev.map((e) => e.kind), ["target", "verdict", "detector"]);
+  assert.equal(ev.length, 1, "вердикт и детектор не должны идти отдельными сообщениями");
+  assert.equal(ev[0].kind, "allocation");
   assert.equal(ev[0].before, "80%");
-  assert.equal(ev[0].after, "5%");
-  assert.equal(ev[2].after, "СРАБОТАЛ", "состояние детектора показывается по-русски");
+  assert.ok(ev[0].causes.some((c) => c.includes("Приток денег в биткоин прекратился")), `детектор объясняется по-человечески: ${ev[0].causes}`);
+});
+
+test("сработавший сигнал риска без движения доли идёт отдельным коротким сообщением", () => {
+  const det = (state) => [{ id: "d1", name: "Нефтяной шок / Ормуз", state, inputs: "WTI $96", note: "" }];
+  const before = stateOf(panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("calm") }));
+  const ev = diff(before, panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("fired") }));
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].kind, "risk");
+  assert.equal(ev[0].title, "Скачок цен на нефть");
+});
+
+test("снятие предварительной тревоги не шлётся", () => {
+  const det = (state) => [{ id: "d1", name: "Нефтяной шок / Ормуз", state, inputs: "", note: "" }];
+  const before = stateOf(panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("watch") }));
+  assert.equal(diff(before, panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("calm") })).length, 0);
 });
 
 test("алерт источника без наблюдаемых изменений в рассылку не идёт", () => {
   const rev = [{ key: "network:2026-07-24:abc", text: "источник переписал уже отданные данные" }];
   const ev = diff(stateOf(panelOf([ind({})])), panelOf([ind({})], { revisions: rev }));
   assert.equal(ev.length, 0, "«изменено строк: 1» без старого и нового значения — не сообщение");
+});
+
+test("у каждого показателя макро-панели есть человеческое имя", () => {
+  const missing = Object.keys(MACRO_CADENCE).filter((id) => !HUMAN[id]);
+  assert.deepEqual(missing, [], `без записи в словаре в сообщение уедет внутренняя подпись карточки: ${missing}`);
+});
+
+test("устойчивость решения объясняется числами, а не наречиями", () => {
+  const alloc = (pct) => ({
+    pct,
+    bands: { adverse: -20, supportive: 20 },
+    blocks: {
+      macro: { title: "мировые условия", score: 16.7, families: 3, step: 50 / 3 },
+      demand: { title: "спрос", score: -31.25, families: 4, step: 12.5 },
+      cycle: { title: "цикл", score: -25, families: 5, step: 10 },
+    },
+    hold: { state: "defensive", candidate: "defensive", count: 21 },
+  });
+  const ev = diff(stateOf(panelOf([ind({})], { allocation: alloc(80) })), panelOf([ind({})], { allocation: alloc(5) }));
+  assert.equal(ev[0].kind, "allocation");
+  const text = ev[0].stability.join(" | ");
+  assert.match(text, /цикл/, "называть надо блок, который держит решение, а не любой ближайший к границе");
+  assert.match(text, /5 пунктов/, "запас до разворота обязан быть числом");
+  assert.match(text, /2 блока из 3/, "если неблагоприятны два блока, отката одного мало — это надо сказать");
+  assert.match(text, /21 наблюдением/);
+});
+
+test("сообщение о доле собирается с разделами «почему» и «устойчиво ли»", () => {
+  const msg = renderMessage(
+    { kind: "allocation", title: "Доля акций сокращена", before: "85%", after: "65%", causes: ["причина"], stability: ["запас 5 пунктов"] },
+    "комментарий"
+  );
+  assert.match(msg, /Что за этим стоит/);
+  assert.match(msg, /Насколько это устойчиво/);
+  assert.match(msg, /85% → <b>65%<\/b>/);
 });
 
 /* ---- переписанная история ряда: что именно, когда и на сколько ---- */
@@ -335,7 +381,7 @@ test("индекс доставленного протухает, но не ра
 test("проверочное сообщение показывает текущее состояние панели", () => {
   const p = panelOf([ind({ name: "Карточка" })], {
     verdict: { word: "ДЕРЖАТЬ", extra: "балл +9" },
-    target: { pct: 20, reason: "" },
+    allocation: { pct: 20 },
     detectors: [
       { id: "a", name: "Спокойный", state: "calm", inputs: "", note: "" },
       { id: "b", name: "Тревожный", state: "fired", inputs: "", note: "" },
