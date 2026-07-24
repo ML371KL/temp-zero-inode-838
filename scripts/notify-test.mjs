@@ -262,6 +262,21 @@ test("индекс доставленного протухает, но не ра
 
 /* ---- комментатор LLM: сеть подменяется, ключ фиктивный ---- */
 
+// Тесты фолбэка НАМЕРЕННО провоцируют отказ модели, и её жалоба уезжала в лог CI, выглядя там
+// настоящей ошибкой. Такой шум приучает не читать диагностику, поэтому ожидаемый вывод глушится:
+// сами сообщения при этом проверяются — тест падает, если жалобы не было вовсе.
+const quiet = async (fn) => {
+  const real = console.error;
+  const said = [];
+  console.error = (...a) => said.push(a.join(" "));
+  try {
+    await fn();
+  } finally {
+    console.error = real;
+  }
+  return said.join("\n");
+};
+
 const withFetch = async (impl, fn) => {
   const real = globalThis.fetch;
   const realKey = process.env.OPENROUTER_KEY;
@@ -301,9 +316,13 @@ testAsync("мусор вместо JSON → шаблон", async () => {
   assert.equal(out, null);
 });
 
-testAsync("отказ API не роняет прогон", async () => {
-  const out = await withFetch(async () => ({ ok: false, status: 503, text: async () => "down" }), () => llmComments(evs, panel));
+testAsync("отказ API не роняет прогон и объясняет причину в логе", async () => {
+  let out;
+  const said = await quiet(async () => {
+    out = await withFetch(async () => ({ ok: false, status: 503, text: async () => "down" }), () => llmComments(evs, panel));
+  });
   assert.equal(out, null);
+  assert.match(said, /503/, "причина отказа обязана попасть в лог");
 });
 
 testAsync("по умолчанию берётся именно бесплатная nemotron", async () => {
@@ -344,13 +363,18 @@ testAsync("платная модель без явного разрешения 
     return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
   };
   process.env.NOTIFY_MODEL = "anthropic/claude-opus-4.8";
+  let out;
+  let said = "";
   try {
-    const out = await withFetch(spy, () => llmComments(evs, panel));
-    assert.equal(out, null, "должен быть шаблон, а не запрос");
-    assert.equal(called, false, "платный запрос не должен уходить в сеть");
+    said = await quiet(async () => {
+      out = await withFetch(spy, () => llmComments(evs, panel));
+    });
   } finally {
     delete process.env.NOTIFY_MODEL;
   }
+  assert.equal(out, null, "должен быть шаблон, а не запрос");
+  assert.equal(called, false, "платный запрос не должен уходить в сеть");
+  assert.match(said, /платная/, "отказ от платной модели обязан быть объяснён в логе");
 });
 
 testAsync("платная модель уходит в сеть только при NOTIFY_ALLOW_PAID=1", async () => {
