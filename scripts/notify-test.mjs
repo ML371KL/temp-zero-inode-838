@@ -171,14 +171,63 @@ test("вердикт, цель и детектор — каждое своим �
   assert.equal(ev[2].after, "СРАБОТАЛ", "состояние детектора показывается по-русски");
 });
 
-test("ревизии источника не повторяются на следующем прогоне", () => {
-  const rev = [{ key: "etf:2026-07-23:abc", text: "источник переписал данные" }];
-  const p1 = panelOf([ind({})], { revisions: rev });
-  const first = diff(stateOf(panelOf([ind({})])), p1);
-  assert.equal(first.length, 1);
-  assert.equal(first[0].kind, "revision");
-  const second = diff(stateOf(p1), panelOf([ind({})], { revisions: rev }));
-  assert.equal(second.length, 0, "уже отправленная ревизия не должна приходить снова");
+test("алерт источника без наблюдаемых изменений в рассылку не идёт", () => {
+  const rev = [{ key: "network:2026-07-24:abc", text: "источник переписал уже отданные данные" }];
+  const ev = diff(stateOf(panelOf([ind({})])), panelOf([ind({})], { revisions: rev }));
+  assert.equal(ev.length, 0, "«изменено строк: 1» без старого и нового значения — не сообщение");
+});
+
+/* ---- переписанная история ряда: что именно, когда и на сколько ---- */
+
+const withPoints = (pts, o = {}) => ind({ series: undefined, points: pts, ...o });
+const day = (iso) => Date.parse(iso + "T00:00:00Z");
+
+test("переписанная точка ряда показывается с датой и «было → стало»", () => {
+  const before = stateOf(panelOf([withPoints({ [day("2026-05-27")]: 100, [day("2026-05-28")]: 110, [day("2026-05-29")]: 120 })]));
+  const after = panelOf([withPoints({ [day("2026-05-27")]: 115, [day("2026-05-28")]: 110, [day("2026-05-29")]: 120 })]);
+  const ev = diff(before, after);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].kind, "revision");
+  assert.match(ev[0].detail, /27\.05\.2026/, "дата переписанной точки обязана быть в сообщении");
+  assert.equal(ev[0].moves[0].before, "100");
+  assert.equal(ev[0].moves[0].after, "115");
+  assert.equal(ev[0].moves[0].delta, "+15,0%", "проценты пишутся по-русски, с запятой");
+});
+
+test("последняя точка ряда — не ревизия: она ещё формируется", () => {
+  const before = stateOf(panelOf([withPoints({ [day("2026-05-27")]: 100, [day("2026-05-28")]: 110 })]));
+  const after = panelOf([withPoints({ [day("2026-05-27")]: 100, [day("2026-05-28")]: 999, [day("2026-05-29")]: 130 })]);
+  assert.equal(diff(before, after).length, 0, "движение свежей точки — это рынок, а не пересмотр истории");
+});
+
+test("несколько переписанных точек — одно сообщение с периодом", () => {
+  const base = {};
+  for (let d = 1; d <= 10; d++) base[day(`2026-05-${String(d).padStart(2, "0")}`)] = d * 10;
+  const before = stateOf(panelOf([withPoints({ ...base })]));
+  const moved = { ...base, [day("2026-05-02")]: 21, [day("2026-05-03")]: 31, [day("2026-05-04")]: 41 };
+  const ev = diff(before, panelOf([withPoints(moved)]));
+  assert.equal(ev.length, 1);
+  assert.match(ev[0].detail, /период 02\.05\.2026 — 04\.05\.2026/);
+  assert.equal(ev[0].moves.length, 3);
+});
+
+test("новые точки в конце ряда ревизией не считаются", () => {
+  const before = stateOf(panelOf([withPoints({ [day("2026-05-27")]: 100, [day("2026-05-28")]: 110 })]));
+  const after = panelOf([withPoints({ [day("2026-05-27")]: 100, [day("2026-05-28")]: 110, [day("2026-05-29")]: 130, [day("2026-05-30")]: 140 })]);
+  assert.equal(diff(before, after).length, 0);
+});
+
+test("дребезг последнего знака не выдаётся за пересмотр", () => {
+  const before = stateOf(panelOf([withPoints({ [day("2026-05-27")]: 1e20, [day("2026-05-28")]: 2e20 })]));
+  const after = panelOf([withPoints({ [day("2026-05-27")]: 1e20 * (1 + 1e-12), [day("2026-05-28")]: 2e20 })]);
+  assert.equal(diff(before, after).length, 0);
+});
+
+test("крупные и мелкие порядки печатаются читаемо", () => {
+  const before = stateOf(panelOf([withPoints({ [day("2026-05-27")]: 7.31e20, [day("2026-05-28")]: 1 })]));
+  const ev = diff(before, panelOf([withPoints({ [day("2026-05-27")]: 8.36e20, [day("2026-05-28")]: 1 })]));
+  assert.match(ev[0].moves[0].before, /10\^20/, "хешрейт обязан читаться, а не тянуться двадцатью нулями");
+  assert.equal(ev[0].moves[0].delta, "+14,4%");
 });
 
 test("шаблонный комментарий не бывает пустым ни для одного типа события", () => {

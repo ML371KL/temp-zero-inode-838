@@ -93,6 +93,24 @@ const MACRO_CADENCE = {
 // это живой рыночный фид (споты, деривативы, пеги, комиссии мемпула), у него нет релизов.
 const LIVE_FEED_MAX_AGE_MS = 6 * 3600 * 1000;
 
+// Сколько последних точек ряда каждой карточки помним, чтобы поймать переписанную историю.
+// Ревизия может уехать на месяцы назад (наблюдавшийся случай: 24.07 переписана точка за 27.05),
+// поэтому окно широкое. Ряды публикуют 30 карточек из 40; те, что не публикуют, — живые фиды
+// (деривативы, споты, пеги, комиссии), они по своей природе не пересматриваются.
+const POINT_MEMORY = 150;
+
+// Ряд карточки → компактная карта «метка времени → значение» для сравнения между прогонами.
+function compactSeries(series) {
+  if (!Array.isArray(series) || !series.length) return null;
+  const out = {};
+  for (const p of series.slice(-POINT_MEMORY)) {
+    const t = finite(p?.t) ? p.t : Date.parse(p?.d || p?.time || "");
+    const v = Number(p?.v);
+    if (finite(t) && finite(v)) out[t] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 /* ================================ 2. ЧТЕНИЕ СОСТОЯНИЯ ================================ */
 
 async function readJSON(path, fallback = null) {
@@ -123,8 +141,9 @@ function fromSnapshotJSON(snap) {
       note: m.note || "",
       voting: m.vote === true,
       scheduled: !live,
-      revisable: false, // ревизии BTC-панель детектирует сама, ниже
+      revisable: false, // ревизия ловится сравнением точек ряда, а не текущего значения
       release: live ? "живой рыночный фид" : m.source || "",
+      points: compactSeries(m.series),
     };
   });
   const detectors = (snap.detectors || []).map((d) => ({
@@ -187,6 +206,7 @@ const PAGE_EXTRACTOR = `(() => {
       observed_at: r.date ? new Date(r.date).toISOString().slice(0, 10) : "",
       source: (i.link || "").replace(/^https?:\\/\\//, "").split("/")[0], note: r.note || "",
       degraded: !!r.degraded,
+      series: (r.series || []).slice(-150).map(p => ({ t: +new Date(p.d ?? p.t), v: Number(p.v) })),
       voting: !i.info, lead: !!i.lead });
   }
   for (const d of DETECTORS) {
@@ -223,7 +243,8 @@ async function fromLivePage(url) {
     if (errors.length) console.error("page errors:", errors.slice(0, 3).join(" | "));
     const indicators = raw.indicators.map((i) => {
       const c = MACRO_CADENCE[i.id] || { scheduled: true, revisable: false, release: "", cadence: "" };
-      return { ...i, scheduled: c.scheduled, revisable: c.revisable, release: c.release, cadence: c.cadence || "" };
+      const { series, ...rest } = i;
+      return { ...rest, scheduled: c.scheduled, revisable: c.revisable, release: c.release, cadence: c.cadence || "", points: compactSeries(series) };
     });
     return { ...raw, indicators };
   } finally {
@@ -280,6 +301,40 @@ function sameNum(a, b) {
   return Math.abs(a - b) <= scale * 1e-9;
 }
 
+// Читаемое число для точки ряда: у карточек разный масштаб (хешрейт 7·10²⁰ H/s и MVRV 1,8
+// живут рядом), поэтому крайние порядки уходят в экспоненту, остальное — обычным числом.
+function fmtPoint(v) {
+  if (!finite(v)) return "—";
+  const a = Math.abs(v);
+  if (a !== 0 && (a >= 1e7 || a < 1e-3)) return v.toExponential(3).replace(".", ",").replace("e+", "·10^").replace("e-", "·10^−");
+  const digits = a >= 100 ? 1 : a >= 1 ? 2 : 4;
+  return v.toLocaleString("ru-RU", { maximumFractionDigits: digits });
+}
+
+const dayLabel = (t) => new Date(Number(t)).toISOString().slice(0, 10);
+// В сообщении дата читается человеком, а не машиной: 27.05.2026 вместо 2026-05-27.
+const ruDay = (t) => { const d = new Date(Number(t)); return `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`; };
+
+// Переписанная история: сравниваем ТЕ ЖЕ метки времени в старом и новом ряду. Точки от
+// последней запомненной и новее не считаются — последняя точка суток ещё формируется, её
+// изменение это ход рынка, а не ревизия.
+function seriesRevisions(wasPoints, curPoints) {
+  if (!wasPoints || !curPoints) return [];
+  const frontier = Math.max(...Object.keys(wasPoints).map(Number));
+  const changed = [];
+  for (const [tRaw, oldV] of Object.entries(wasPoints)) {
+    const t = Number(tRaw);
+    if (!finite(t) || t >= frontier) continue;
+    const newV = curPoints[tRaw];
+    if (!finite(newV) || !finite(oldV)) continue;
+    const scale = Math.max(Math.abs(oldV), Math.abs(newV), 1e-12);
+    if (Math.abs(newV - oldV) <= scale * 1e-9) continue;
+    changed.push({ t, before: oldV, after: newV, pct: oldV === 0 ? null : ((newV / oldV - 1) * 100) });
+  }
+  changed.sort((a, b) => a.t - b.t);
+  return changed;
+}
+
 function valueChanged(prev, cur) {
   if (prev.value_num != null && cur.value_num != null) return !sameNum(prev.value_num, cur.value_num);
   return String(prev.value) !== String(cur.value);
@@ -288,6 +343,7 @@ function valueChanged(prev, cur) {
 function diff(prevState, panel) {
   const events = [];
   const releaseGroups = [];
+  const revisedSeries = [];
   const prevInd = prevState.indicators || {};
 
   if (prevState.target && panel.target && !sameNum(prevState.target.pct, panel.target.pct)) {
@@ -380,6 +436,62 @@ function diff(prevState, panel) {
         note: i.note,
       });
     }
+
+    // Переписанная история ряда: КАКАЯ точка и КАК изменилась, а не «изменено строк: 1».
+    const rewritten = seriesRevisions(was.points, i.points);
+    if (rewritten.length) revisedSeries.push({ i, changed: rewritten });
+  }
+
+  // Одна переписанная точка первоисточника отзывается сразу в нескольких карточках (правка
+  // хешрейта за день двигает и «Безопасность сети», и «Hash ribbons», и «Экономику майнинга»),
+  // поэтому ревизии собираются по ПЕРИОДУ, а карточки с одинаковыми числами склеиваются: три
+  // сообщения об одном и том же факте — тот же шум, что и релиз по карточке на каждую.
+  if (revisedSeries.length) {
+    const byPeriod = new Map();
+    for (const r of revisedSeries) {
+      const from = r.changed[0].t;
+      const to = r.changed[r.changed.length - 1].t;
+      const key = `${from}:${to}`;
+      if (!byPeriod.has(key)) byPeriod.set(key, { from, to, items: [] });
+      byPeriod.get(key).items.push(r);
+    }
+    for (const [key, g] of byPeriod) {
+      const bySignature = new Map();
+      for (const { i, changed } of g.items) {
+        const sig = changed.map((c) => `${c.t}|${c.before}|${c.after}`).join(";");
+        if (!bySignature.has(sig)) bySignature.set(sig, { names: [], changed, sources: new Set() });
+        const slot = bySignature.get(sig);
+        slot.names.push(i.name);
+        if (i.source) slot.sources.add(sourceLabel(i.source));
+      }
+      const span = g.from !== g.to;
+      const moves = [];
+      const sources = new Set();
+      for (const slot of bySignature.values()) {
+        for (const s of slot.sources) sources.add(s);
+        for (const c of slot.changed.slice(-3)) {
+          moves.push({
+            name: (span ? `${ruDay(c.t)} · ` : "") + slot.names.join(" · "),
+            before: fmtPoint(c.before),
+            after: fmtPoint(c.after),
+            delta: finite(c.pct) ? `${c.pct > 0 ? "+" : "−"}${Math.abs(c.pct).toFixed(Math.abs(c.pct) < 1 ? 2 : 1).replace(".", ",")}%` : "",
+          });
+        }
+      }
+      events.push({
+        kind: "revision",
+        key: `rev-series:${key}`,
+        title: "Пересчёт истории",
+        before: "",
+        after: "",
+        detail: [
+          span ? `переписан период ${ruDay(g.from)} — ${ruDay(g.to)}` : `переписаны данные за ${ruDay(g.from)}`,
+          sources.size ? `источник: ${[...sources].join(", ")}` : "",
+        ].filter(Boolean).join(" · "),
+        moves,
+        note: g.items.map((r) => `${r.i.name}: ${r.i.note}`).join("\n").slice(0, 1200),
+      });
+    }
   }
 
   // Сборка релизов: ключ группы — публикация первоисточника (кто и на какую дату наблюдения).
@@ -405,19 +517,19 @@ function diff(prevState, panel) {
     });
   }
 
-  // Ревизии, которые панель детектирует сама (BTC-панель ведёт их список).
+  // Алерты ревизий, которые панель ведёт сама, в рассылку НЕ идут: они говорят только «источник
+  // переписал N строк» и не отвечают на единственный важный вопрос — что именно и на сколько
+  // изменилось. Настоящий ответ даёт сравнение точек ряда выше. Сюда алерт попадает лишь как
+  // строка в логе, чтобы факт ревизии не потерялся, если ни одна карточка её не показала.
   const seenRev = new Set((prevState.revisions || []).map((r) => r.key + "|" + r.text));
-  for (const r of panel.revisions || []) {
-    if (seenRev.has(r.key + "|" + r.text)) continue;
-    events.push({
-      kind: "revision",
-      key: `rev-src:${r.key}`,
-      title: `Ревизия источника: ${r.key}`,
-      before: "",
-      after: "",
-      detail: r.text,
-      note: "",
-    });
+  const freshAlerts = (panel.revisions || []).filter((r) => !seenRev.has(r.key + "|" + r.text));
+  if (freshAlerts.length) {
+    const shownIds = new Set(events.filter((e) => e.key.startsWith("rev-series:")).map((e) => e.key.split(":")[1]));
+    console.log(
+      `алерты ревизии источников: ${freshAlerts.length}` +
+        (shownIds.size ? ` (карточек с показанной переписанной историей: ${shownIds.size})` : " (ни одна карточка не изменилась — в рассылку не идёт)")
+    );
+    for (const r of freshAlerts) console.log(`  · ${r.text}`);
   }
 
   events.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
@@ -650,6 +762,7 @@ function snapshotState(panel) {
       score: i.score,
       observed_at: i.observed_at,
       degraded: !!i.degraded,
+      points: i.points || null,
     };
   }
   const detectors = {};
