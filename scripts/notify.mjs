@@ -317,6 +317,8 @@ function fromSnapshotJSON(snap) {
         blocks,
         bands,
         hold: snap.regime_meta?.strategic || null,
+        sample: { t: Date.parse(snap.generated_at || "") || Date.now(), pct: snap.decision.target_pct, score: snap.scores?.strategic ?? null,
+                  blocks: Object.fromEntries(Object.entries(blocks).map(([k, b]) => [k, b.score])) },
       }
     : null;
 
@@ -543,47 +545,133 @@ function plural(n, one, few, many) {
   return many;
 }
 
+/* ====================== УСТОЙЧИВОСТЬ РЕШЕНИЯ ======================
+   Читателю нужен ВЕРДИКТ, а не пересказ механики. Поэтому класс устойчивости считается
+   детерминированно по явным правилам и всегда называется одними и теми же словами (как уровни
+   метеопредупреждений: слово со временем становится понятным само по себе), а объяснение даётся
+   обычным языком — без «блоков», «пунктов» и «шагов».
+
+   Что учитывается, по убыванию силы довода:
+   1. ЭМПИРИКА. Как часто такие решения откатывались назад в собственной истории панели. База
+      частот сильнее любых рассуждений о механизме.
+   2. ЗАПАС В ЕДИНИЦАХ ОБЫЧНОГО ШУМА. Не «5 пунктов», а «меньше, чем эта величина обычно проходит
+      за сутки»: абсолютные числа читателю ничего не говорят, отношение к дневному ходу — говорит.
+   3. СКОЛЬКО НЕЗАВИСИМЫХ ФАКТОРОВ держат решение. Если против прежней доли работает один фактор,
+      его разворота достаточно; если два — нужно, чтобы развернулись оба.
+   4. ВОЗРАСТ решения: свежие смены откатываются чаще устоявшихся.                            */
+const TIER = {
+  forced: { word: "Принудительное", mark: "🔴" },
+  shaky: { word: "Шаткое", mark: "🟠" },
+  moderate: { word: "Умеренно устойчивое", mark: "🟡" },
+  firm: { word: "Устойчивое", mark: "🟢" },
+};
+
+// Медиана суточного хода величины — «обычный шум», с которым сравнивается запас до отката.
+function typicalDailyMove(series) {
+  if (!Array.isArray(series) || series.length < 6) return null;
+  const byDay = new Map();
+  for (const p of series) {
+    const d = new Date(p.t).toISOString().slice(0, 10);
+    const cur = byDay.get(d) || { min: p.v, max: p.v };
+    byDay.set(d, { min: Math.min(cur.min, p.v), max: Math.max(cur.max, p.v) });
+  }
+  const spans = [...byDay.values()].map((x) => Math.abs(x.max - x.min)).filter((x) => finite(x));
+  if (spans.length < 3) return null;
+  spans.sort((a, b) => a - b);
+  return spans[Math.floor(spans.length / 2)] || null;
+}
+
+// Как часто смена решения откатывалась обратно в течение двух суток — собственная база частот.
+function revertStats(changes) {
+  if (!Array.isArray(changes) || changes.length < 3) return null;
+  let reverted = 0;
+  for (let i = 0; i < changes.length - 1; i++) {
+    const a = changes[i], b = changes[i + 1];
+    if (b.t - a.t <= 48 * 3600e3 && sameNum(b.to, a.from)) reverted++;
+  }
+  return { total: changes.length, reverted, rate: reverted / changes.length };
+}
+
 // Насколько смена доли устойчива: близко ли решающие величины к своим порогам и подтверждена ли
 // смена выдержкой. Отвечает на вопрос «не откатится ли это завтра обратно».
-function stabilityLines(prevAlloc, curAlloc) {
+function stabilityLines(prevAlloc, curAlloc, prevState) {
   const out = [];
   // BTC-панель: блок считается неблагоприятным при балле ≤ −20; шаг одной группы показателей
   // двигает блок на 50/N пунктов. Значит видно, хватит ли одного шага, чтобы всё отыграть назад.
+  // --- что именно держит решение и что его развернёт ---
   const blocks = Object.values(curAlloc.blocks || {});
+  let holders = null, needFlips = null, marginRaw = null, nearTitle = "";
   if (blocks.length && curAlloc.bands) {
-    // Решение держат именно НЕБЛАГОПРИЯТНЫЕ блоки: пока их два, доля минимальна. Поэтому запас
-    // прочности — это расстояние такого блока до выхода из неблагоприятной зоны, а не расстояние
-    // любого блока до любой границы (иначе в оценку попадёт блок, который на решение не влияет).
     const withMargin = blocks.map((b) => ({ ...b, adverse: b.score <= curAlloc.bands.adverse, margin: Math.abs(b.score - curAlloc.bands.adverse) }));
     const holding = withMargin.filter((b) => b.adverse);
+    holders = holding.map((b) => b.title);
     const near = (holding.length ? holding : withMargin).sort((a, b) => a.margin - b.margin)[0];
     if (near) {
-      const steps = near.margin / near.step;
-      const stepWord = steps < 1 ? "меньше одного шага" : `${fmtPoint(steps)} шага`;
-      out.push(
-        near.adverse
-          ? `чтобы решение отыграло назад, блоку «${near.title}» нужно подняться на ${fmtPoint(near.margin)} ${plural(near.margin, "пункт", "пункта", "пунктов")} — это ${stepWord} одной из ${near.families} групп показателей внутри него`
-          : `ближайший риск: блок «${near.title}» в ${fmtPoint(near.margin)} ${plural(near.margin, "пункте", "пункта", "пунктах")} от неблагоприятной зоны (${stepWord} одной из ${near.families} групп)`
-      );
-      if (holding.length > 1) out.push(`сейчас неблагоприятны ${holding.length} ${plural(holding.length, "блок", "блока", "блоков")} из ${blocks.length} — отката одного из них для смены решения не хватит`);
+      marginRaw = near.margin;
+      needFlips = Math.max(1, Math.ceil(near.margin / near.step));
+      nearTitle = near.title;
     }
   }
-  if (curAlloc.hold && finite(curAlloc.hold.count)) {
-    out.push(
-      curAlloc.hold.candidate && curAlloc.hold.candidate !== curAlloc.hold.state
-        ? `сейчас копится встречное изменение: оно держится ${curAlloc.hold.count} ${plural(curAlloc.hold.count, "наблюдение", "наблюдения", "наблюдений")} подряд`
-        : `текущее состояние подтверждено ${curAlloc.hold.count} ${plural(curAlloc.hold.count, "наблюдением", "наблюдениями", "наблюдениями")} подряд`
+
+  // --- эмпирика: как часто такие решения откатывались и как сильно величина гуляет за сутки ---
+  const trend = (prevState.alloc_trend || []).concat(curAlloc.sample ? [curAlloc.sample] : []);
+  const decisiveSeries = trend
+    .map((s) => ({ t: s.t, v: blocks.length ? s.blocks?.[nearKey(curAlloc, nearTitle)] : s.score }))
+    .filter((x) => finite(x.v) && finite(x.t));
+  const noise = typicalDailyMove(decisiveSeries);
+  const marginDays = finite(marginRaw) && noise ? marginRaw / noise : null;
+
+  const changes = [];
+  for (let i = 1; i < trend.length; i++) {
+    if (finite(trend[i].pct) && finite(trend[i - 1].pct) && !sameNum(trend[i].pct, trend[i - 1].pct)) {
+      changes.push({ t: trend[i].t, from: trend[i - 1].pct, to: trend[i].pct });
+    }
+  }
+  const reverts = revertStats(changes);
+  const ageH = curAlloc.hold && finite(curAlloc.hold.count) ? curAlloc.hold.count : null;
+
+  // --- класс устойчивости ---
+  // ВАЖНО про лестницу: потеря ОДНОГО неблагоприятного фактора уже поднимает долю на ступень
+  // (два неблагоприятных → защитный режим, один → ухудшение). Поэтому решающее — запас у САМОГО
+  // СЛАБОГО из них, а не то, сколько их всего. Первая версия считала наоборот и выдавала
+  // «отката одного не хватит» там, где его как раз хватало.
+  let tier = "moderate";
+  if (curAlloc.override) tier = "forced";
+  else if ((needFlips !== null && needFlips <= 1) || (marginDays !== null && marginDays < 1) || (reverts && reverts.rate >= 0.34 && (ageH ?? 99) < 24)) tier = "shaky";
+  else if ((needFlips !== null && needFlips >= 3) || (marginDays !== null && marginDays >= 3)) tier = "firm";
+
+  // --- объяснение обычными словами: самые сильные доводы, без механики ---
+  const reason = [];
+  if (tier === "forced") reason.push("доля выставлена аварийным переключателем и вернётся, как только он снимется");
+  else if (needFlips !== null && nearTitle) {
+    reason.push(
+      needFlips <= 1
+        ? `ближе всего к развороту — ${nearTitle}: достаточно, чтобы один показатель внутри этого направления улучшился на ступень`
+        : `чтобы развернулось направление «${nearTitle}», улучшиться должны минимум ${needFlips} показателя внутри него — одного мало`
+    );
+    if (holders && holders.length >= 2) reason.push("но и это вернёт долю не полностью, а на одну ступень вверх: против неё работает ещё " + holders.filter((h) => h !== nearTitle)[0]);
+  }
+  if (marginDays !== null) {
+    reason.push(
+      marginDays < 1
+        ? "до отката осталось меньше, чем эта величина обычно проходит за сутки"
+        : `запас до отката — примерно ${fmtPoint(Math.min(marginDays, 10))} ${plural(Math.round(marginDays), "день", "дня", "дней")} обычного движения`
     );
   }
-  // Макро-панель: страница сама печатает пороги возврата на соседнюю ступень.
-  if (curAlloc.up) out.push(`что вернёт долю выше: ${curAlloc.up}`);
-  if (curAlloc.down) out.push(`что снизит её дальше: ${curAlloc.down}`);
-  if (finite(curAlloc.score)) out.push(`сводная оценка обстановки сейчас ${curAlloc.score > 0 ? "+" : ""}${curAlloc.score} по шкале от −100 до +100`);
-  if (curAlloc.frozen) out.push("повышение доли заморожено сработавшим детектором риска");
-  if (curAlloc.override) out.push("сработал аварийный переключатель — доля выставлена принудительно");
-  if (curAlloc.pending) out.push("следующая ступень уже накапливает подтверждение");
-  if (curAlloc.quality && curAlloc.quality !== "good") out.push(`качество входных данных: ${curAlloc.quality}`);
+  if (reverts && reverts.total >= 3) reason.push(`в прошлом из ${reverts.total} таких смен ${reverts.reverted} откатились обратно в течение двух суток`);
+  if (curAlloc.up && tier !== "forced") reason.push(`вернуть прежнюю долю может: ${curAlloc.up.replace(/^апгрейд разблокируется, когда/, "снятие паузы, когда")}`);
+  if (curAlloc.frozen) reason.push("повышение доли пока заморожено сработавшим сигналом риска");
+  if (curAlloc.pending) reason.push("следующее изменение уже накапливает подтверждение");
+  if (curAlloc.quality && curAlloc.quality !== "good") reason.push(`часть входных данных неполна (${curAlloc.quality}) — к оценке стоит относиться осторожнее`);
+
+  out.push({ tier, reason: reason.slice(0, 3) });
   return out;
+}
+
+// Ключ блока по его человеческому названию — нужен, чтобы вытащить его ряд из накопленной истории.
+function nearKey(alloc, title) {
+  for (const [k, b] of Object.entries(alloc.blocks || {})) if (b.title === title) return k;
+  return "";
 }
 
 // Короткая сводка недавней истории показателя — она уходит В КОНТЕКСТ модели, чтобы «насколько
@@ -802,10 +890,16 @@ function diff(prevState, panel) {
   // ---- Доля капитала: что стало, почему и насколько это устойчиво ----
   if (allocMoved) {
     const dir = curAlloc.pct > prevAlloc.pct ? "увеличена" : "сокращена";
+    // Пять строк подряд «— оценка ухудшилась» читаются как шум. Однотипное сжимается в одну
+    // строку перечислением, а показатели с видимым изменением значения показываются числами.
     const causes = [];
-    for (const w of why.slice(0, 6)) {
-      causes.push(w.sameValue ? `${w.name} — оценка ${w.worse ? "ухудшилась" : "улучшилась"}` : `${w.name}: ${w.from} → ${w.to}`);
-    }
+    const named = (list) => list.map((w, k) => { const n = w.name.replace(/ и доступное предложение| и состояние сети/, ""); return k ? n.charAt(0).toLowerCase() + n.slice(1) : n; }).join(", ");
+    const moved = why.filter((w) => !w.sameValue);
+    for (const w of moved.slice(0, 4)) causes.push(`${w.name}: ${w.from} → ${w.to}`);
+    const worse = why.filter((w) => w.sameValue && w.worse);
+    const better = why.filter((w) => w.sameValue && !w.worse);
+    if (worse.length) causes.push(`${worse.length > 1 ? "Ухудшились" : "Ухудшился"}: ${named(worse)}`);
+    if (better.length) causes.push(`${better.length > 1 ? "Улучшились" : "Улучшился"}: ${named(better)}`);
     for (const { d, from, to } of detectorMoves) {
       causes.push(`${detectorHuman(d.name)}: ${DET_LABEL[from] || from} → ${DET_LABEL[to] || to}`);
     }
@@ -817,7 +911,7 @@ function diff(prevState, panel) {
       after: `${curAlloc.pct}%`,
       detail: "",
       causes,
-      stability: stabilityLines(prevAlloc, curAlloc),
+      stability: stabilityLines(prevAlloc, curAlloc, prevState),
       note: "",
     });
   } else {
@@ -898,7 +992,13 @@ function renderMessage(ev, comment) {
     .map((m) => `• ${esc(m.name)}: ${esc(m.before)} → <b>${esc(m.after)}</b>${m.delta ? ` <i>(${esc(m.delta)})</i>` : ""}`)
     .join("\n");
   const causes = (ev.causes || []).map((c) => `• ${esc(c)}`).join("\n");
-  const stability = (ev.stability || []).map((s) => `• ${esc(s)}`).join("\n");
+  // Устойчивость подаётся вердиктом одним словом, а под ним — короткое объяснение обычным
+  // языком. Слово всегда одно и то же для одного и того же класса: так оно становится понятным.
+  const st = (ev.stability || [])[0];
+  const stability =
+    st && st.tier
+      ? `${TIER[st.tier].mark} <b>${esc(TIER[st.tier].word)}</b>\n${(st.reason || []).map((r) => `• ${esc(r)}`).join("\n")}`
+      : (ev.stability || []).map((s) => `• ${esc(s)}`).join("\n");
   const lines = [
     head,
     move,
@@ -922,6 +1022,8 @@ const LLM_SYSTEM = `Ты — экономический обозреватель
 1. Что означает это движение по существу.
 2. Насколько оно существенно — опирайся на «recent_history», которую тебе дали: рядовое колебание, заметный сдвиг или редкая величина.
 3. Какие наиболее вероятные последствия и за чем стоит следить дальше.
+Если в событии есть поле «stability» — добавь ОДНО предложение о том, насколько решение похоже на
+устойчивое и что способно его развернуть. Вердикт из поля не переспоривай, а раскрой обычными словами.
 
 ЖЁСТКИЕ ПРАВИЛА:
 · НИКОГДА не упоминай панель, дашборд, баллы, зоны, композит, детекторы, вклад в оценку. Читатель ничего о них не знает и знать не должен.
@@ -972,7 +1074,9 @@ async function llmComments(events, panel) {
               what_it_is: (e.plain || []).join("; ").slice(0, 700) || undefined,
               recent_history: (e.history || []).join("; ").slice(0, 900) || undefined,
               why_changed: (e.causes || []).join("; ").slice(0, 600) || undefined,
-              stability: (e.stability || []).join("; ").slice(0, 600) || undefined,
+              stability: e.stability?.[0]?.tier
+                ? { verdict: TIER[e.stability[0].tier].word, why: e.stability[0].reason }
+                : undefined,
             })),
           },
           null,
@@ -1110,6 +1214,20 @@ function snapshotState(panel) {
   };
 }
 
+// Ряд решений копится САМИМ уведомлением: панели публикуют только текущее состояние, а для
+// «часто ли такое откатывается» нужна собственная история. 400 наблюдений — это примерно две
+// недели часового такта и месяц с лишним у макро-панели.
+const TREND_MAX = 400;
+function appendTrend(prev, panel) {
+  const sample = panel.allocation?.sample || (panel.allocation && finite(panel.allocation.pct)
+    ? { t: Date.parse(panel.generated_at || "") || Date.now(), pct: panel.allocation.pct, score: panel.allocation.score ?? null }
+    : null);
+  if (!sample) return prev || [];
+  const rows = (prev || []).filter((x) => finite(x?.t) && x.t < sample.t);
+  rows.push(sample);
+  return rows.slice(-TREND_MAX);
+}
+
 // Проверка связи: убедиться, что токен и chat_id верные, не дожидаясь первого настоящего
 // изменения. Состояние НЕ трогает — после пинга обычный ход рассылки не сбивается.
 function pingMessage(panel) {
@@ -1151,10 +1269,11 @@ async function main() {
   if (all.length !== events.length) console.log(`уже доставлено ранее и пропущено: ${all.length - events.length}`);
   console.log(`событий: ${events.length}`);
 
+  const trend = appendTrend(prev.alloc_trend, panel);
   let baseline = null; // сдвигается один раз в самом конце — до тех пор пишем старую базу
   const persist = async () => {
     await mkdir(dirname(STATE_PATH), { recursive: true });
-    await writeFile(STATE_PATH, JSON.stringify({ ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen }, null, 1));
+    await writeFile(STATE_PATH, JSON.stringify({ ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, alloc_trend: trend }, null, 1));
   };
 
   let sent = 0;
@@ -1195,4 +1314,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, pingMessage, HUMAN, MACRO_CADENCE };
+export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, pingMessage, HUMAN, MACRO_CADENCE };

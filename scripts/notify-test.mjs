@@ -193,24 +193,79 @@ test("у каждого показателя макро-панели есть ч
   assert.deepEqual(missing, [], `без записи в словаре в сообщение уедет внутренняя подпись карточки: ${missing}`);
 });
 
-test("устойчивость решения объясняется числами, а не наречиями", () => {
-  const alloc = (pct) => ({
-    pct,
-    bands: { adverse: -20, supportive: 20 },
-    blocks: {
-      macro: { title: "мировые условия", score: 16.7, families: 3, step: 50 / 3 },
-      demand: { title: "спрос", score: -31.25, families: 4, step: 12.5 },
-      cycle: { title: "цикл", score: -25, families: 5, step: 10 },
-    },
-    hold: { state: "defensive", candidate: "defensive", count: 21 },
-  });
-  const ev = diff(stateOf(panelOf([ind({})], { allocation: alloc(80) })), panelOf([ind({})], { allocation: alloc(5) }));
-  assert.equal(ev[0].kind, "allocation");
-  const text = ev[0].stability.join(" | ");
-  assert.match(text, /цикл/, "называть надо блок, который держит решение, а не любой ближайший к границе");
-  assert.match(text, /5 пунктов/, "запас до разворота обязан быть числом");
-  assert.match(text, /2 блока из 3/, "если неблагоприятны два блока, отката одного мало — это надо сказать");
-  assert.match(text, /21 наблюдением/);
+const allocOf = (pct, blocks, extra = {}) => ({
+  pct,
+  bands: { adverse: -20, supportive: 20 },
+  blocks,
+  hold: { state: "defensive", candidate: "defensive", count: 21 },
+  ...extra,
+});
+const BLOCKS_TWO_ADVERSE = {
+  macro: { title: "мировые условия", score: 16.7, families: 3, step: 50 / 3 },
+  demand: { title: "спрос на биткоин", score: -31.25, families: 4, step: 12.5 },
+  cycle: { title: "стадия цикла", score: -25, families: 5, step: 10 },
+};
+const BLOCKS_ONE_ADVERSE = {
+  macro: { title: "мировые условия", score: 16.7, families: 3, step: 50 / 3 },
+  demand: { title: "спрос на биткоин", score: 5, families: 4, step: 12.5 },
+  cycle: { title: "стадия цикла", score: -25, families: 5, step: 10 },
+};
+const tierOf = (before, after) => {
+  const ev = diff(stateOf(panelOf([ind({})], { allocation: before })), panelOf([ind({})], { allocation: after }));
+  return ev[0].stability[0];
+};
+
+test("решение, где ближайшему фактору хватит одного шага, — шаткое даже при двух неблагоприятных", () => {
+  const st = tierOf(allocOf(80, BLOCKS_TWO_ADVERSE), allocOf(5, BLOCKS_TWO_ADVERSE));
+  assert.equal(st.tier, "shaky", "лестница поднимает долю уже при развороте ОДНОГО фактора");
+  assert.match(st.reason.join(" "), /ближе всего к развороту/);
+  assert.match(st.reason.join(" "), /не полностью, а на одну ступень/, "надо честно сказать, что возврат будет частичным");
+});
+
+test("когда развернуться должны несколько показателей — решение устойчиво", () => {
+  // оба неблагоприятных фактора глубоко в зоне: ближайший к выходу — и тот в трёх ступенях
+  const deep = {
+    ...BLOCKS_TWO_ADVERSE,
+    demand: { title: "спрос на биткоин", score: -60, families: 4, step: 12.5 },
+    cycle: { title: "стадия цикла", score: -55, families: 5, step: 10 },
+  };
+  const st = tierOf(allocOf(80, deep), allocOf(5, deep));
+  assert.equal(st.tier, "firm");
+});
+
+test("решение на одном пограничном факторе — шаткое", () => {
+  const st = tierOf(allocOf(80, BLOCKS_ONE_ADVERSE), allocOf(20, BLOCKS_ONE_ADVERSE));
+  assert.equal(st.tier, "shaky");
+  assert.match(st.reason.join(" "), /достаточно, чтобы один показатель/);
+});
+
+test("аварийный переключатель — отдельный класс, а не «шаткое»", () => {
+  const st = tierOf(allocOf(65, BLOCKS_ONE_ADVERSE), allocOf(0, BLOCKS_ONE_ADVERSE, { override: true }));
+  assert.equal(st.tier, "forced");
+  assert.match(st.reason.join(" "), /аварийн/);
+});
+
+test("в объяснении устойчивости нет внутреннего жаргона", () => {
+  const jargon = /блок|пункт|шаг|групп|композит|балл|зон[аы]/i;
+  for (const st of [
+    tierOf(allocOf(80, BLOCKS_TWO_ADVERSE), allocOf(5, BLOCKS_TWO_ADVERSE)),
+    tierOf(allocOf(80, BLOCKS_ONE_ADVERSE), allocOf(20, BLOCKS_ONE_ADVERSE)),
+  ]) {
+    const text = st.reason.join(" ");
+    assert.ok(!jargon.test(text), `внутренняя терминология снова протекла наружу: «${text}»`);
+  }
+});
+
+test("накопленная история решений даёт частоту откатов", () => {
+  const day = 86400e3;
+  const trend = [
+    { t: 1e12, pct: 80 }, { t: 1e12 + day, pct: 20 }, { t: 1e12 + 2 * day, pct: 80 },
+    { t: 1e12 + 3 * day, pct: 20 }, { t: 1e12 + 4 * day, pct: 80 },
+  ];
+  const prev = { ...stateOf(panelOf([ind({})], { allocation: allocOf(80, BLOCKS_TWO_ADVERSE) })), alloc_trend: trend };
+  const ev = diff(prev, panelOf([ind({})], { allocation: allocOf(20, BLOCKS_TWO_ADVERSE) }));
+  const text = ev[0].stability[0].reason.join(" ");
+  assert.match(text, /откатились обратно/, `база частот обязана попасть в объяснение: ${text}`);
 });
 
 test("сообщение о доле собирается с разделами «почему» и «устойчиво ли»", () => {
