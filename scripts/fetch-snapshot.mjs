@@ -122,11 +122,15 @@ const FRED_SERIES = {
   VXVCLS: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   NASDAQ100: { limit: 1200, ttl: 7 * DAY, release: "daily" },
   // Теневой слой (shadow:true): карточки без голоса, отказ источника НЕ деградирует quality решения.
-  // ECBASSETSW — недельный; JPNASSETS — МЕСЯЧНЫЙ пакет (штатная старость до ~6 недель); DEX* — дневные курсы.
+  // ECBASSETSW — недельный; JPNASSETS — МЕСЯЧНЫЙ пакет (штатная старость до ~6 недель).
+  // DEXUSEU/DEXJPUS — ТОТ ЖЕ релиз H.10, что и DTWEXBGS: дневные значения приходят НЕДЕЛЬНЫМ
+  // пакетом по понедельникам, поэтому штатный возраст последней точки доходит до ~11.8 дней.
+  // Объявлять их "daily" с порогом 7д — гарантированный fail большую часть недели (повтор
+  // ошибки v2.8.5, допущенный на этих рядах в v2.12.0 и пойманный в проде 2026-07-24).
   ECBASSETSW: { limit: 260, ttl: 14 * DAY, release: "weekly-batch", shadow: true },
   JPNASSETS: { limit: 120, ttl: 70 * DAY, release: "monthly-batch", shadow: true },
-  DEXUSEU: { limit: 1200, ttl: 7 * DAY, release: "daily", shadow: true },
-  DEXJPUS: { limit: 1200, ttl: 7 * DAY, release: "daily", shadow: true },
+  DEXUSEU: { limit: 1200, ttl: 14 * DAY, release: "weekly-batch", shadow: true },
+  DEXJPUS: { limit: 1200, ttl: 14 * DAY, release: "weekly-batch", shadow: true },
 };
 
 const CM_METRICS = [

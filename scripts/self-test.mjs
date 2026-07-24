@@ -44,7 +44,7 @@ const sourceMaxAgeH={
   fred_VIXCLS:24*7,fred_VXVCLS:24*7,fred_NASDAQ100:24*7,fred_DTB3:24*7,
   coinmetrics:24*4,blockchain_onchain:24*4,market:24*4,network:24*4,etf:24*7,stablecoins:24*4,pegs:18,cftc:24*15,derivatives:18,spot:18,
   // Теневой слой (vote:false): свежесть проверяется так же строго, но отказ не деградирует решение.
-  fred_ECBASSETSW:24*14,fred_JPNASSETS:24*70,fred_DEXUSEU:24*7,fred_DEXJPUS:24*7,
+  fred_ECBASSETSW:24*14,fred_JPNASSETS:24*70,fred_DEXUSEU:24*14,fred_DEXJPUS:24*14,
   tga_daily:24*6,sth_onchain:24*5,gold:24*5,
 };
 

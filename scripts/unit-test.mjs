@@ -237,6 +237,17 @@ for(const [id,cfg] of Object.entries(FRED_SERIES)){
   // 2026-06-01 на 2026-07-21 = 50д). Порог 65–90д; дальше ряд считается замёрзшим.
   if(cfg.release==="monthly-batch")ok(ttlH>=65*DAY_H&&ttlH<=90*DAY_H,`FRED ${id}: месячный пакет, порог ${ttlH/24}д — должен быть 65–90д`);
 }
+// Ряды ОДНОГО релиза ФРС обязаны иметь один календарь публикации: H.10 (валютные курсы) выходит
+// недельным пакетом по понедельникам целиком, поэтому DTWEXBGS и DEX* не могут расходиться в
+// release/ttl. Этот класс ошибки ловился уже дважды вживую (v2.8.5 на DTWEXBGS, 2026-07-24 на
+// DEXUSEU/DEXJPUS): объявленный "daily" порог 7д красит ряд бо́льшую часть недели.
+{
+  const H10=["DTWEXBGS","DEXUSEU","DEXJPUS"].filter(id=>FRED_SERIES[id]);
+  const classes=[...new Set(H10.map(id=>FRED_SERIES[id].release))];
+  ok(classes.length<=1,`ряды релиза H.10 разъехались по календарю публикации: ${H10.map(id=>id+"="+FRED_SERIES[id].release).join(", ")}`);
+  const ttls=[...new Set(H10.map(id=>FRED_SERIES[id].ttl))];
+  ok(ttls.length<=1,`ряды релиза H.10 разъехались по порогу свежести: ${H10.map(id=>id+"="+FRED_SERIES[id].ttl/DAY_H/36e5+"д").join(", ")}`);
+}
 // Пороги коллектора и гейта публикации обязаны совпадать по ВСЕМ источникам.
 {
   const st=readFileSync(new URL("./self-test.mjs",import.meta.url),"utf8");
