@@ -666,8 +666,35 @@ function snapshotState(panel) {
   };
 }
 
+// Проверка связи: убедиться, что токен и chat_id верные, не дожидаясь первого настоящего
+// изменения. Состояние НЕ трогает — после пинга обычный ход рассылки не сбивается.
+function pingMessage(panel) {
+  const det = (panel.detectors || []).filter((d) => d.state !== "calm");
+  return [
+    "✅ <b>Проверка связи</b>",
+    "Бот подключён, уведомления настроены.",
+    "",
+    `Сейчас на панели: <b>${esc(panel.verdict?.word || "—")}</b>`,
+    panel.verdict?.extra ? esc(panel.verdict.extra) : "",
+    panel.target ? `Целевая доля: <b>${panel.target.pct}%</b>` : "",
+    `Показателей под наблюдением: ${(panel.indicators || []).length}`,
+    det.length ? `Детекторы не в покое: ${esc(det.map((d) => `${d.name} (${DET_LABEL[d.state] || d.state})`).join(", "))}` : "Все детекторы спокойны",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 async function main() {
   const panel = await readPanel();
+
+  if (process.env.NOTIFY_PING === "1") {
+    const text = pingMessage(panel);
+    if (DRY) console.log(text.replace(/<[^>]+>/g, ""));
+    else await sendTelegram(text);
+    console.log(DRY ? "пинг: dry-run, ничего не отправлено" : "пинг отправлен");
+    return;
+  }
+
   const prev = (await readJSON(STATE_PATH)) || {};
   const first = !prev.indicators;
   const now = Date.now();
@@ -721,4 +748,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, MACRO_CADENCE };
+export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, pingMessage, MACRO_CADENCE };

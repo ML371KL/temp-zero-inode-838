@@ -9,6 +9,11 @@ on:
     workflows: ["Обновление Bitcoin-снимка"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      ping:
+        description: "Проверка связи: отправить одно тестовое сообщение и выйти"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,4 +56,5 @@ jobs:
           NOTIFY_SOURCE: json
           NOTIFY_SNAPSHOT: docs/snapshot.json
           NOTIFY_STATE: .notify/state.json
+          NOTIFY_PING: ${{ inputs.ping && '1' || '0' }}
         run: node scripts/notify.mjs

@@ -1,7 +1,7 @@
 // Тесты уведомлений. Все фикстуры синтетические и НЕ зависят от текущей даты: проверяется
 // поведение диффера, а не то, что сегодня опубликовал FRED.
 import assert from "node:assert/strict";
-import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent } from "./notify.mjs";
+import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, pingMessage } from "./notify.mjs";
 
 let passed = 0;
 const test = (name, fn) => {
@@ -258,6 +258,23 @@ test("индекс доставленного протухает, но не ра
     now
   );
   assert.deepEqual(Object.keys(kept), ["fresh"]);
+});
+
+test("проверочное сообщение показывает текущее состояние панели", () => {
+  const p = panelOf([ind({ name: "Карточка" })], {
+    verdict: { word: "ДЕРЖАТЬ", extra: "балл +9" },
+    target: { pct: 20, reason: "" },
+    detectors: [
+      { id: "a", name: "Спокойный", state: "calm", inputs: "", note: "" },
+      { id: "b", name: "Тревожный", state: "fired", inputs: "", note: "" },
+    ],
+  });
+  const m = pingMessage(p);
+  assert.match(m, /Проверка связи/);
+  assert.match(m, /ДЕРЖАТЬ/);
+  assert.match(m, /20%/);
+  assert.match(m, /Тревожный \(СРАБОТАЛ\)/, "нештатные детекторы обязаны быть названы");
+  assert.ok(!m.includes("Спокойный"), "спокойные детекторы не перечисляются поимённо");
 });
 
 /* ---- комментатор LLM: сеть подменяется, ключ фиктивный ---- */
