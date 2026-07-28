@@ -18,7 +18,8 @@
 //   NOTIFY_DRY_RUN=1        — печатать сообщения в stdout, ничего не отправлять;
 //   NOTIFY_STATE=<путь>     — файл состояния «что уже отправлено» (по умолчанию .notify/state.json);
 //   NOTIFY_SNAPSHOT=<путь>  — снимок для режима json (по умолчанию docs/snapshot.json);
-//   NOTIFY_PAGE=<url>       — страница для режима page;
+//   NOTIFY_PAGE_DIR=<путь>  — каталог страницы (docs) для локальной подачи: свежее и надёжнее;
+//   NOTIFY_PAGE=<url>       — опубликованный адрес страницы (резерв, отстаёт на цикл публикации);
 //   OPENROUTER_KEY          — ключ для комментариев LLM; без него комментарий берётся из шаблона;
 //   NOTIFY_MODEL            — модель комментатора (по умолчанию бесплатная nemotron);
 //   NOTIFY_MAX=<n>          — предохранитель: больше n событий за прогон → отправляется сводка.
@@ -30,6 +31,9 @@ const DRY = process.env.NOTIFY_DRY_RUN === "1" || !process.env.TELEGRAM_BOT_TOKE
 const STATE_PATH = process.env.NOTIFY_STATE || ".notify/state.json";
 const SNAPSHOT_PATH = process.env.NOTIFY_SNAPSHOT || "docs/snapshot.json";
 const PAGE_URL = process.env.NOTIFY_PAGE || "";
+// Каталог опубликованной страницы в рабочей копии (docs). Если задан — страница поднимается
+// локально, и уведомления видят свежий снимок, не дожидаясь публикации Pages.
+const PAGE_DIR = process.env.NOTIFY_PAGE_DIR || "";
 const MAX_EVENTS = Number(process.env.NOTIFY_MAX || 40);
 const SEND_GAP_MS = Number(process.env.NOTIFY_GAP_MS || 3500); // Telegram: ~20 сообщений/мин в чат
 // Комментатор обязан быть БЕСПЛАТНЫМ. Модель по умолчанию — та же, что уже судит новости на
@@ -99,7 +103,7 @@ const MACRO_CADENCE = {
    внутренняя подпись карточки и читатель снова получит «китайскую ногу».              */
 const HUMAN = {
   // --- макро-панель ---
-  sofr_iorb: { t: "Стоимость overnight-долларов против ставки по резервам (SOFR − IORB)", p: "показывает, дорого ли банкам занимать доллары на ночь: рост — свободных резервов в системе всё меньше" },
+  sofr_iorb: { t: "Стоимость суточных займов в долларах против ставки ФРС по резервам", p: "дорого ли банкам занимать доллары на ночь: рост — свободных резервов в системе всё меньше" },
   netliq: { t: "Чистая ликвидность ФРС", p: "сколько долларов от ФРС реально доступно рынкам: баланс ФРС минус счёт Минфина и обратное репо" },
   reserves: { t: "Банковские резервы в ФРС, % ВВП", p: "запас прочности банковской системы; ниже ~9-10% исторически начинались сбои денежного рынка" },
   tga: { t: "Счёт Минфина США в ФРС", p: "когда Минфин тратит накопленное — деньги приходят в экономику, когда копит — уходят из неё" },
@@ -130,37 +134,37 @@ const HUMAN = {
   cny: { t: "Курс доллара к юаню: изменение за 60 дней", p: "ослабление юаня означает, что Китай экспортирует дефляцию и напряжение на мировые рынки" },
   dxy: { t: "Курс доллара к корзине валют: изменение за 60 дней", p: "дорогой доллар ужесточает финансовые условия для всего мира" },
   // --- BTC-панель ---
-  liquidity_regime: { t: "Чистая ликвидность ФРС", p: "сколько долларов от ФРС реально доступно рынкам" },
-  netliq_4w: { t: "Чистая ликвидность ФРС за 4 недели", p: "краткосрочное направление долларовой ликвидности" },
-  netliq_13w: { t: "Чистая ликвидность ФРС за квартал", p: "среднесрочное направление долларовой ликвидности" },
-  financial_conditions: { t: "Реальные ставки и курс доллара", p: "две главные цены, определяющие спрос на рисковые активы" },
-  two_year: { t: "Доходность 2-летних облигаций США", p: "во что рынок оценивает будущую политику ФРС" },
-  system_stress: { t: "Кредитный и рыночный стресс", p: "сводка по кредитным премиям, страховке на акции и волатильности госдолга" },
+  liquidity_regime: { t: "Чистая ликвидность ФРС", p: "сколько долларов от ФРС реально доступно рынкам", rel: "Баланс ФРС" },
+  netliq_4w: { t: "Чистая ликвидность ФРС за 4 недели", p: "краткосрочное направление долларовой ликвидности", rel: "Баланс ФРС" },
+  netliq_13w: { t: "Чистая ликвидность ФРС за квартал", p: "среднесрочное направление долларовой ликвидности", rel: "Баланс ФРС" },
+  financial_conditions: { t: "Реальные ставки и курс доллара", p: "две главные цены, определяющие спрос на рисковые активы", rel: "Ставки и курс доллара (ФРС)" },
+  two_year: { t: "Доходность 2-летних облигаций США", p: "во что рынок оценивает будущую политику ФРС", rel: "Доходности гособлигаций США (ФРС)" },
+  system_stress: { t: "Кредитный и рыночный стресс", p: "сводка по кредитным премиям, страховке на акции и волатильности госдолга", rel: "Кредитные спреды и волатильность" },
   macro_lens: { t: "Связь биткоина с индексом Nasdaq", p: "торгуется ли биткоин как обычный рисковый актив или живёт своей жизнью" , quiet: true },
-  etf_regime: { t: "Потоки в биткоин-ETF в США", p: "сколько денег институциональные инвесторы вложили в биткоин или вывели через биржевые фонды" },
-  etf_1d: { t: "Потоки в биткоин-ETF за день", p: "приток или отток денег через американские биржевые фонды за последний торговый день" },
-  etf_5d: { t: "Потоки в биткоин-ETF за неделю", p: "приток или отток за пять торговых дней" },
-  etf_20d: { t: "Потоки в биткоин-ETF за месяц", p: "приток или отток за двадцать торговых дней" },
-  stablecoin_regime: { t: "Объём стейблкоинов", p: "сколько «долларов» находится внутри криптосистемы и может быть потрачено на покупки" },
-  exchange_supply: { t: "Запас биткоинов на биржах", p: "растёт — монеты несут продавать, падает — уносят на хранение" },
-  exchange_netflow_30d: { t: "Приток биткоинов на биржи за месяц", p: "чистое движение монет на биржи и с бирж" },
-  institutional_quality: { t: "Позиции фондов во фьючерсах CME (отчёт CFTC)", p: "видно, покупают ли институционалы направленно или зарабатывают на арбитраже" },
+  etf_regime: { t: "Потоки в биткоин-ETF в США", p: "сколько денег институциональные инвесторы вложили в биткоин или вывели через биржевые фонды", rel: "Потоки в биткоин-ETF" },
+  etf_1d: { t: "Потоки в биткоин-ETF за день", p: "приток или отток денег через американские биржевые фонды за последний торговый день", rel: "Потоки в биткоин-ETF" },
+  etf_5d: { t: "Потоки в биткоин-ETF за неделю", p: "приток или отток за пять торговых дней", rel: "Потоки в биткоин-ETF" },
+  etf_20d: { t: "Потоки в биткоин-ETF за месяц", p: "приток или отток за двадцать торговых дней", rel: "Потоки в биткоин-ETF" },
+  stablecoin_regime: { t: "Объём стейблкоинов", p: "сколько «долларов» находится внутри криптосистемы и может быть потрачено на покупки", rel: "Стейблкоины" },
+  exchange_supply: { t: "Запас биткоинов на биржах", p: "растёт — монеты несут продавать, падает — уносят на хранение", rel: "Ончейн-данные сети биткоина" },
+  exchange_netflow_30d: { t: "Приток биткоинов на биржи за месяц", p: "чистое движение монет на биржи и с бирж", rel: "Ончейн-данные сети биткоина" },
+  institutional_quality: { t: "Позиции фондов во фьючерсах CME (отчёт CFTC)", p: "видно, покупают ли институционалы направленно или зарабатывают на арбитраже", rel: "Отчёт CFTC о позициях во фьючерсах" },
   us_spot_premium: { t: "Премия американских бирж", p: "покупают ли биткоин дороже именно в США" , quiet: true },
-  mvrv_cycle: { t: "Оценка рынка биткоина (MVRV)", p: "насколько цена выше средней цены покупки всех монет — мера накопленной прибыли рынка" },
-  network_security: { t: "Мощность сети биткоина и сложность майнинга", p: "устойчивое падение означает, что майнеры выключают оборудование и вынуждены продавать монеты" },
+  mvrv_cycle: { t: "Оценка рынка биткоина (MVRV)", p: "насколько цена выше средней цены покупки всех монет — мера накопленной прибыли рынка", rel: "Ончейн-данные сети биткоина" },
+  network_security: { t: "Мощность сети биткоина и сложность майнинга", p: "устойчивое падение означает, что майнеры выключают оборудование и вынуждены продавать монеты", rel: "Сеть биткоина" },
   fee_pressure: { t: "Комиссии в сети биткоина", p: "спрос на место в блоках" , quiet: true },
-  network_activity: { t: "Активность сети биткоина", p: "сколько адресов и транзакций реально работает в сети" },
-  miner_regime: { t: "Доходность майнинга", p: "сколько майнеры зарабатывают на единицу мощности" },
+  network_activity: { t: "Активность сети биткоина", p: "сколько адресов и транзакций реально работает в сети", rel: "Ончейн-данные сети биткоина" },
+  miner_regime: { t: "Доходность майнинга", p: "сколько майнеры зарабатывают на единицу мощности", rel: "Ончейн-данные сети биткоина" },
   trend_regime: { t: "Тренд цены биткоина", p: "положение цены относительно её долгосрочных средних" , quiet: true },
   drawdown: { t: "Падение биткоина от исторического максимума", p: "на какой стадии цикла находится рынок" , quiet: true },
   realized_volatility: { t: "Волатильность биткоина за 30 дней", p: "насколько сильно цена колебалась в последний месяц" , quiet: true },
   volume_confirmation: { t: "Объём торгов биткоином", p: "подкреплено ли движение цены реальным оборотом" , quiet: true },
-  tga_daily: { t: "Счёт Минфина США в ФРС (ежедневно)", p: "когда Минфин тратит накопленное — деньги приходят в экономику" },
-  g3_liquidity: { t: "Совокупные балансы ФРС, ЕЦБ и Банка Японии", p: "мировая долларовая ликвидность целиком, а не только американская" },
+  tga_daily: { t: "Счёт Минфина США в ФРС (ежедневно)", p: "когда Минфин тратит накопленное — деньги приходят в экономику", rel: "Минфин США" },
+  g3_liquidity: { t: "Совокупные балансы ФРС, ЕЦБ и Банка Японии", p: "мировая долларовая ликвидность целиком, а не только американская", rel: "Балансы центробанков ФРС, ЕЦБ и Банка Японии" },
   gold_axis: { t: "Связь биткоина с золотом", p: "ведёт ли себя биткоин как защитный актив" , quiet: true },
-  sth_pricing: { t: "Цена биткоина относительно средней цены покупки недавних держателей", p: "ниже единицы — недавние покупатели сидят в убытке, это типично для медвежьей фазы" },
-  realized_pnl: { t: "Продают ли биткоин в прибыль или в убыток", p: "устойчивые продажи в убыток — признак капитуляции" },
-  hash_ribbons: { t: "Тренд мощности сети биткоина", p: "классический индикатор конца капитуляции майнеров" , quiet: true },
+  sth_pricing: { t: "Цена биткоина относительно средней цены покупки недавних держателей", p: "ниже единицы — недавние покупатели сидят в убытке, это типично для медвежьей фазы", rel: "Ончейн-данные сети биткоина" },
+  realized_pnl: { t: "Продают ли биткоин в прибыль или в убыток", p: "устойчивые продажи в убыток — признак капитуляции", rel: "Ончейн-данные сети биткоина" },
+  hash_ribbons: { t: "Тренд мощности сети биткоина", p: "классический индикатор конца капитуляции майнеров", rel: "Сеть биткоина" , quiet: true },
   oi_quality: { t: "Открытый интерес по фьючерсам на биткоин", p: "растёт ли плечо в системе вместе с ценой" , quiet: true },
   carry_regime: { t: "Стоимость плеча на крипторынке", p: "сколько стоит держать длинную позицию с плечом" , quiet: true },
   options_vol: { t: "Волатильность опционов на биткоин", p: "во сколько рынок оценивает страховку от движения цены" , quiet: true },
@@ -212,12 +216,48 @@ const BLOCK_TITLE = {
   market: "качество торгов",
 };
 
+/* Имя публикации по ОБРАЗЦУ, а не по точному совпадению строки: провайдеры дописывают в поле
+   источника свои детали («The Block (tbstat) + SosoValue · Coinbase»), и точная таблица такое
+   пропускала — в бой уходил сырой технический заголовок. Порядок важен: первый совпавший
+   образец выигрывает, поэтому частные идут выше общих. */
+const RELEASE_PATTERNS = [
+  [/the block|sosovalue|spot.?etf/i, "Потоки в биткоин-ETF"],
+  [/cftc/i, "Отчёт CFTC о позициях во фьючерсах"],
+  [/coinmetrics|coin metrics|bitcoin-data|bgeometrics/i, "Ончейн-данные сети биткоина"],
+  [/mempool|blockstream|esplora/i, "Сеть биткоина"],
+  [/defillama/i, "Стейблкоины"],
+  [/fiscaldata|treasury|минфин/i, "Минфин США"],
+  [/h\.4\.1/i, "Баланс ФРС"],
+  [/h\.15/i, "Доходности гособлигаций США (ФРС)"],
+  [/h\.10/i, "Курсы валют (ФРС)"],
+  [/employment situation|bls/i, "Отчёт о занятости США"],
+  [/\bdol\b/i, "Заявки на пособие по безработице (США)"],
+  [/sloos/i, "Опрос ФРС о банковском кредитовании"],
+  [/чикаго/i, "Финансовые условия (ФРБ Чикаго)"],
+  [/ny fed|нью-йорка/i, "Денежный рынок США (ФРБ Нью-Йорка)"],
+  [/cboe/i, "Индексы волатильности CBOE"],
+  [/ецб|фиксинг/i, "Курсы валют (фиксинг ЕЦБ)"],
+  [/\beia\b|нефт/i, "Цены на нефть (EIA)"],
+  [/ice bofa/i, "Кредитные спреды США"],
+  [/закрытие рынка/i, "Закрытие рынка США"],
+  [/coinbase|kraken|bitstamp|gemini|okx|coingecko|дневная точка/i, "Рыночные цены"],
+  [/\bfred\b|фрс/i, "Данные ФРС"],
+];
+
 const humanTitle = (id, fallback) => HUMAN[id]?.t || fallback || id;
 const humanPlain = (id) => HUMAN[id]?.p || "";
 const humanRelease = (s) => {
-  const raw = String(s || "").trim().toLowerCase();
-  return RELEASE_HUMAN[raw] || RELEASE_HUMAN[raw.split("·")[0].trim()] || sourceLabel(s);
+  const raw = String(s || "").trim();
+  if (!raw) return "Источник данных";
+  if (RELEASE_HUMAN[raw.toLowerCase()]) return RELEASE_HUMAN[raw.toLowerCase()];
+  for (const [rx, name] of RELEASE_PATTERNS) if (rx.test(raw)) return name;
+  return sourceLabel(raw);
 };
+
+// Публикация показателя: у карточки может быть своя привязка (`rel` в словаре) — она точнее,
+// чем имя провайдера. Пример: 2-летка и баланс ФРС обе приходят «из FRED», но это РАЗНЫЕ
+// публикации с разным календарём, и валить их в одно сообщение «Данные ФРС» неправильно.
+const releaseOf = (i) => HUMAN[i.id]?.rel || humanRelease(i.release || i.source);
 
 // BTC-панель: карточка считается непрерывной, если её наблюдение моложе этого возраста —
 // это живой рыночный фид (споты, деривативы, пеги, комиссии мемпула), у него нет релизов.
@@ -228,6 +268,20 @@ const LIVE_FEED_MAX_AGE_MS = 6 * 3600 * 1000;
 // поэтому окно широкое. Ряды публикуют 30 карточек из 40; те, что не публикуют, — живые фиды
 // (деривативы, споты, пеги, комиссии), они по своей природе не пересматриваются.
 const POINT_MEMORY = 150;
+
+// Журнал смен доли из опубликованной панелью истории: [{t, from, to}]. Записи истории идут
+// по времени, доля лежит в decision.target_pct; берём только моменты, где она изменилась.
+function decisionChanges(history) {
+  const rows = (history || [])
+    .map((r) => ({ t: Date.parse(r?.t || ""), pct: r?.decision?.target_pct }))
+    .filter((r) => finite(r.t) && finite(r.pct))
+    .sort((a, b) => a.t - b.t);
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (!sameNum(rows[i].pct, rows[i - 1].pct)) out.push({ t: rows[i].t, from: rows[i - 1].pct, to: rows[i].pct });
+  }
+  return out;
+}
 
 // Ряд карточки → компактная карта «метка времени → значение» для сравнения между прогонами.
 function compactSeries(series) {
@@ -254,6 +308,12 @@ async function readJSON(path, fallback = null) {
 // Приводит снимок BTC-панели к общей форме. Ничего не пересчитывает: только проекция.
 function fromSnapshotJSON(snap) {
   const generatedAt = Date.parse(snap.generated_at || "") || Date.now();
+  // На этой панели набор карточек задаётся кодом сборщика, поэтому тест на полноту словаря
+  // (как у макро-панели) невозможен: новые id появляются без правки уведомлений. Вместо теста —
+  // громкая строка в логе: без записи в словаре наружу уедет внутренняя подпись карточки.
+  const noHuman = (snap.metrics || []).filter((m) => m.vote === true && !HUMAN[m.id]).map((m) => m.id);
+  if (noHuman.length) console.log(`ВНИМАНИЕ: нет человеческого имени у карточек — ${noHuman.join(", ")} (в сообщение уйдёт внутренняя подпись; добавьте их в HUMAN)`);
+
   const indicators = (snap.metrics || []).map((m) => {
     const obs = Date.parse(m.observed_at || "");
     const live = finite(obs) ? generatedAt - obs < LIVE_FEED_MAX_AGE_MS : false;
@@ -319,6 +379,10 @@ function fromSnapshotJSON(snap) {
         hold: snap.regime_meta?.strategic || null,
         sample: { t: Date.parse(snap.generated_at || "") || Date.now(), pct: snap.decision.target_pct, score: snap.scores?.strategic ?? null,
                   blocks: Object.fromEntries(Object.entries(blocks).map(([k, b]) => [k, b.score])) },
+        // Панель публикует собственную историю решений — из неё сразу видно, как часто такие
+        // смены откатывались. Без этого «сколько раз откатывалось» пришлось бы копить с нуля
+        // неделями, и самый сильный довод об устойчивости молчал бы всё это время.
+        changes: decisionChanges(snap.history),
       }
     : null;
 
@@ -397,6 +461,39 @@ const PAGE_EXTRACTOR = `(() => {
   return out;
 })()`;
 
+/* Локальная подача страницы из рабочей копии.
+
+   ЗАЧЕМ: раньше состояние снималось с ОПУБЛИКОВАННОЙ страницы, а публикация GitHub Pages идёт
+   уже после того, как уведомления стартовали. Замер в проде 28.07: страница прочитана в 14:16:19,
+   а деплой свежего снимка завершился в 14:16:37 — то есть сообщения о статистике считались по
+   данным ПРЕДЫДУЩЕГО цикла и опаздывали на 10–35 минут. Для «как можно оперативнее» это главный
+   структурный изъян.
+
+   Побочная выгода: уведомления перестают зависеть от здоровья Pages (24.07 сборка Pages падала
+   на инциденте платформы, страница замирала — уведомления замирали вместе с ней). */
+async function serveDir(dir) {
+  const http = await import("node:http");
+  const { readFile: rf } = await import("node:fs/promises");
+  const { join, normalize } = await import("node:path");
+  const TYPES = { ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".mjs": "text/javascript; charset=utf-8" };
+  const server = http.createServer(async (req, res) => {
+    try {
+      const rel = decodeURIComponent((req.url || "/").split("?")[0]);
+      // нормализация пути: раннер и без того изолирован, но выход за каталог недопустим в любом виде
+      const safe = normalize(rel).replace(/^(\.\.[/\\])+/, "");
+      const file = join(dir, safe === "/" || safe === "\\" ? "index.html" : safe);
+      const body = await rf(file);
+      const ext = (file.match(/\.[a-z]+$/i) || [""])[0].toLowerCase();
+      res.writeHead(200, { "content-type": TYPES[ext] || "application/octet-stream" });
+      res.end(body);
+    } catch {
+      res.writeHead(404).end("not found");
+    }
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { server, url: `http://127.0.0.1:${server.address().port}/` };
+}
+
 async function fromLivePage(url) {
   const puppeteer = await import("puppeteer-core");
   const executablePath =
@@ -435,8 +532,20 @@ async function fromLivePage(url) {
 
 async function readPanel() {
   const mode = process.env.NOTIFY_SOURCE || "auto";
-  if (mode === "page" || (mode === "auto" && PAGE_URL && !process.env.NOTIFY_SNAPSHOT)) {
-    if (!PAGE_URL) throw new Error("NOTIFY_PAGE не задан для режима page");
+  if (mode === "page" || (mode === "auto" && (PAGE_DIR || PAGE_URL) && !process.env.NOTIFY_SNAPSHOT)) {
+    // Каталог рабочей копии приоритетнее опубликованного адреса: он свежее ровно на один цикл
+    // публикации и не зависит от здоровья GitHub Pages.
+    if (PAGE_DIR) {
+      const { server, url } = await serveDir(PAGE_DIR);
+      console.log(`страница поднята локально из ${PAGE_DIR}`);
+      try {
+        return await fromLivePage(url);
+      } finally {
+        server.close();
+      }
+    }
+    if (!PAGE_URL) throw new Error("не задан ни NOTIFY_PAGE_DIR, ни NOTIFY_PAGE для режима page");
+    console.log(`страница читается по сети: ${PAGE_URL} (данные могут отставать на цикл публикации)`);
     return fromLivePage(PAGE_URL);
   }
   const snap = await readJSON(SNAPSHOT_PATH);
@@ -522,7 +631,7 @@ const DETECTOR_HUMAN = {
   "Дистрибуция и потеря тренда": "Крупные держатели распродают на фоне слома тренда",
   "Капитуляция → восстановление": "Признаки разворота после капитуляции",
   "Перегрев / каскад плеча": "Риск каскада ликвидаций из-за плеча",
-  "Условия short squeeze": "Условия для короткого сжатия (short squeeze)",
+  "Условия short squeeze": "Условия для резкого выноса продавцов вверх",
   "Нарушение целостности рынка": "Сбой рынка: цены расходятся или стейблкоин теряет привязку",
   "Фондинговый стресс": "Нехватка долларов на денежном рынке",
   "Капекс / амортизация гиперскейлеров": "Крупнейшие ИТ-компании режут инвестиции в дата-центры",
@@ -581,6 +690,22 @@ function typicalDailyMove(series) {
   return spans[Math.floor(spans.length / 2)] || null;
 }
 
+// Порог из фразы, которую печатает сама панель: «до 35%: композит ≤ −13» → −13.
+// Числа приходят с типографским минусом, поэтому он нормализуется.
+function thresholdFrom(text) {
+  const m = String(text || "").replace(/[−–—]/g, "-").match(/[≤≥<>]\s*([+-]?\d+(?:[.,]\d+)?)/);
+  return m ? Number(m[1].replace(",", ".").replace(/^\+/, "")) : null;
+}
+
+// Слияние журналов смен по времени с устранением дублей: у панели своя история, у нас своя,
+// и в пересечении они описывают одни и те же события.
+function mergeChanges(published, own) {
+  const all = [...(published || []), ...(own || [])].filter((c) => finite(c?.t) && finite(c?.to));
+  const seen = new Map();
+  for (const c of all) seen.set(`${Math.round(c.t / 60000)}|${c.to}`, c);
+  return [...seen.values()].sort((a, b) => a.t - b.t);
+}
+
 // Как часто смена решения откатывалась обратно в течение двух суток — собственная база частот.
 function revertStats(changes) {
   if (!Array.isArray(changes) || changes.length < 3) return null;
@@ -613,6 +738,18 @@ function stabilityLines(prevAlloc, curAlloc, prevState) {
     }
   }
 
+  // --- макро-панель: запас до порога берётся из условий, которые страница печатает сама ---
+  // «↓ до 35%: композит ≤ −13» при текущей оценке +9 означает запас 22 пункта. Обе цифры уже
+  // есть на странице, и без этого вердикт для макро-панели был почти всегда «умеренный» без
+  // единого числового довода.
+  if (marginRaw === null && finite(curAlloc.score)) {
+    const th = thresholdFrom(curAlloc.down) ?? thresholdFrom(curAlloc.up);
+    if (finite(th)) {
+      marginRaw = Math.abs(curAlloc.score - th);
+      nearTitle = "";
+    }
+  }
+
   // --- эмпирика: как часто такие решения откатывались и как сильно величина гуляет за сутки ---
   const trend = (prevState.alloc_trend || []).concat(curAlloc.sample ? [curAlloc.sample] : []);
   const decisiveSeries = trend
@@ -621,12 +758,9 @@ function stabilityLines(prevAlloc, curAlloc, prevState) {
   const noise = typicalDailyMove(decisiveSeries);
   const marginDays = finite(marginRaw) && noise ? marginRaw / noise : null;
 
-  const changes = [];
-  for (let i = 1; i < trend.length; i++) {
-    if (finite(trend[i].pct) && finite(trend[i - 1].pct) && !sameNum(trend[i].pct, trend[i - 1].pct)) {
-      changes.push({ t: trend[i].t, from: trend[i - 1].pct, to: trend[i].pct });
-    }
-  }
+  // Журнал смен: опубликованный панелью (сразу даёт базу) + накопленный самим уведомлением.
+  // Второй нужен там, где панель историю решений не публикует (макро-панель).
+  const changes = mergeChanges(curAlloc.changes, prevState.alloc_changes);
   const reverts = revertStats(changes);
   const ageH = curAlloc.hold && finite(curAlloc.hold.count) ? curAlloc.hold.count : null;
 
@@ -654,11 +788,20 @@ function stabilityLines(prevAlloc, curAlloc, prevState) {
   if (marginDays !== null) {
     reason.push(
       marginDays < 1
-        ? "до отката осталось меньше, чем эта величина обычно проходит за сутки"
+        ? "до отката осталось меньше, чем обстановка обычно проходит за сутки"
         : `запас до отката — примерно ${fmtPoint(Math.min(marginDays, 10))} ${plural(Math.round(marginDays), "день", "дня", "дней")} обычного движения`
     );
+  } else if (finite(marginRaw) && !nearTitle) {
+    // Числовой запас есть, но накопленной истории ещё мало, чтобы перевести его в дни.
+    reason.push(`обстановке нужно ухудшиться ещё на ${fmtPoint(marginRaw)} ${plural(Math.round(marginRaw), "пункт", "пункта", "пунктов")} по шкале от −100 до +100, чтобы доля упала на ступень ниже`);
   }
-  if (reverts && reverts.total >= 3) reason.push(`в прошлом из ${reverts.total} таких смен ${reverts.reverted} откатились обратно в течение двух суток`);
+  if (reverts && reverts.total >= 3) {
+    reason.push(
+      reverts.reverted === 0
+        ? `похожих смен в прошлом было ${reverts.total}, и ни одна не откатилась обратно в течение двух суток`
+        : `в прошлом из ${reverts.total} таких смен ${reverts.reverted} ${plural(reverts.reverted, "откатилась", "откатились", "откатились")} обратно в течение двух суток`
+    );
+  }
   if (curAlloc.up && tier !== "forced") reason.push(`вернуть прежнюю долю может: ${curAlloc.up.replace(/^апгрейд разблокируется, когда/, "снятие паузы, когда")}`);
   if (curAlloc.frozen) reason.push("повышение доли пока заморожено сработавшим сигналом риска");
   if (curAlloc.pending) reason.push("следующее изменение уже накапливает подтверждение");
@@ -672,6 +815,61 @@ function stabilityLines(prevAlloc, curAlloc, prevState) {
 function nearKey(alloc, title) {
   for (const [k, b] of Object.entries(alloc.blocks || {})) if (b.title === title) return k;
   return "";
+}
+
+/* ====================== ЗНАЧИМОСТЬ ДВИЖЕНИЯ ======================
+   «Значение изменилось» — слишком слабый повод: дневные ряды шевелятся каждый день, и половина
+   сообщений превращалась в рутину (SOPR 1.0013 → 1.0004, 2-летка +28 → +26 б.п.). Значимость
+   считается ИЗ САМОГО РЯДА: свежий шаг сравнивается с распределением всех прошлых шагов.
+   Ничего не подгоняется руками — ни порогов на показатель, ни таблицы «что важно».
+
+   Такт ряда тоже берётся из данных (медианный промежуток между точками), а не из таблицы:
+   у дневного ряда рутину отсекаем, у недельного и реже — НИКОГДА (там каждая публикация
+   событие, ради них уведомления и существуют).                                              */
+function seriesStats(points) {
+  if (!points) return null;
+  const rows = Object.entries(points).map(([t, v]) => [Number(t), v]).sort((a, b) => a[0] - b[0]);
+  if (rows.length < 12) return null;
+  const steps = [];
+  const gaps = [];
+  for (let i = 1; i < rows.length; i++) {
+    steps.push({ t: rows[i][0], d: Math.abs(rows[i][1] - rows[i - 1][1]) });
+    gaps.push((rows[i][0] - rows[i - 1][0]) / 864e5);
+  }
+  const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  const last = steps[steps.length - 1];
+  const prior = steps.slice(0, -1);
+  if (!prior.length || !finite(last?.d)) return null;
+  // Ранг свежего шага среди прошлых: 0.5 — обычный день, 0.95 — сильнее почти всех прошлых.
+  const rank = prior.filter((s) => s.d <= last.d).length / prior.length;
+  // Когда в последний раз шаг был не меньше нынешнего — из этого получается человеческая фраза
+  // «самое сильное движение с такого-то числа».
+  let sinceT = null;
+  for (let i = prior.length - 1; i >= 0; i--) if (prior[i].d >= last.d) { sinceT = prior[i].t; break; }
+  return { rank, lastStep: last.d, medianStep: med(prior.map((s) => s.d)), gapDays: med(gaps), sinceT, count: rows.length };
+}
+
+// Порог рутины для ДНЕВНЫХ рядов: наружу идёт верхняя четверть их собственных движений.
+// Значение подобрано ЗАМЕРОМ на 48 боевых снимках, а не на глаз: 0.5 пропускал четвёртый знак
+// SOPR и ±2 б.п. по 2-летке, 0.9 срезал уже содержательное. На 0.75 остаются сдвиг оценки
+// рынка, разворот потоков ETF и движение монет на биржи — то, о чём стоит знать.
+// Ряды с календарём реже дневного этот фильтр НЕ ТРОГАЕТ вовсе.
+const ROUTINE_RANK = 0.75;
+// Порог «заметного» движения, о котором стоит сказать прямо в сообщении.
+const NOTABLE_RANK = 0.9;
+
+function significance(i) {
+  const st = seriesStats(i.points);
+  if (!st) return null; // нет базы для суждения — молчать нельзя, пропускаем как есть
+  const daily = st.gapDays <= 1.5;
+  return {
+    ...st,
+    daily,
+    routine: daily && st.rank < ROUTINE_RANK,
+    notable: st.rank >= NOTABLE_RANK,
+    // «самое сильное с ...»: показываем только когда пауза действительно заметная
+    sinceLabel: st.sinceT && Date.now() - st.sinceT > 21 * 864e5 ? ruDay(st.sinceT) : "",
+  };
 }
 
 // Короткая сводка недавней истории показателя — она уходит В КОНТЕКСТ модели, чтобы «насколько
@@ -840,16 +1038,47 @@ function diff(prevState, panel) {
 
   // Сборка релизов: ключ группы — публикация первоисточника (кто и на какую дату наблюдения).
   const groups = new Map();
+  const routine = [];
   for (const { i, was } of releaseGroups) {
-    const key = `${humanRelease(i.release || i.source)}|${i.observed_at}`;
-    if (!groups.has(key))
-      groups.set(key, { release: humanRelease(i.release || i.source), cadence: i.cadence || "", observed_at: i.observed_at, moves: [], plain: [], history: [] });
-    const g = groups.get(key);
     // «смешанно → смешанно» читателю ничего не говорит: внутри у панели поменялась оценка,
     // а видимое значение осталось прежним. Такие строки в сообщение не идут.
-    if (fmtValue(was) !== fmtValue(i)) g.moves.push({ name: humanTitle(i.id, i.name), before: fmtValue(was), after: fmtValue(i), delta: "" });
-    g.plain.push(...(humanPlain(i.id) ? [`${humanTitle(i.id, i.name)} — ${humanPlain(i.id)}`] : []));
-    g.history.push(...(historyDigest(i) ? [`${humanTitle(i.id, i.name)}: ${historyDigest(i)}`] : []));
+    if (fmtValue(was) === fmtValue(i)) continue;
+    // Рутинный дрейф дневного ряда не рассылается. Недельные и более редкие публикации проходят
+    // ВСЕГДА: там сам факт выхода данных и есть событие.
+    // Исключение из фильтра — СМЕНА ЗНАКА: приток превратился в отток (или наоборот). Это
+    // качественное событие независимо от величины, и статистика размера его не видит: поймано
+    // на реплее прода, где потоки ETF +34 → −205 млн $ отсеялись как «мелкое движение».
+    const sig = significance(i);
+    const flipped = finite(was.value_num) && finite(i.value_num) && Math.sign(was.value_num) !== Math.sign(i.value_num) && (was.value_num !== 0 || i.value_num !== 0);
+    if (sig?.routine && !flipped) {
+      routine.push(`${humanTitle(i.id, i.name)}: ${fmtValue(was)} → ${fmtValue(i)}`);
+      continue;
+    }
+    const release = releaseOf(i);
+    const key = `${release}|${i.observed_at}`;
+    if (!groups.has(key)) groups.set(key, { release, observed_at: i.observed_at, moves: [], plain: [], history: [] });
+    const g = groups.get(key);
+    g.moves.push({
+      name: humanTitle(i.id, i.name),
+      before: fmtValue(was),
+      after: fmtValue(i),
+      // Видимый маркер значимости: он и есть ответ на «насколько это существенно», не зависящий
+      // от доступности модели.
+      delta: flipped
+        ? (i.value_num < 0 ? "смена на отрицательные значения" : "смена на положительные значения")
+        : sig?.notable
+          ? (sig.sinceLabel ? `сильнейшее движение с ${sig.sinceLabel}` : "заметное движение")
+          : "",
+    });
+    // ВАЖНО: пояснение и история собираются ТОЛЬКО для строк, реально попавших в сообщение.
+    // Раньше они брались у всех показателей группы, и комментарий объяснял не тот показатель,
+    // чьё движение видел читатель (наблюдалось в проде дважды).
+    if (humanPlain(i.id)) g.plain.push(`${humanTitle(i.id, i.name)} — ${humanPlain(i.id)}`);
+    if (historyDigest(i)) g.history.push(`${humanTitle(i.id, i.name)}: ${historyDigest(i)}`);
+  }
+  if (routine.length) {
+    console.log(`рутинный дрейф дневных рядов (в рассылку не идёт): ${routine.length}`);
+    for (const r of routine) console.log(`  · ${r}`);
   }
   for (const [key, g] of groups) {
     if (!g.moves.length) continue;
@@ -915,9 +1144,16 @@ function diff(prevState, panel) {
       note: "",
     });
   } else {
-    // Детектор риска сработал или успокоился, а доля не изменилась — это всё равно факт о рынке.
+    // Детектор риска сработал или снялся, а доля не изменилась — это всё равно факт о рынке.
+    // Промежуточное «наблюдение» (часть условий сошлась, подтверждения нет) НЕ рассылается:
+    // оно мигает туда-обратно и в проде дало сообщения вида «подтверждений 1/3», из которых
+    // читателю нечего делать. Наружу идут только срабатывание и его снятие.
     for (const { d, from, to } of detectorMoves) {
-      if (to === "calm" && from === "watch") continue; // снятие предварительной тревоги — не новость
+      const fired = to === "fired" || from === "fired";
+      if (!fired) {
+        console.log(`сигнал риска в промежуточном состоянии (в рассылку не идёт): ${detectorHuman(d.name)} ${from} → ${to}`);
+        continue;
+      }
       events.push({
         kind: "risk",
         key: `risk:${d.id}:${to}`,
@@ -939,7 +1175,10 @@ const esc = (s) =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function fmtValue(i) {
-  const v = String(i.value ?? "").trim();
+  // Панели форматируют дробную часть по-разному (BTC-панель — точкой, макро — запятой), и в
+  // соседних строках одного сообщения это выглядело неряшливо. Приводим к русской записи,
+  // не трогая ничего, кроме разделителя между цифрами.
+  const v = String(i.value ?? "").trim().replace(/(\d)\.(\d)/g, "$1,$2");
   return i.unit && !v.includes(i.unit) ? `${v} ${i.unit}` : v;
 }
 
@@ -1218,6 +1457,17 @@ function snapshotState(panel) {
 // «часто ли такое откатывается» нужна собственная история. 400 наблюдений — это примерно две
 // недели часового такта и месяц с лишним у макро-панели.
 const TREND_MAX = 400;
+// Журнал СМЕН доли живёт отдельно и дольше ряда наблюдений: смены редки (единицы в месяц), и
+// подрезать их вместе с почасовыми точками — значит навсегда лишиться базы частот откатов.
+const CHANGES_MAX = 200;
+function appendChanges(prev, panel, prevAlloc) {
+  const rows = [...(prev || [])];
+  const cur = panel.allocation;
+  if (cur && finite(cur.pct) && prevAlloc && finite(prevAlloc.pct) && !sameNum(prevAlloc.pct, cur.pct)) {
+    rows.push({ t: Date.parse(panel.generated_at || "") || Date.now(), from: prevAlloc.pct, to: cur.pct });
+  }
+  return rows.slice(-CHANGES_MAX);
+}
 function appendTrend(prev, panel) {
   const sample = panel.allocation?.sample || (panel.allocation && finite(panel.allocation.pct)
     ? { t: Date.parse(panel.generated_at || "") || Date.now(), pct: panel.allocation.pct, score: panel.allocation.score ?? null }
@@ -1270,10 +1520,11 @@ async function main() {
   console.log(`событий: ${events.length}`);
 
   const trend = appendTrend(prev.alloc_trend, panel);
+  const allocChanges = appendChanges(prev.alloc_changes, panel, prev.allocation);
   let baseline = null; // сдвигается один раз в самом конце — до тех пор пишем старую базу
   const persist = async () => {
     await mkdir(dirname(STATE_PATH), { recursive: true });
-    await writeFile(STATE_PATH, JSON.stringify({ ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, alloc_trend: trend }, null, 1));
+    await writeFile(STATE_PATH, JSON.stringify({ ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, alloc_trend: trend, alloc_changes: allocChanges }, null, 1));
   };
 
   let sent = 0;
@@ -1281,6 +1532,7 @@ async function main() {
     const capped = events.slice(0, MAX_EVENTS);
     if (events.length > MAX_EVENTS) console.log(`ПРЕДОХРАНИТЕЛЬ: событий ${events.length} > ${MAX_EVENTS}, отправляются первые ${MAX_EVENTS} по важности`);
     const llm = await llmComments(capped, panel);
+    console.log(`комментарии: ${llm ? `модель (${resolveModel()})` : "шаблон"}`);
     for (let i = 0; i < capped.length; i++) {
       const ev = capped[i];
       const comment = (llm && llm[i]) || templateComment(ev);
@@ -1292,6 +1544,7 @@ async function main() {
         console.log("\n--- сообщение " + (i + 1) + " ---\n" + plain);
       } else {
         await sendTelegram(text);
+        console.log(`  → отправлено: ${KIND[ev.kind]?.label || ev.kind} · ${ev.title}${ev.before || ev.after ? ` (${ev.before || "—"} → ${ev.after || "—"})` : ""} · комментарий: ${llm && llm[i] ? "модель" : "шаблон"}`);
         sent++;
         sentIndex[sentKey(ev)] = new Date().toISOString();
         if (ev.revisedPoints) revisedSeen = rememberRevised(revisedSeen, [ev], now);
@@ -1314,4 +1567,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, pingMessage, HUMAN, MACRO_CADENCE };
+export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, HUMAN, MACRO_CADENCE };

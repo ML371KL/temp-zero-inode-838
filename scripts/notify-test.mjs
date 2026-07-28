@@ -1,7 +1,7 @@
 // Тесты уведомлений. Все фикстуры синтетические и НЕ зависят от текущей даты: проверяется
 // поведение диффера, а не то, что сегодня опубликовал FRED.
 import assert from "node:assert/strict";
-import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, pingMessage, HUMAN, MACRO_CADENCE } from "./notify.mjs";
+import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, HUMAN, MACRO_CADENCE } from "./notify.mjs";
 
 let passed = 0;
 const test = (name, fn) => {
@@ -188,6 +188,121 @@ test("алерт источника без наблюдаемых изменен
   assert.equal(ev.length, 0, "«изменено строк: 1» без старого и нового значения — не сообщение");
 });
 
+/* ---- значимость движения: рутина дневных рядов не рассылается ---- */
+
+// ряд с ровным шагом 1 и одним крупным выбросом в конце — задаётся явно, дат «от сегодня» нет
+const seriesPoints = (steps, startDay = "2026-01-01") => {
+  const t0 = Date.parse(startDay + "T00:00:00Z");
+  const pts = {};
+  let v = 100;
+  steps.forEach((d, k) => { v += d; pts[t0 + k * 864e5] = v; });
+  return pts;
+};
+const flat = Array.from({ length: 30 }, (_, k) => (k % 2 ? 1 : -1)); // обычный дрейф ±1
+
+test("рутинный дрейф дневного ряда в рассылку не идёт", () => {
+  const pts = seriesPoints([...flat, 0.2]);
+  const before = stateOf(panelOf([ind({ value: "1", value_num: 1, points: seriesPoints(flat) })]));
+  const after = panelOf([ind({ value: "1.2", value_num: 1.2, observed_at: "2026-07-21", points: pts })]);
+  assert.equal(diff(before, after).length, 0, "шаг слабее половины прошлых — обычный день, не новость");
+});
+
+test("крупное движение дневного ряда рассылается и помечается", () => {
+  const pts = seriesPoints([...flat, 12]);
+  const before = stateOf(panelOf([ind({ value: "1", value_num: 1, points: seriesPoints(flat) })]));
+  const after = panelOf([ind({ value: "13", value_num: 13, observed_at: "2026-07-21", points: pts })]);
+  const ev = diff(before, after);
+  assert.equal(ev.length, 1);
+  assert.match(ev[0].moves[0].delta, /движение/, "заметное движение обязано быть помечено прямо в тексте");
+});
+
+test("недельные и более редкие публикации проходят ВСЕГДА, даже мелким шагом", () => {
+  const weekly = {};
+  const t0 = Date.parse("2026-01-01T00:00:00Z");
+  Array.from({ length: 30 }, (_, k) => (weekly[t0 + k * 7 * 864e5] = 100 + (k % 2 ? 1 : -1)));
+  const later = { ...weekly, [t0 + 30 * 7 * 864e5]: 100.2 };
+  const before = stateOf(panelOf([ind({ value: "100", value_num: 100, points: weekly })]));
+  const ev = diff(before, panelOf([ind({ value: "100.2", value_num: 100.2, observed_at: "2026-07-21", points: later })]));
+  assert.equal(ev.length, 1, "у недельного релиза сам факт выхода данных — событие");
+});
+
+test("смена знака проходит фильтр рутины: приток стал оттоком", () => {
+  const base = seriesPoints(flat);
+  const before = stateOf(panelOf([ind({ value: "+34 млн $", value_num: 34, points: base })]));
+  const after = panelOf([ind({ value: "-205 млн $", value_num: -205, observed_at: "2026-07-21", points: seriesPoints([...flat, 0.1]) })]);
+  const ev = diff(before, after);
+  assert.equal(ev.length, 1, "переход из плюса в минус — событие независимо от размера шага");
+  assert.match(ev[0].moves[0].delta, /отрицательн/);
+});
+
+test("без накопленного ряда показатель не глушится", () => {
+  const before = stateOf(panelOf([ind({ value: "1", value_num: 1 })]));
+  const ev = diff(before, panelOf([ind({ value: "1.0001", value_num: 1.0001, observed_at: "2026-07-21" })]));
+  assert.equal(ev.length, 1, "нет базы для суждения — молчать нельзя");
+});
+
+test("пояснение относится к показателю, который реально попал в сообщение", () => {
+  // у первого показателя видимое значение не изменилось — он выпадает; пояснение должно
+  // остаться от второго, иначе комментарий объясняет не то, что видит читатель
+  const before = stateOf(panelOf([
+    ind({ id: "mvrv_cycle", value: "смешанно", value_num: null }),
+    ind({ id: "realized_pnl", value: "1.0016", value_num: 1.0016 }),
+  ]));
+  const after = panelOf([
+    ind({ id: "mvrv_cycle", value: "смешанно", value_num: null, observed_at: "2026-07-21", score: 1 }),
+    ind({ id: "realized_pnl", value: "1.0013", value_num: 1.0013, observed_at: "2026-07-21" }),
+  ]);
+  const ev = diff(before, after);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].moves.length, 1, "показатель без видимого изменения в сообщение не попадает");
+  assert.equal(ev[0].plain.length, 1, "и его пояснение — тоже");
+  assert.match(ev[0].plain[0], /прибыль или в убыток/, `пояснение должно быть о показателе из сообщения: ${ev[0].plain}`);
+});
+
+/* ---- нормализация источников ---- */
+
+test("технические имена источников не уходят в заголовок", () => {
+  const cases = [
+    ["The Block (tbstat) + SosoValue · Coinbase", "Потоки в биткоин-ETF"],
+    ["The Block (tbstat)", "Потоки в биткоин-ETF"],
+    ["coinmetrics", "Ончейн-данные сети биткоина"],
+    ["Coin Metrics · network", "Ончейн-данные сети биткоина"],
+    ["CFTC · The Block (tbstat)", "Отчёт CFTC о позициях во фьючерсах"],
+    ["mempool.space", "Сеть биткоина"],
+    ["DefiLlama · exchange fallback", "Стейблкоины"],
+    ["fiscaldata", "Минфин США"],
+  ];
+  for (const [raw, want] of cases) assert.equal(humanRelease(raw), want, `«${raw}» → ожидалось «${want}»`);
+});
+
+test("одна и та же публикация не расщепляется из-за приписки провайдера", () => {
+  const a = { id: "etf_regime", source: "The Block (tbstat) + SosoValue · Coinbase" };
+  const b = { id: "etf_1d", source: "The Block (tbstat)" };
+  assert.equal(releaseOf(a), releaseOf(b), "оба про потоки ETF — сообщение должно быть одно");
+});
+
+test("разные публикации одного провайдера не сливаются", () => {
+  assert.notEqual(releaseOf({ id: "two_year", source: "fred" }), releaseOf({ id: "liquidity_regime", source: "fred" }),
+    "2-летка выходит каждый рабочий день, баланс ФРС — раз в неделю; это разные события");
+});
+
+test("порог из фразы панели разбирается вместе с типографским минусом", () => {
+  assert.equal(thresholdFrom("до 35%: композит ≤ −13"), -13);
+  assert.equal(thresholdFrom("до 100%: композит ≥ +33 и опереж ≥ +13"), 33);
+  assert.equal(thresholdFrom("апгрейд разблокируется, когда детектор выйдет"), null);
+});
+
+test("промежуточное «наблюдение» детектора не рассылается", () => {
+  const det = (state) => [{ id: "d1", name: "Нефтяной шок / Ормуз", state, inputs: "", note: "" }];
+  const base = { allocation: { pct: 65 } };
+  const calm = stateOf(panelOf([ind({})], { ...base, detectors: det("calm") }));
+  assert.equal(diff(calm, panelOf([ind({})], { ...base, detectors: det("watch") })).length, 0, "«подтверждений 1/3» — не новость");
+  const watch = stateOf(panelOf([ind({})], { ...base, detectors: det("watch") }));
+  assert.equal(diff(watch, panelOf([ind({})], { ...base, detectors: det("fired") })).length, 1, "срабатывание — новость");
+  const fired = stateOf(panelOf([ind({})], { ...base, detectors: det("fired") }));
+  assert.equal(diff(fired, panelOf([ind({})], { ...base, detectors: det("calm") })).length, 1, "снятие — тоже");
+});
+
 test("у каждого показателя макро-панели есть человеческое имя", () => {
   const missing = Object.keys(MACRO_CADENCE).filter((id) => !HUMAN[id]);
   assert.deepEqual(missing, [], `без записи в словаре в сообщение уедет внутренняя подпись карточки: ${missing}`);
@@ -256,16 +371,44 @@ test("в объяснении устойчивости нет внутренне
   }
 });
 
-test("накопленная история решений даёт частоту откатов", () => {
+test("журнал смен доли даёт частоту откатов", () => {
   const day = 86400e3;
-  const trend = [
-    { t: 1e12, pct: 80 }, { t: 1e12 + day, pct: 20 }, { t: 1e12 + 2 * day, pct: 80 },
-    { t: 1e12 + 3 * day, pct: 20 }, { t: 1e12 + 4 * day, pct: 80 },
+  // журнал СМЕН (а не ряд наблюдений): три смены, две из них — возврат к прежней доле
+  const alloc_changes = [
+    { t: 1e12, from: 80, to: 20 },
+    { t: 1e12 + day, from: 20, to: 80 },
+    { t: 1e12 + 2 * day, from: 80, to: 20 },
+    { t: 1e12 + 3 * day, from: 20, to: 80 },
   ];
-  const prev = { ...stateOf(panelOf([ind({})], { allocation: allocOf(80, BLOCKS_TWO_ADVERSE) })), alloc_trend: trend };
+  const prev = { ...stateOf(panelOf([ind({})], { allocation: allocOf(80, BLOCKS_TWO_ADVERSE) })), alloc_changes };
   const ev = diff(prev, panelOf([ind({})], { allocation: allocOf(20, BLOCKS_TWO_ADVERSE) }));
   const text = ev[0].stability[0].reason.join(" ");
-  assert.match(text, /откатились обратно/, `база частот обязана попасть в объяснение: ${text}`);
+  assert.match(text, /откатил/, `база частот обязана попасть в объяснение: ${text}`);
+});
+
+test("журнал смен переживает подрезку ряда наблюдений", () => {
+  const many = Array.from({ length: 500 }, (_, k) => ({ t: 1e12 + k * 3600e3, pct: 5 }));
+  const panel = panelOf([ind({})], { allocation: allocOf(5, BLOCKS_TWO_ADVERSE) });
+  const trend = appendTrend(many, panel);
+  assert.ok(trend.length <= 400, "ряд наблюдений подрезается");
+  const changes = appendChanges([{ t: 1e11, from: 80, to: 5 }], panel, { pct: 80 });
+  assert.equal(changes.length, 2, "а журнал смен — нет");
+  assert.equal(changes[1].to, 5);
+});
+
+test("опубликованная панелью история решений сразу даёт базу частот", () => {
+  const hist = [
+    { t: "2026-07-21T01:00:00Z", decision: { target_pct: 5 } },
+    { t: "2026-07-21T02:00:00Z", decision: { target_pct: 20 } },
+    { t: "2026-07-22T02:00:00Z", decision: { target_pct: 80 } },
+    { t: "2026-07-24T02:00:00Z", decision: { target_pct: 45 } },
+    { t: "2026-07-24T03:00:00Z", decision: { target_pct: 5 } },
+  ];
+  const ch = decisionChanges(hist);
+  assert.equal(ch.length, 4, `должно быть 4 смены: ${JSON.stringify(ch)}`);
+  assert.deepEqual([ch[0].from, ch[0].to], [5, 20]);
+  assert.equal(decisionChanges([]).length, 0);
+  assert.equal(decisionChanges(undefined).length, 0);
 });
 
 test("сообщение о доле собирается с разделами «почему» и «устойчиво ли»", () => {
