@@ -27,6 +27,20 @@
 //     Выдержки триады деноминированы в РЕВЬЮ-ДНЯХ (UTC-день меняется), не в вызовах коллектора —
 //     ежечасный прогон не ускоряет течение персистентности. Каждый критерий обязан проходить
 //     power-тест на сломанных вариантах (см. тест модуля: R1, R2 и R3).
+//  5. МИНИМАЛЬНЫЙ ИНТЕРВАЛ ПОДТВЕРЖДЕНИЯ RISK-OFF (предзаявление, аудит 15 суток прода
+//     2026-07-28). Гистерезис v1 считает подтверждение понижения в СНИМКАХ («2 подряд»), а такт
+//     нерегулярен: за 464 наблюдённых интервала медиана 59.7 мин, но 66 интервалов короче 10 мин
+//     (двойной планировщик, ручные прогоны, пуш+dispatch). 2026-07-24 это материализовалось:
+//     переход в «защитный» подтвердился за 24 минуты вместо ~2 часов штатного такта. Правило v2:
+//     подтверждающие risk-off снимки обязаны отстоять друг от друга не менее чем на
+//     `risk_off_min_confirm_minutes`; 30 мин — минимум, снимающий бурст-артефакты и при этом
+//     никогда не задерживающий штатный часовой такт (рассматривалось 45 — отвергнуто: запас над
+//     наблюдаемым тактом меньше, выигрыш тот же). ВАЖНО: правило НЕ исполняется тенью и не влияет
+//     на её NAV — гистерезис вердикта живёт в замороженной секции v1, тень едет на УЖЕ
+//     опубликованном режиме v1. До переключения правило только предзаявлено, а счётчик
+//     `monitoring.shadow_hysteresis` копит форвардные свидетельства (сколько понижений было
+//     подтверждено быстрее минимального интервала). Порог берётся ОТСЮДА и сборщиком, и монитором:
+//     единственный источник правды, иначе публикуемое значение разъедется с исполняемым.
 // Лестница, веса, гейты, гистерезис вердикта — НЕ меняются (середина лестницы объявляется
 // порядковой: плато det 10–35 / tra 30–60 в пределах 0.06 Sharpe; перекалибровка запрещена).
 
@@ -37,6 +51,11 @@ export const POLICY_V2_CANDIDATE = Object.freeze({
   created: "2026-07-22",
   base_suite: "btc-decision-suite-v1",
   floor_ladder_pct: Object.freeze([40, 60, 80]),
+  hysteresis: Object.freeze({
+    risk_off_min_confirm_minutes: 30,
+    enforcement: "on_switch_only",
+    rationale: "Подтверждение понижения в снимках вырождается в минуты при бурстовом такте (24.07.2026: 24 мин вместо ~2 ч). Тень исполнять правило не может — гистерезис вердикта в замороженной секции v1; до переключения копится телеметрия shadow_hysteresis.",
+  }),
   decision_record: Object.freeze({
     objective: "Устранить три подтверждённых дефекта v1 (нетестированное часовое исполнение risk-on оверлея; скачок +60пп одним тиком; ревью-критерии с нулевой/инвертированной мощностью), не трогая источник ценности — режимный тайминг и структуру лестницы.",
     risk_budget: "Ожидаемое отличие от v1 по Sharpe в пределах шума (градуировка неотличима, p≈0.76); допустимая цена — до +0.33% упущенного хода на recovery-эпизод (медиана отрицательная).",
@@ -210,4 +229,16 @@ export function evaluateAcceptanceV2({ performance = null, shadowDays = 0, recov
   };
 }
 
-export function policyV2CandidateMetadata() { return { id: POLICY_V2_CANDIDATE.id, version: POLICY_V2_CANDIDATE.version, status: POLICY_V2_CANDIDATE.status, created: POLICY_V2_CANDIDATE.created, base_suite: POLICY_V2_CANDIDATE.base_suite, floor_rungs: POLICY_V2_CANDIDATE.floor_ladder_pct.length, floor_ladder_pct: [...POLICY_V2_CANDIDATE.floor_ladder_pct] }; }
+// Предзаявленное правило v2 (пункт 5): отложило бы v2 подтверждение понижения, пришедшее слишком
+// быстро после предыдущего снимка? Чистый предикат — единственный источник порога и для телеметрии
+// сборщика, и для публикуемого контракта. На живое решение и на NAV тени НЕ влияет (enforcement:
+// on_switch_only): вернуть true здесь значит «это подтверждение засчитано v1, но v2 бы его отложил».
+export function riskOffConfirmationDeferredV2({ previousSnapshotAt, now } = {}) {
+  const prev = Date.parse(previousSnapshotAt ?? "");
+  const at = Number(now);
+  if (!Number.isFinite(prev) || !Number.isFinite(at)) return false;
+  const minutes = (at - prev) / 60_000;
+  return minutes >= 0 && minutes < POLICY_V2_CANDIDATE.hysteresis.risk_off_min_confirm_minutes;
+}
+
+export function policyV2CandidateMetadata() { return { id: POLICY_V2_CANDIDATE.id, version: POLICY_V2_CANDIDATE.version, status: POLICY_V2_CANDIDATE.status, created: POLICY_V2_CANDIDATE.created, base_suite: POLICY_V2_CANDIDATE.base_suite, floor_rungs: POLICY_V2_CANDIDATE.floor_ladder_pct.length, floor_ladder_pct: [...POLICY_V2_CANDIDATE.floor_ladder_pct], hysteresis: { ...POLICY_V2_CANDIDATE.hysteresis } }; }

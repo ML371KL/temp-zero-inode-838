@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { POLICY_V2_CANDIDATE, allocationTargetV2Candidate, evaluateAcceptanceV2, evaluateReviewV2, policyV2CandidateMetadata, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
+import { POLICY_V2_CANDIDATE, allocationTargetV2Candidate, evaluateAcceptanceV2, evaluateReviewV2, policyV2CandidateMetadata, riskOffConfirmationDeferredV2, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
 import { allocationTargetV1 } from "../docs/policy-v1.mjs";
 
 const DAY = 86_400_000, HOUR = 3_600_000;
@@ -11,6 +11,26 @@ assert.ok(POLICY_V2_CANDIDATE.decision_record.acceptance_criteria.shadow_days_mi
 assert.ok(POLICY_V2_CANDIDATE.decision_record.acceptance_criteria.falsified_if.length > 10, "критерий фальсификации обязателен");
 assert.ok(Object.isFrozen(POLICY_V2_CANDIDATE) && Object.isFrozen(POLICY_V2_CANDIDATE.decision_record), "decision record кандидата должен быть заморожен");
 assert.equal(policyV2CandidateMetadata().floor_rungs, 3, "число ступеней пола публикуется для UI (знаменатель не хардкодится)");
+
+// --- Предзаявленный минимальный интервал подтверждения risk-off (пункт 5) ---
+assert.equal(POLICY_V2_CANDIDATE.hysteresis.risk_off_min_confirm_minutes, 30, "порог предзаявлен в контракте, а не зашит в сборщике");
+assert.equal(POLICY_V2_CANDIDATE.hysteresis.enforcement, "on_switch_only", "правило НЕ исполняется тенью: гистерезис вердикта в замороженной секции v1");
+assert.ok(Object.isFrozen(POLICY_V2_CANDIDATE.hysteresis));
+assert.equal(policyV2CandidateMetadata().hysteresis.risk_off_min_confirm_minutes, 30, "порог публикуется в снимке");
+{
+  const now = Date.parse("2026-07-24T03:15:00.000Z");
+  // Живой случай 24.07: подтверждение через 24 минуты — v2 отложил бы.
+  assert.equal(riskOffConfirmationDeferredV2({ previousSnapshotAt: "2026-07-24T02:51:00.000Z", now }), true);
+  // Штатный часовой такт не задерживается никогда.
+  assert.equal(riskOffConfirmationDeferredV2({ previousSnapshotAt: "2026-07-24T02:15:00.000Z", now }), false);
+  // Ровно на пороге — не откладываем (строгое «меньше»).
+  assert.equal(riskOffConfirmationDeferredV2({ previousSnapshotAt: "2026-07-24T02:45:00.000Z", now }), false);
+  // Мусорные и будущие метки не должны молча включать отсрочку.
+  assert.equal(riskOffConfirmationDeferredV2({ previousSnapshotAt: "не дата", now }), false);
+  assert.equal(riskOffConfirmationDeferredV2({ previousSnapshotAt: null, now }), false);
+  assert.equal(riskOffConfirmationDeferredV2({ previousSnapshotAt: "2026-07-24T04:00:00.000Z", now }), false, "снимок из будущего не считается быстрым подтверждением");
+  assert.equal(riskOffConfirmationDeferredV2(), false);
+}
 
 // --- Машина дневных закрытий: мажоритарное подтверждение дня ---
 // День подтверждает good только если good на ПОСЛЕДНЕМ наблюдении И на большинстве наблюдений дня.

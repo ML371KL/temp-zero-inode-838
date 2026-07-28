@@ -116,6 +116,39 @@ export function sourceRevisionAlertsV1(previousVintages,currentVintages,previous
   return alerts.map(alert=>currentVintages?.sources?.[alert.source]?.decision_relevant===false?{...alert,quality_impact:"audit"}:alert);
 }
 
+// КАЧОК ИСТОЧНИКА (аудит 15 суток прода 2026-07-28). Провайдер, вернувшийся к УЖЕ ВИДЕННОМУ
+// состоянию пакета (spot 24.07: котировки того же винтажа туда-обратно; blockchain_onchain 28.07:
+// схема вернулась к прежней после восстановления), — это дребезг, а не пересмотр данных: текущий
+// пакет ровно так же здоров, как был. Такие алерты понижаются до `audit` — остаются в журнале
+// провенанса, но не переводят решение в `degraded`. Возврат к НОВОМУ, ранее не виденному значению
+// качком не считается никогда. Окно памяти короткое (24 ч) сознательно: это вопрос «здоров ли
+// пакет СЕЙЧАС», в отличие от 90-дневной памяти в уведомлениях, где вопрос другой — «новость ли
+// это для читателя» (scripts/notify.mjs, rememberRevised). Ошибка в сторону сообщения о деградации.
+const bounceKey=hash=>typeof hash==="string"?hash.slice(0,16):null;
+export function applyRevisionBounceToleranceV1(alerts=[],{currentVintages,bounceState,now=Date.now(),ttlHours=24,keep=3}={}){
+  const ttl=ttlHours*3_600_000,prior=bounceState&&typeof bounceState==="object"?bounceState:{};
+  const fresh=key=>(Array.isArray(prior[key])?prior[key]:[]).filter(e=>Number.isFinite(Number(e?.at))&&now-Number(e.at)<=ttl);
+  const next={};
+  for(const [key,vintage] of Object.entries(currentVintages?.sources||{})){
+    const history=fresh(key),d=bounceKey(vintage.data_sha256),s=bounceKey(vintage.schema_sha256),last=history.at(-1);
+    if(!last||last.d!==d||last.s!==s)history.push({d,s,at:now});
+    next[key]=history.slice(-keep);
+  }
+  const out=alerts.map(alert=>{
+    if(!alert||alert.quality_impact==="audit")return alert;
+    const vintage=currentVintages?.sources?.[alert.source];
+    if(!vintage)return alert;
+    // Сверяем с состоянием ДО этого прогона: прошлый винтаж — последняя запись, и он по условию
+    // алерта отличается от текущего, поэтому совпадение может дать только более ранняя запись.
+    const history=fresh(alert.source);
+    const seen=alert.type==="schema_changed"
+      ?history.some(e=>e.s&&e.s===bounceKey(vintage.schema_sha256))
+      :history.some(e=>e.d&&e.d===bounceKey(vintage.data_sha256));
+    return seen?{...alert,quality_impact:"audit",source_bounce:true}:alert;
+  });
+  return{alerts:out,bounceState:next};
+}
+
 export function treasuryBillDiscountToEffectiveAnnualPct(discountPct,days=91){
   if(!finite(discountPct)||!finite(days)||Number(days)<=0)return null;
   const discount=Number(discountPct)/100,term=Number(days),price=1-discount*term/360;
@@ -466,9 +499,12 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   if(shadowHysteresis){
     const prior=monitor.shadow_hysteresis||{};
     const resets=(Number(prior.upgrade_hold_resets_by_degraded)||0)+(Number(shadowHysteresis.upgrade_hold_reset_by_degraded)||0);
-    const fastConfirms=(Number(prior.risk_off_confirmed_under_30m)||0)+(Number(shadowHysteresis.risk_off_confirmed_under_30m)||0);
-    const bumped=resets>(Number(prior.upgrade_hold_resets_by_degraded)||0)||fastConfirms>(Number(prior.risk_off_confirmed_under_30m)||0);
-    monitor.shadow_hysteresis={upgrade_hold_resets_by_degraded:resets,risk_off_confirmed_under_30m:fastConfirms,last_event_t:bumped?at:prior.last_event_t??null};
+    // Ключ переименован из risk_off_confirmed_under_30m (порог перестал быть зашитым числом);
+    // накопленное значение переносится, чтобы форвардная статистика не начиналась заново.
+    const priorFast=Number(prior.risk_off_confirmed_under_min_interval??prior.risk_off_confirmed_under_30m)||0;
+    const fastConfirms=priorFast+(Number(shadowHysteresis.risk_off_confirmed_under_min_interval??shadowHysteresis.risk_off_confirmed_under_30m)||0);
+    const bumped=resets>(Number(prior.upgrade_hold_resets_by_degraded)||0)||fastConfirms>priorFast;
+    monitor.shadow_hysteresis={upgrade_hold_resets_by_degraded:resets,risk_off_confirmed_under_min_interval:fastConfirms,min_interval_minutes:POLICY_V2_CANDIDATE.hysteresis.risk_off_min_confirm_minutes,last_event_t:bumped?at:prior.last_event_t??null};
   }
   monitor.performance=Object.fromEntries(Object.entries(monitor.strategies).map(([name,strategy])=>[name,strategyStats(strategy,monitor.daily,name)]));
   monitor.health=evaluateHealth(monitor,decision);

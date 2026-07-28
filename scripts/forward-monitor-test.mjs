@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { POLICY_V1, allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
-import { buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, previousPolicyTargetV1, sha256, sourceRevisionAlertsV1, treasuryBillDiscountToEffectiveAnnualPct, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
+import { applyRevisionBounceToleranceV1, buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, previousPolicyTargetV1, sha256, sourceRevisionAlertsV1, treasuryBillDiscountToEffectiveAnnualPct, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
+import { POLICY_V2_CANDIDATE } from "../docs/policy-v2-candidate.mjs";
 import { monitorResetIssues, validatePublishedAssetsV1, validateSnapshotV1 } from "./monitor-live.mjs";
 
 const generatedAt="2026-07-19T00:00:00.000Z";
@@ -179,9 +180,46 @@ assert.equal(metaEntry.hysteresis.tactical_hold_until,null,"absent hold must ser
 {const c={...metaEntry};delete c.log_hash;assert.equal(metaEntry.log_hash,sha256(c),"hysteresis block must be content-addressed with the record");}
 
 // Теневые счётчики гистерезиса накапливаются и не влияют на решение.
-let shadowTick=updateForwardMonitorV1({previousMonitor:metaTick,now:targetAt+2*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:1,risk_off_confirmed_under_30m:0}});
-shadowTick=updateForwardMonitorV1({previousMonitor:shadowTick,now:targetAt+3*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:0,risk_off_confirmed_under_30m:1}});
-assert.deepEqual([shadowTick.shadow_hysteresis.upgrade_hold_resets_by_degraded,shadowTick.shadow_hysteresis.risk_off_confirmed_under_30m],[1,1]);
+let shadowTick=updateForwardMonitorV1({previousMonitor:metaTick,now:targetAt+2*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:1,risk_off_confirmed_under_min_interval:0}});
+shadowTick=updateForwardMonitorV1({previousMonitor:shadowTick,now:targetAt+3*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:0,risk_off_confirmed_under_min_interval:1}});
+assert.deepEqual([shadowTick.shadow_hysteresis.upgrade_hold_resets_by_degraded,shadowTick.shadow_hysteresis.risk_off_confirmed_under_min_interval],[1,1]);
+assert.equal(shadowTick.shadow_hysteresis.min_interval_minutes,POLICY_V2_CANDIDATE.hysteresis.risk_off_min_confirm_minutes,"публикуемый порог обязан приходить из контракта v2, а не из зашитого числа");
+// Миграция накопленного: старый ключ risk_off_confirmed_under_30m не обнуляет форвардную статистику.
+const legacyShadow=structuredClone(shadowTick);
+legacyShadow.shadow_hysteresis={upgrade_hold_resets_by_degraded:1,risk_off_confirmed_under_30m:7,last_event_t:null};
+const migrated=updateForwardMonitorV1({previousMonitor:legacyShadow,now:targetAt+4*3_600_000,price:110,decision:targetBuilt.decision,inputSummary:targetBuilt.inputSummary,sourceVintages:vintages,cashQuotePct:4,priceSeries:[...priceSeries,{t:targetAt,v:110}],shadowHysteresis:{upgrade_hold_reset_by_degraded:0,risk_off_confirmed_under_min_interval:1}});
+assert.equal(migrated.shadow_hysteresis.risk_off_confirmed_under_min_interval,8,"накопленное по старому ключу переносится, а не начинается заново");
+
+// --- Толерантность к качку источника: возврат к виденному состоянию не деградирует решение ---
+const bounceVintage=(dataSha,schemaSha)=>({sources:{spot:{state:"ok",data_sha256:dataSha,schema_sha256:schemaSha}}});
+const degradedAlert=[{source:"spot",type:"same_vintage_rewritten",quality_impact:"degraded"}];
+const t0=Date.parse("2026-07-24T03:00:00.000Z");
+// Прогон 1: значение A — истории нет, состояние копится.
+let bs=applyRevisionBounceToleranceV1([],{currentVintages:bounceVintage("aaa","sch"),bounceState:null,now:t0}).bounceState;
+// Прогон 2: значение B (новое) — это настоящий пересмотр, качеству положено просесть.
+const step2=applyRevisionBounceToleranceV1(degradedAlert,{currentVintages:bounceVintage("bbb","sch"),bounceState:bs,now:t0+3_600_000});
+assert.equal(step2.alerts[0].quality_impact,"degraded","переход к НОВОМУ значению обязан оставаться quality-affecting");
+bs=step2.bounceState;
+// Прогон 3: возврат к A — качок, понижаем до audit.
+const step3=applyRevisionBounceToleranceV1(degradedAlert,{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0+2*3_600_000});
+assert.equal(step3.alerts[0].quality_impact,"audit","возврат к уже виденному значению — качок источника, не деградация");
+assert.equal(step3.alerts[0].source_bounce,true,"качок обязан быть помечен в журнале провенанса");
+// За пределами окна памяти (24 ч) возврат снова считается настоящим пересмотром.
+const stale=applyRevisionBounceToleranceV1(degradedAlert,{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0+40*3_600_000});
+assert.equal(stale.alerts[0].quality_impact,"degraded","за пределами 24ч память не действует — ошибаемся в сторону сообщения о деградации");
+// Схемный качок ловится тем же механизмом.
+let schemaState=applyRevisionBounceToleranceV1([],{currentVintages:bounceVintage("d1","s1"),bounceState:null,now:t0}).bounceState;
+schemaState=applyRevisionBounceToleranceV1([{source:"spot",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("d2","s2"),bounceState:schemaState,now:t0+3_600_000}).bounceState;
+const schemaBack=applyRevisionBounceToleranceV1([{source:"spot",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("d3","s1"),bounceState:schemaState,now:t0+2*3_600_000});
+assert.equal(schemaBack.alerts[0].quality_impact,"audit","возврат схемы к прежней после восстановления провайдера — качок");
+// Audit-алерты и неизвестные источники не трогаются; пустой вход безопасен.
+assert.equal(applyRevisionBounceToleranceV1([{source:"spot",type:"same_vintage_rewritten",quality_impact:"audit"}],{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0+2*3_600_000}).alerts[0].quality_impact,"audit");
+assert.equal(applyRevisionBounceToleranceV1([{source:"unknown",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0}).alerts[0].quality_impact,"degraded","источник без винтажа остаётся как есть");
+assert.deepEqual(applyRevisionBounceToleranceV1([],{currentVintages:null,bounceState:null,now:t0}).alerts,[]);
+// Память ограничена: не растёт бесконечно.
+let ring=null;
+for(let i=0;i<12;i++)ring=applyRevisionBounceToleranceV1([],{currentVintages:bounceVintage("d"+i,"s"),bounceState:ring,now:t0+i*60_000}).bounceState;
+assert.ok(ring.spot.length<=3,"кольцо памяти ограничено тремя записями на источник");
 assert.equal(shadowTick.strategies.policy_v1.current_target_pct,metaTick.strategies.policy_v1.current_target_pct,"shadow counters must not move the allocation");
 
 // Молчаливый генезис при живом previous обязан оставлять reset-событие (класс инцидента 2026-07-21).

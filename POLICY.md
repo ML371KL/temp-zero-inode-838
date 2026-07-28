@@ -52,7 +52,15 @@ schema, the event is recorded rather than silently treated as the value that was
 The current UTC-day partition is explicitly treated as open: its normal intraday updates are not
 historical revisions. Once a row's UTC day has closed, a change to that row is retained as revision
 evidence in the audit log. A time-series restatement alone does not lower the operational quality of
-the current packet; schema changes and non-temporal same-vintage rewrites do.
+the current packet; schema changes and non-temporal same-vintage rewrites do — **unless the packet
+merely bounced back to a state already seen within the last 24 hours**. A provider oscillating
+between two values of the same vintage, or a schema returning to its pre-outage shape once the
+provider recovers, is dither rather than a revision: the current packet is exactly as healthy as it
+was before, so the event stays in the provenance log (`source_bounce: true`) but no longer degrades
+the decision. The window is deliberately short — this answers "is the packet healthy *now*", unlike
+the 90-day memory in the notification layer, which answers the different question "is this news to
+the reader". Measured on 15 days of production: 2 of 31 degraded ticks reclassified, no genuine
+revision suppressed.
 Public hashes prove that recorded inputs did not change and reproduce the final allocation; full raw
 provider payloads remain in the rolling internal cache and cannot be reconstructed from the public
 snapshot alone.
@@ -114,6 +122,19 @@ The candidate changes exactly three things, each backed by the adversarial polic
    of the candidate's test suite. `static_theta` runs as a trailing mean of the policy's own
    targets until the first formal review (day 90) and is then **frozen, re-fixed only at review
    boundaries** — a continuously drifting Θ would lag-copy the policy and lose R2's power.
+
+4. **Minimum interval between risk-off confirmations** (pre-declared 2026-07-28 after the 15-day
+   production audit). v1 counts downgrade confirmation in *snapshots* ("2 in a row") while the
+   cadence is irregular: median 59.7 min, but 66 of 464 observed intervals were under 10 minutes
+   (dual scheduler, manual runs, push+dispatch). On 2026-07-24 this materialised — the move to
+   "defensive" was confirmed in 24 minutes instead of the ~2 hours a normal cadence implies. v2
+   requires confirming risk-off snapshots to be at least `risk_off_min_confirm_minutes` (30) apart;
+   45 was considered and rejected (same benefit, less headroom over the observed cadence). This
+   rule is **not executed by the shadow and does not affect its NAV** — verdict hysteresis lives in
+   the frozen v1 section and the shadow rides on v1's published regime. Until a switch it is only
+   declared, while `monitoring.shadow_hysteresis` accumulates forward evidence (how many downgrades
+   were confirmed faster than the minimum). The threshold has a single source of truth in the
+   candidate contract: both the collector's counter and the published field read it from there.
 
 The ladder, weights, gates and verdict hysteresis are unchanged; the mid-ladder values are hereby
 documented as **ordinal, not optimal** (plateau: deteriorating 10–35 / transition 30–60 within

@@ -18,7 +18,8 @@ import { POLICY_V1, applyStrategicDetectorPolicyV1, policyMetadataV1 } from "../
 import { MODEL_POLICY_V1, modelPolicyMetadataV1 } from "../docs/model-policy-v1.mjs";
 import { executionPolicyMetadataV1 } from "../docs/execution-policy-v1.mjs";
 import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
-import { buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
+import { applyRevisionBounceToleranceV1, buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
+import { riskOffConfirmationDeferredV2 } from "../docs/policy-v2-candidate.mjs";
 
 // Одноразовый графт-пакет восстановления форвард-монитора (инцидент 2026-07-21): криптографически
 // провалидированный архив доинцидентной цепи + параметры генезиса новой эры. Файл статичен и
@@ -1628,7 +1629,13 @@ function compute(){
   const factors={strategic:metrics.filter(x=>x.vote&&x.strategic&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value})),tactical:metrics.filter(x=>x.vote&&x.tactical&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value}))};
   const price=referencePrice();
   const sourceVintages=buildSourceVintagesV1(datasets,sourceStates);sourceVintages.captured_at=iso(NOW);
-  const revisionAlerts=sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages,previous?.datasets,datasets);
+  // Качок источника туда-обратно не деградирует качество решения (см. applyRevisionBounceToleranceV1).
+  // Память живёт рядом с винтажами и переносится обоими путями previous — и через внутреннее
+  // состояние, и через опубликованный снимок; contract_sha256 считается только по `sources`,
+  // поэтому соседний ключ его не затрагивает.
+  const bounceFiltered=applyRevisionBounceToleranceV1(sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages,previous?.datasets,datasets),{currentVintages:sourceVintages,bounceState:previous?.source_vintages?.bounce_state,now:NOW});
+  const revisionAlerts=bounceFiltered.alerts;
+  sourceVintages.bounce_state=bounceFiltered.bounceState;
   const {decision,inputSummary}=buildDecisionRecordV1({generatedAt:iso(NOW),regime,regimeMeta:{strategic:stableS,tactical:stableT},metrics,blocks,detectors,scores,sourceVintages,revisionAlerts});
   // Теневые события для policy-v2-кандидатов гистерезиса (аудит 2026-07-21): фиксируем, когда
   // одиночный degraded-снимок стёр бы идущее 48ч-удержание повышения и когда risk-off подтвердился
@@ -1638,7 +1645,9 @@ function compute(){
   const upgradeWasHeld=Boolean(prevStrategicMeta.hold_until&&prevStrategicMeta.candidate&&prevStrategicMeta.candidate!==prevStrategicMeta.state);
   const shadowHysteresis={
     upgrade_hold_reset_by_degraded:upgradeWasHeld&&["insufficient","emergency"].includes(stableS.candidate)?1:0,
-    risk_off_confirmed_under_30m:previous?.regime?.strategic&&stableS.state===stableS.candidate&&stableS.state!==previous.regime.strategic&&severity(stableS.state)<severity(previous.regime.strategic)&&finite(prevGeneratedAt)&&NOW-prevGeneratedAt<30*60_000?1:0,
+    // Порог берётся из контракта v2 (единственный источник правды), а не зашит здесь: иначе
+    // публикуемое `min_interval_minutes` разъехалось бы с тем, что реально считает счётчик.
+    risk_off_confirmed_under_min_interval:previous?.regime?.strategic&&stableS.state===stableS.candidate&&stableS.state!==previous.regime.strategic&&severity(stableS.state)<severity(previous.regime.strategic)&&riskOffConfirmationDeferredV2({previousSnapshotAt:previous?.generated_at,now:NOW})?1:0,
   };
   // Второе окно MVRV для теневого кандидата v2 (двухоконное согласие капитуляционного пола):
   // ПОЛНАЯ доступная глубина ряда без усечения (CM ~5 лет, резерв bitcoin-data — вся история;
