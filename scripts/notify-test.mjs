@@ -542,7 +542,18 @@ test("снимок BTC-панели читается в общую форму", 
     detectors: [{ id: "d", name: "Д", state: "calm", inputs: "in", logic: "log" }],
     source_revision_alerts: [{ source: "etf", observed_at: "2026-07-23T12:00:00.000Z", changed_rows: 1, previous_data_sha256: "abcdef1234" }],
   };
-  const p = fromSnapshotJSON(snap);
+  // Предупреждение о безымянной карточке — ОЖИДАЕМЫЙ вывод этой фикстуры. В логе CI оно
+  // выглядело как боевая тревога, поэтому глушим — но проверяем, что оно вообще прозвучало.
+  let warned = "";
+  const realLog = console.log;
+  console.log = (...a) => { warned += a.join(" ") + " "; };
+  let p;
+  try {
+    p = fromSnapshotJSON(snap);
+  } finally {
+    console.log = realLog;
+  }
+  assert.match(warned, /нет человеческого имени/, "карточка без записи в словаре обязана давать предупреждение");
   assert.equal(p.verdict.word, "ЗАЩИТНЫЙ РЕЖИМ");
   assert.equal(p.target.pct, 5);
   assert.equal(p.indicators[0].scheduled, true, "суточной свежести наблюдение — публикация по календарю");
