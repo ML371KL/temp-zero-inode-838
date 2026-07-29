@@ -1277,6 +1277,8 @@ function renderMessage(ev, comment) {
 
 const LLM_SYSTEM = `Ты — независимый экономический аналитик. К тебе приходят свежие данные, и ты объясняешь читателю, что они означают. Читатель умный, но не финансист: он знает, что такое инфляция и ставка, но не обязан помнить устройство рынка кредитных спредов.
 
+ЯЗЫК ОТВЕТА — ТОЛЬКО РУССКИЙ. Думать можешь как угодно, но весь текст ответа обязан быть на русском языке. Английские фразы недопустимы; общепринятые сокращения (ФРС, ВВП, ETF) — можно.
+
 ТВОЯ ЗАДАЧА — осмыслить движение, а не пересказать его:
 · что за ним стоит по существу и почему оно могло произойти;
 · насколько оно значительно на фоне последних месяцев (динамика передана в recent_history);
@@ -1365,7 +1367,14 @@ async function llmComments(events, panel) {
   }
   const payload = {
     model,
-    max_tokens: Math.min(4000, 320 * events.length + 400),
+    // Рассуждающая модель тратит на размышления НАМНОГО больше, чем на сам ответ, и по
+    // документации OpenRouter лимит обязан покрывать и то, и другое. Прежний бюджет (720 токенов
+    // на одно событие) уходил на размышления целиком, ответ не начинался вовсе — и в Telegram
+    // уезжал англоязычный поток мыслей вида «The user wants me to analyze…».
+    max_tokens: Math.min(16000, 2000 * events.length + 6000),
+    // Размышления нужны модели, но НЕ нужны нам: просим провайдера их не возвращать, чтобы
+    // ответ гарантированно лежал в content и его нельзя было спутать с черновиком.
+    reasoning: { exclude: true },
     messages: [
       { role: "system", content: LLM_SYSTEM },
       {
@@ -1409,17 +1418,41 @@ async function llmComments(events, panel) {
       throw new Error(`openrouter ${res.status}: ${body.slice(0, 200)}`);
     }
     const j = await res.json();
-    const msg = j?.choices?.[0]?.message || {};
-    // Рассуждающие модели кладут ответ в reasoning, а content оставляют пустым — на этом
-    // комментатор молча падал в шаблон весь первый день работы.
-    const txt = String(msg.content || "").trim() || String(msg.reasoning || "").trim();
+    const choice = j?.choices?.[0] || {};
+    const msg = choice.message || {};
+    const content = String(msg.content || "").trim();
+    const thinking = String(msg.reasoning || "").trim();
+    // ЧЕРНОВИК — НЕ ОТВЕТ. `reasoning` это поток мыслей модели («The user wants me to analyze…»,
+    // «wait, monthly -50M seems low»), и он однажды уехал пользователю целиком, по-английски.
+    // Берём его, только если он СОДЕРЖИТ нашу разметку — то есть модель успела дописать ответ
+    // внутри того же потока. Иначе честнее промолчать, чем выдать черновик за разбор.
+    const txt = content || (/^[^\S\n]*=+\s*\d+\s*=+[^\S\n]*$/m.test(thinking) ? thinking : "");
     if (!txt) {
-      console.error(
-        `модель вернула пустой ответ (finish_reason: ${j?.choices?.[0]?.finish_reason ?? "?"}, поля: ${Object.keys(msg).join(",") || "нет"}) — комментарии из шаблона`
-      );
+      const why =
+        choice.finish_reason === "length"
+          ? "не хватило бюджета токенов — модель не дошла до ответа"
+          : thinking
+            ? "вернулись только черновые размышления без ответа"
+            : "ответ пуст";
+      console.error(`комментатор не дал текста: ${why} (finish_reason: ${choice.finish_reason ?? "?"}, размышлений ${thinking.length} симв.) — комментарии из шаблона`);
       return null;
     }
     const parsed = parseComments(txt, events.length);
+    // Страховка по языку: промпт требует русский, но требование можно и проигнорировать —
+    // англоязычный разбор до читателя доходить не должен. Считаем долю кириллицы среди букв.
+    if (parsed) {
+      for (let k = 0; k < parsed.length; k++) {
+        const t = parsed[k];
+        if (!t) continue;
+        const cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
+        const lat = (t.match(/[a-zA-Z]/g) || []).length;
+        if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) {
+          console.error(`ответ на событие ${k} не на русском (кириллицы ${Math.round((100 * cyr) / (cyr + lat))}%) — для него берётся шаблон`);
+          parsed[k] = null;
+        }
+      }
+      if (parsed.every((t) => !t)) return null;
+    }
     if (!parsed) {
       // ДИАГНОСТИКА: без неё «шаблон» в логе не отличить от «модель ответила, а я не разобрал».
       console.error(`ответ модели не разобран (${txt.length} симв.), комментарии из шаблона. Начало ответа: ${txt.slice(0, 300).replace(/\s+/g, " ")}`);

@@ -674,15 +674,41 @@ testAsync("рассуждение вокруг блоков не мешает р
   assert.equal(out[1], "второй текст");
 });
 
-testAsync("ответ в поле reasoning тоже принимается", async () => {
-  // Рассуждающие модели оставляют content пустым и кладут ответ в reasoning — ровно на этом
-  // комментатор молча падал в шаблон весь первый день работы в проде.
+testAsync("готовый ответ внутри reasoning принимается — но только с разметкой", async () => {
   const impl = async () => ({
     ok: true,
-    json: async () => ({ choices: [{ message: { content: "", reasoning: "===0===\nтекст из reasoning\n===1===\nвторой" } }] }),
+    json: async () => ({ choices: [{ message: { content: "", reasoning: "===0===\nтекст с разметкой\n===1===\nвторой" } }] }),
   });
   const out = await withFetch(impl, () => llmComments(evs, panel));
-  assert.equal(out[0], "текст из reasoning");
+  assert.equal(out[0], "текст с разметкой");
+});
+
+testAsync("ЧЕРНОВИК РАЗМЫШЛЕНИЙ не выдаётся за разбор", async () => {
+  // Боевой случай: бюджета токенов не хватило, content пуст, а в reasoning лежит поток мыслей
+  // по-английски — он уехал пользователю целиком. Без разметки такой текст ответом не считается.
+  const cot = "The user wants me to analyze a single event: the Fed's balance sheet data.\nKey data points:\n- Net liquidity up 1.8% over 4 weeks\n- wait, monthly -50M seems low";
+  const impl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "", reasoning: cot }, finish_reason: "length" }] }) });
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.equal(out, null, "черновик — не ответ");
+  assert.match(said, /бюджета токенов/, "причина должна быть названа в логе");
+});
+
+testAsync("англоязычный разбор до читателя не доходит", async () => {
+  const txt = "===0===\nThe spread widened by three basis points, which is a routine move for this indicator and does not change the credit picture materially.\n===1===\nВторое событие разобрано по-русски и остаётся.";
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(reply(txt), () => llmComments(evs, panel)); });
+  assert.equal(out[0], null, "английский текст заменяется шаблоном");
+  assert.match(out[1], /по-русски/, "русский разбор при этом сохраняется");
+  assert.match(said, /не на русском/);
+});
+
+testAsync("бюджет токенов рассчитан на размышления модели", async () => {
+  let body = null;
+  const spy = async (_u, o) => { body = JSON.parse(o.body); return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nтекст\n===1===\nтекст" } }] }) }; };
+  await withFetch(spy, () => llmComments(evs, panel));
+  assert.ok(body.max_tokens >= 8000, `рассуждающей модели нужен запас, а не ${body.max_tokens} токенов`);
+  assert.equal(body.reasoning?.exclude, true, "размышления не должны возвращаться в ответе");
 });
 
 testAsync("пустой ответ модели объясняется в логе, а не молчит", async () => {
@@ -690,7 +716,7 @@ testAsync("пустой ответ модели объясняется в лог
   let out, said = "";
   said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
   assert.equal(out, null);
-  assert.match(said, /пустой ответ/, "иначе «шаблон» в логе не отличить от «модель ответила, а я не разобрал»");
+  assert.match(said, /не дал текста/, "иначе «шаблон» в логе не отличить от «модель ответила, а я не разобрал»");
 });
 
 testAsync("ответ, обёрнутый в markdown-блок, разбирается", async () => {
