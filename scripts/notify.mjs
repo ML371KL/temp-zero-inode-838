@@ -1578,9 +1578,31 @@ async function main() {
   const panel = await readPanel();
 
   if (process.env.NOTIFY_PING === "1") {
-    const text = pingMessage(panel);
+    // Проверка связи проверяет ВСЮ цепочку, включая комментатор: без этого его отказ было не
+    // увидеть до первого настоящего события, и он молча простоял в шаблоне весь первый день.
+    // Живая карточка панели берётся как повод, чтобы прогнать модель на реальных данных.
+    const sample = (panel.indicators || []).find((i) => HUMAN[i.id] && i.value && !HUMAN[i.id].quiet);
+    let verdictLine = "Комментатор: ключ не задан, сообщения будут без разбора";
+    if (process.env.OPENROUTER_KEY && sample) {
+      const probe = [{
+        kind: "release",
+        title: releaseOf(sample),
+        before: "",
+        after: "",
+        detail: "",
+        moves: [{ name: humanTitle(sample.id, sample.name), before: fmtValue(sample), after: fmtValue(sample), delta: "" }],
+        plain: humanPlain(sample.id) ? [`${humanTitle(sample.id, sample.name)} — ${humanPlain(sample.id)}`] : [],
+        history: historyDigest(sample) ? [`${humanTitle(sample.id, sample.name)}: ${historyDigest(sample)}`] : [],
+        note: "",
+      }];
+      const got = await llmComments(probe, panel);
+      verdictLine = got?.[0]
+        ? `Комментатор работает (${resolveModel()}). Пример разбора:\n<i>${esc(got[0].slice(0, 600))}</i>`
+        : `Комментатор НЕ ответил (${resolveModel()}) — сообщения пойдут без разбора, причина в логе прогона`;
+    }
+    const text = `${pingMessage(panel)}\n\n${verdictLine}`;
     if (DRY) console.log(text.replace(/<[^>]+>/g, ""));
-    else await sendTelegram(text);
+    else await sendTelegram(text.length > 4000 ? text.slice(0, 3990) + "…" : text);
     console.log(DRY ? "пинг: dry-run, ничего не отправлено" : "пинг отправлен");
     return;
   }
