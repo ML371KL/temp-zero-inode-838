@@ -1407,17 +1407,35 @@ async function llmComments(events, panel) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), LLM_TIMEOUT_MS);
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    let res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify(payload),
       signal: ctl.signal,
     });
+    // Не каждый провайдер понимает параметр подавления размышлений: у одного из них запрос с ним
+    // вернул пустоту. Один повтор без этого параметра — дешевле, чем потерять разбор.
+    if (!res.ok && payload.reasoning) {
+      console.error(`комментатор: запрос с подавлением размышлений отклонён (${res.status}), повтор без него`);
+      const { reasoning, ...plain } = payload;
+      res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify(plain),
+        signal: ctl.signal,
+      });
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`openrouter ${res.status}: ${body.slice(0, 200)}`);
     }
     const j = await res.json();
+    // OpenRouter умеет вернуть 200 с телом-ошибкой и пустым choices — без этой строки в логе
+    // было только «ответ пуст», и причина оставалась невидимой.
+    if (j?.error) {
+      console.error(`комментатор: провайдер вернул ошибку — ${String(j.error.message || JSON.stringify(j.error)).slice(0, 200)}`);
+      return null;
+    }
     const choice = j?.choices?.[0] || {};
     const msg = choice.message || {};
     const content = String(msg.content || "").trim();

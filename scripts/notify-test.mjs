@@ -703,6 +703,30 @@ testAsync("англоязычный разбор до читателя не до
   assert.match(said, /не на русском/);
 });
 
+testAsync("тело-ошибка при статусе 200 объясняется в логе", async () => {
+  // OpenRouter умеет вернуть 200 с телом-ошибкой и пустым choices; без этой ветки в логе было
+  // только «ответ пуст», и причина оставалась невидимой.
+  const impl = async () => ({ ok: true, json: async () => ({ error: { message: "rate limit exceeded" } }) });
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.equal(out, null);
+  assert.match(said, /rate limit exceeded/);
+});
+
+testAsync("провайдер, не понявший подавление размышлений, получает повтор без него", async () => {
+  const seen = [];
+  const impl = async (_u, o) => {
+    const body = JSON.parse(o.body);
+    seen.push(body.reasoning ? "с подавлением" : "без подавления");
+    if (body.reasoning) return { ok: false, status: 400, text: async () => "unsupported parameter" };
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор\n===1===\nвторой" } }] }) };
+  };
+  let out;
+  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.deepEqual(seen, ["с подавлением", "без подавления"], "должен быть ровно один повтор");
+  assert.equal(out[0], "разбор", "разбор не теряется из-за неподдержанного параметра");
+});
+
 testAsync("бюджет токенов рассчитан на размышления модели", async () => {
   let body = null;
   const spy = async (_u, o) => { body = JSON.parse(o.body); return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nтекст\n===1===\nтекст" } }] }) }; };
