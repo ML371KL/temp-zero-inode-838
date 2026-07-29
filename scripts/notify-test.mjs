@@ -200,11 +200,13 @@ const seriesPoints = (steps, startDay = "2026-01-01") => {
 };
 const flat = Array.from({ length: 30 }, (_, k) => (k % 2 ? 1 : -1)); // обычный дрейф ±1
 
-test("рутинный дрейф дневного ряда в рассылку не идёт", () => {
+test("мелкое движение официальных данных ВСЁ РАВНО рассылается", () => {
+  // Правило владельца: всё, что публикуется по календарю, приходит сразу. Фильтр «значимости»
+  // здесь был и за сутки съел SOFR−IORB, HY-спред, VIX и разворот юаня — сторож против возврата.
   const pts = seriesPoints([...flat, 0.2]);
   const before = stateOf(panelOf([ind({ value: "1", value_num: 1, points: seriesPoints(flat) })]));
   const after = panelOf([ind({ value: "1.2", value_num: 1.2, observed_at: "2026-07-21", points: pts })]);
-  assert.equal(diff(before, after).length, 0, "шаг слабее половины прошлых — обычный день, не новость");
+  assert.equal(diff(before, after).length, 1, "данные с календарём публикации молчать не должны");
 });
 
 test("крупное движение дневного ряда рассылается и помечается", () => {
@@ -226,13 +228,29 @@ test("недельные и более редкие публикации про�
   assert.equal(ev.length, 1, "у недельного релиза сам факт выхода данных — событие");
 });
 
-test("смена знака проходит фильтр рутины: приток стал оттоком", () => {
+test("смена знака помечается: приток стал оттоком", () => {
   const base = seriesPoints(flat);
   const before = stateOf(panelOf([ind({ value: "+34 млн $", value_num: 34, points: base })]));
   const after = panelOf([ind({ value: "-205 млн $", value_num: -205, observed_at: "2026-07-21", points: seriesPoints([...flat, 0.1]) })]);
   const ev = diff(before, after);
-  assert.equal(ev.length, 1, "переход из плюса в минус — событие независимо от размера шага");
-  assert.match(ev[0].moves[0].delta, /отрицательн/);
+  assert.equal(ev.length, 1);
+  assert.match(ev[0].moves[0].delta, /отрицательн/, "направление берётся по старому значению: «−0,0» это минус-ноль, и проверка нового его не видит");
+});
+
+test("минус-ноль не выдаётся за переход в плюс", () => {
+  const before = stateOf(panelOf([ind({ value: "+5", value_num: 5, points: seriesPoints(flat) })]));
+  const after = panelOf([ind({ value: "-0,0", value_num: -0, observed_at: "2026-07-21", points: seriesPoints([...flat, 1]) })]);
+  const ev = diff(before, after);
+  assert.match(ev[0].moves[0].delta, /отрицательн/, "было +5, стало −0,0 — это переход вниз");
+});
+
+test("топтание у нуля не помечается сменой знака", () => {
+  // +0,1 → −0,0 формально пересекает ноль, но обе стороны ничтожны на фоне обычного шага
+  const before = stateOf(panelOf([ind({ value: "+0,1", value_num: 0.1, points: seriesPoints(flat) })]));
+  const after = panelOf([ind({ value: "-0,0", value_num: -0.02, observed_at: "2026-07-21", points: seriesPoints([...flat, 0.12]) })]);
+  const ev = diff(before, after);
+  assert.equal(ev.length, 1, "данные всё равно рассылаются");
+  assert.equal(ev[0].moves[0].delta, "", "но громкой пометки быть не должно");
 });
 
 test("без накопленного ряда показатель не глушится", () => {
@@ -643,10 +661,49 @@ testAsync("комментарии разбираются из ответа мо�
   assert.deepEqual(out, ["первый", "второй"]);
 });
 
-testAsync("берётся ПОСЛЕДНИЙ JSON-массив: модели повторяют пример из промпта", async () => {
-  const txt = 'Формат: [{"i":0,"text":"..."}]\nВот ответ:\n[{"i":0,"text":"настоящий"},{"i":1,"text":"тоже"}]';
+testAsync("основной формат — блоки ===N===", async () => {
+  const txt = "===0===\nразбор первого события\n===1===\nразбор второго события";
   const out = await withFetch(reply(txt), () => llmComments(evs, panel));
-  assert.equal(out[0], "настоящий");
+  assert.deepEqual(out, ["разбор первого события", "разбор второго события"]);
+});
+
+testAsync("рассуждение вокруг блоков не мешает разбору", async () => {
+  const txt = "Сначала подумаю: событий два, оба про кредит.\n\n===0===\nпервый текст\n\n===1===\nвторой текст\n";
+  const out = await withFetch(reply(txt), () => llmComments(evs, panel));
+  assert.equal(out[0], "первый текст");
+  assert.equal(out[1], "второй текст");
+});
+
+testAsync("ответ в поле reasoning тоже принимается", async () => {
+  // Рассуждающие модели оставляют content пустым и кладут ответ в reasoning — ровно на этом
+  // комментатор молча падал в шаблон весь первый день работы в проде.
+  const impl = async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: "", reasoning: "===0===\nтекст из reasoning\n===1===\nвторой" } }] }),
+  });
+  const out = await withFetch(impl, () => llmComments(evs, panel));
+  assert.equal(out[0], "текст из reasoning");
+});
+
+testAsync("пустой ответ модели объясняется в логе, а не молчит", async () => {
+  const impl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) });
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.equal(out, null);
+  assert.match(said, /пустой ответ/, "иначе «шаблон» в логе не отличить от «модель ответила, а я не разобрал»");
+});
+
+testAsync("ответ, обёрнутый в markdown-блок, разбирается", async () => {
+  const txt = "```\n===0===\nтекст один\n===1===\nтекст два\n```";
+  const out = await withFetch(reply(txt), () => llmComments(evs, panel));
+  assert.equal(out[0], "текст один");
+});
+
+testAsync("единственное событие принимает связный текст без маркеров", async () => {
+  const one = [evs[0]];
+  const txt = "Спред расширился на три пункта — движение рядовое, но направление стоит держать в уме: кредитные премии обычно поворачивают раньше акций.";
+  const out = await withFetch(reply(txt), () => llmComments(one, panel));
+  assert.equal(out[0], txt, "модель, ответившая без разметки на один вопрос, не должна терять ответ");
 });
 
 testAsync("пропущенный моделью индекс не ломает рассылку", async () => {
@@ -655,9 +712,11 @@ testAsync("пропущенный моделью индекс не ломает 
   assert.equal(out[1], "только второй");
 });
 
-testAsync("мусор вместо JSON → шаблон", async () => {
-  const out = await withFetch(reply("извините, не могу"), () => llmComments(evs, panel));
+testAsync("нечитаемый ответ → шаблон, с диагностикой в логе", async () => {
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(reply("извините, не могу"), () => llmComments(evs, panel)); });
   assert.equal(out, null);
+  assert.match(said, /не разобран/, "в логе должно быть видно, что модель ответила, но ответ не разобрался");
 });
 
 testAsync("отказ API не роняет прогон и объясняет причину в логе", async () => {
