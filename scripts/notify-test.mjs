@@ -17,6 +17,18 @@ const test = (name, fn) => {
 const asyncTests = [];
 const testAsync = (name, fn) => asyncTests.push([name, fn]);
 
+// Глушилка для синхронных вызовов: часть фикстур штатно печатает диагностику (отсев качков,
+// алерты источников), и в логе CI она выглядела боевой тревогой.
+const mute = (fn) => {
+  const realLog = console.log;
+  console.log = () => {};
+  try {
+    return fn();
+  } finally {
+    console.log = realLog;
+  }
+};
+
 const ind = (o) => ({
   id: "x",
   name: "Показатель",
@@ -179,12 +191,12 @@ test("сработавший сигнал риска без движения д�
 test("снятие предварительной тревоги не шлётся", () => {
   const det = (state) => [{ id: "d1", name: "Нефтяной шок / Ормуз", state, inputs: "", note: "" }];
   const before = stateOf(panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("watch") }));
-  assert.equal(diff(before, panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("calm") })).length, 0);
+  assert.equal(mute(() => diff(before, panelOf([ind({})], { allocation: { pct: 65 }, detectors: det("calm") }))).length, 0);
 });
 
 test("алерт источника без наблюдаемых изменений в рассылку не идёт", () => {
   const rev = [{ key: "network:2026-07-24:abc", text: "источник переписал уже отданные данные" }];
-  const ev = diff(stateOf(panelOf([ind({})])), panelOf([ind({})], { revisions: rev }));
+  const ev = mute(() => diff(stateOf(panelOf([ind({})])), panelOf([ind({})], { revisions: rev })));
   assert.equal(ev.length, 0, "«изменено строк: 1» без старого и нового значения — не сообщение");
 });
 
@@ -314,11 +326,14 @@ test("промежуточное «наблюдение» детектора н�
   const det = (state) => [{ id: "d1", name: "Нефтяной шок / Ормуз", state, inputs: "", note: "" }];
   const base = { allocation: { pct: 65 } };
   const calm = stateOf(panelOf([ind({})], { ...base, detectors: det("calm") }));
+  const realLog = console.log; console.log = () => {};
+  try {
   assert.equal(diff(calm, panelOf([ind({})], { ...base, detectors: det("watch") })).length, 0, "«подтверждений 1/3» — не новость");
   const watch = stateOf(panelOf([ind({})], { ...base, detectors: det("watch") }));
   assert.equal(diff(watch, panelOf([ind({})], { ...base, detectors: det("fired") })).length, 1, "срабатывание — новость");
   const fired = stateOf(panelOf([ind({})], { ...base, detectors: det("fired") }));
   assert.equal(diff(fired, panelOf([ind({})], { ...base, detectors: det("calm") })).length, 1, "снятие — тоже");
+  } finally { console.log = realLog; }
 });
 
 test("у каждого показателя макро-панели есть человеческое имя", () => {
@@ -492,7 +507,9 @@ test("возврат точки к уже показанному значени�
   assert.equal(first.length, 1, "первый пересмотр показывается");
   const seen = rememberRevised({}, first, Date.parse("2026-07-24T00:00:00Z"));
   const s1 = { ...stateOf(panelOf([withPoints(pts(115))])), revised_points: seen };
-  const back = diff(s1, panelOf([withPoints(pts(100))]));
+  const realLog2 = console.log; console.log = () => {};
+  let back;
+  try { back = diff(s1, panelOf([withPoints(pts(100))])); } finally { console.log = realLog2; }
   assert.equal(back.length, 0, "источник вернул прежнее значение — новости в этом нет");
   const s2 = { ...stateOf(panelOf([withPoints(pts(115))])), revised_points: seen };
   assert.equal(diff(s2, panelOf([withPoints(pts(130))])).length, 1, "новое, ещё не показанное значение — событие");
@@ -627,14 +644,19 @@ test("проверочное сообщение показывает текущ�
 // Тесты фолбэка НАМЕРЕННО провоцируют отказ модели, и её жалоба уезжала в лог CI, выглядя там
 // настоящей ошибкой. Такой шум приучает не читать диагностику, поэтому ожидаемый вывод глушится:
 // сами сообщения при этом проверяются — тест падает, если жалобы не было вовсе.
+// Глушит ОБА потока: часть диагностики идёт через console.log («комментарий получен запасной
+// моделью…»), и она утекала в лог CI, выглядя там боевой. Сами сообщения при этом проверяются.
 const quiet = async (fn) => {
-  const real = console.error;
+  const realErr = console.error;
+  const realLog = console.log;
   const said = [];
   console.error = (...a) => said.push(a.join(" "));
+  console.log = (...a) => said.push(a.join(" "));
   try {
     await fn();
   } finally {
-    console.error = real;
+    console.error = realErr;
+    console.log = realLog;
   }
   return said.join("\n");
 };
