@@ -1386,12 +1386,15 @@ function textDefect(t) {
   if (/[؀-ۿ֐-׿一-鿿぀-ヿ가-힯]/.test(s)) return "чужая письменность";
   // Латиница и кириллица внутри ОДНОГО слова.
   if (/[а-яёА-ЯЁ][a-zA-Z]|[a-zA-Z][а-яёА-ЯЁ]/.test(s)) return "смешение алфавитов внутри слова";
-  // Транслитерация: длинное СТРОЧНОЕ латинское слово. Аббревиатуры (ETF, QT, MVRV) заглавные,
+  // Транслитерация: длинные СТРОЧНЫЕ латинские слова. Аббревиатуры (ETF, QT, MVRV) заглавные,
   // имена собственные (Nasdaq, Deribit) начинаются с заглавной — они проверку проходят.
+  // Порог — ДВА и более таких слова: одиночный устоявшийся англицизм («treasuries») читателю
+  // понятен и менять из-за него модель расточительно, а вот пара слов подряд означает, что
+  // модель соскользнула на другой язык («kvantitativnogo uzhestocheniya»).
   const translit = s.match(/(?<![A-Za-z])[a-z]{5,}(?![A-Za-z])/g) || [];
-  const ok = /^(bitcoin|ethereum|nasdaq|futures|options|hedge|spread|basis|carry|funding|stablecoin)$/;
+  const ok = /^(bitcoin|ethereum|nasdaq|treasuries|futures|options|hedge|spread|basis|carry|funding|stablecoin)$/;
   const bad = translit.filter((w) => !ok.test(w));
-  if (bad.length) return `похоже на транслитерацию: ${bad.slice(0, 3).join(", ")}`;
+  if (bad.length >= 2) return `похоже на транслитерацию: ${bad.slice(0, 3).join(", ")}`;
   return "";
 }
 
