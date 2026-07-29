@@ -41,8 +41,20 @@ const SEND_GAP_MS = Number(process.env.NOTIFY_GAP_MS || 3500); // Telegram: ~20 
 // NOTIFY_ALLOW_PAID=1: иначе одна опечатка в переменной начала бы тихо жечь деньги на каждом
 // прогоне, а прогонов до сотни в сутки.
 const FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+// Бесплатные модели живут на общих мощностях и регулярно отвечают «ResourceExhausted: Worker
+// local total request limit reached» — именно это оставило боевое уведомление без разбора.
+// Поэтому не одна модель, а ЦЕПОЧКА, и намеренно у РАЗНЫХ провайдеров: перегрузка NVIDIA не
+// должна выключать разбор целиком. Все до единой — с суффиксом :free.
+const FREE_CHAIN = [
+  FREE_MODEL,                          // NVIDIA, самая крупная — первый выбор по качеству
+  "google/gemma-4-31b-it:free",        // Google
+  "openai/gpt-oss-20b:free",           // OpenAI OSS
+  "inclusionai/ling-3.0-flash:free",   // InclusionAI
+];
 const resolveModel = () => (process.env.NOTIFY_MODEL || "").trim() || FREE_MODEL;
 const paidAllowed = () => process.env.NOTIFY_ALLOW_PAID === "1";
+// Если модель задана явно — уважаем выбор и цепочку не подставляем.
+const modelChain = () => ((process.env.NOTIFY_MODEL || "").trim() ? [resolveModel()] : FREE_CHAIN);
 const LLM_TIMEOUT_MS = Number(process.env.NOTIFY_LLM_TIMEOUT_MS || 90000);
 
 const finite = (x) => typeof x === "number" && Number.isFinite(x);
@@ -1357,14 +1369,12 @@ function parseComments(txt, n) {
   return null;
 }
 
-async function llmComments(events, panel) {
-  const key = process.env.OPENROUTER_KEY;
-  if (!key || !events.length) return null;
-  const model = resolveModel();
-  if (!model.endsWith(":free") && !paidAllowed()) {
-    console.error(`модель «${model}» платная, а NOTIFY_ALLOW_PAID не выставлен — комментарии из шаблона`);
-    return null;
-  }
+// Какая модель реально ответила — нужно для честной подписи в проверке связи.
+let LAST_MODEL = "";
+
+// Одна попытка у одной модели. Возвращает разобранные комментарии либо null; вторым значением —
+// признак того, что стоит попробовать СЛЕДУЮЩУЮ модель (перегрузка провайдера, отказ маршрута).
+async function askModel(model, events, panel, key) {
   const payload = {
     model,
     // Рассуждающая модель тратит на размышления НАМНОГО больше, чем на сам ответ, и по
@@ -1407,34 +1417,38 @@ async function llmComments(events, panel) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), LLM_TIMEOUT_MS);
   try {
-    let res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify(payload),
-      signal: ctl.signal,
-    });
-    // Не каждый провайдер понимает параметр подавления размышлений: у одного из них запрос с ним
-    // вернул пустоту. Один повтор без этого параметра — дешевле, чем потерять разбор.
-    if (!res.ok && payload.reasoning) {
-      console.error(`комментатор: запрос с подавлением размышлений отклонён (${res.status}), повтор без него`);
-      const { reasoning, ...plain } = payload;
-      res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const send = async (b) =>
+      fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-        body: JSON.stringify(plain),
+        body: JSON.stringify(b),
         signal: ctl.signal,
       });
+    const readBody = async (r) => {
+      if (!r.ok) return { httpError: `${r.status} — ${(await r.text().catch(() => "")).slice(0, 160).replace(/\s+/g, " ")}` };
+      return await r.json().catch(() => ({ error: { message: "ответ не является JSON" } }));
+    };
+
+    let j = await readBody(await send(payload));
+    // Не каждый провайдер понимает подавление размышлений, и отказ приходит по-разному: то
+    // HTTP-ошибкой, то телом с полем error при коде 200. Один повтор без параметра дешевле,
+    // чем потеря разбора, поэтому проверяем ОБА вида отказа.
+    const paramRejected = j.httpError || (j.error && /param|unsupport|invalid|reasoning/i.test(String(j.error.message || "")));
+    if (paramRejected && payload.reasoning) {
+      console.error(`${model}: запрос с подавлением размышлений отклонён (${j.httpError || j.error?.message}), повтор без него`);
+      const { reasoning, ...plain } = payload;
+      j = await readBody(await send(plain));
     }
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`openrouter ${res.status}: ${body.slice(0, 200)}`);
+    if (j.httpError) {
+      console.error(`${model}: ответ ${j.httpError}`);
+      return { comments: null, tryNext: true };
     }
-    const j = await res.json();
     // OpenRouter умеет вернуть 200 с телом-ошибкой и пустым choices — без этой строки в логе
-    // было только «ответ пуст», и причина оставалась невидимой.
+    // было только «ответ пуст», и причина оставалась невидимой. Именно так выглядит перегрузка
+    // бесплатного провайдера: «ResourceExhausted: Worker local total request limit reached».
     if (j?.error) {
-      console.error(`комментатор: провайдер вернул ошибку — ${String(j.error.message || JSON.stringify(j.error)).slice(0, 200)}`);
-      return null;
+      console.error(`${model}: провайдер вернул ошибку — ${String(j.error.message || JSON.stringify(j.error)).slice(0, 180)}`);
+      return { comments: null, tryNext: true };
     }
     const choice = j?.choices?.[0] || {};
     const msg = choice.message || {};
@@ -1452,38 +1466,63 @@ async function llmComments(events, panel) {
           : thinking
             ? "вернулись только черновые размышления без ответа"
             : "ответ пуст";
-      console.error(`комментатор не дал текста: ${why} (finish_reason: ${choice.finish_reason ?? "?"}, размышлений ${thinking.length} симв.) — комментарии из шаблона`);
-      return null;
+      console.error(`${model}: не дал текста — ${why} (finish_reason: ${choice.finish_reason ?? "?"}, размышлений ${thinking.length} симв.)`);
+      return { comments: null, tryNext: true };
     }
     const parsed = parseComments(txt, events.length);
-    // Страховка по языку: промпт требует русский, но требование можно и проигнорировать —
-    // англоязычный разбор до читателя доходить не должен. Считаем долю кириллицы среди букв.
-    if (parsed) {
-      for (let k = 0; k < parsed.length; k++) {
-        const t = parsed[k];
-        if (!t) continue;
-        const cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
-        const lat = (t.match(/[a-zA-Z]/g) || []).length;
-        if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) {
-          console.error(`ответ на событие ${k} не на русском (кириллицы ${Math.round((100 * cyr) / (cyr + lat))}%) — для него берётся шаблон`);
-          parsed[k] = null;
-        }
-      }
-      if (parsed.every((t) => !t)) return null;
-    }
     if (!parsed) {
       // ДИАГНОСТИКА: без неё «шаблон» в логе не отличить от «модель ответила, а я не разобрал».
-      console.error(`ответ модели не разобран (${txt.length} симв.), комментарии из шаблона. Начало ответа: ${txt.slice(0, 300).replace(/\s+/g, " ")}`);
-      return null;
+      console.error(`${model}: ответ не разобран (${txt.length} симв.). Начало: ${txt.slice(0, 250).replace(/\s+/g, " ")}`);
+      return { comments: null, tryNext: true };
     }
-    return parsed;
+    // Страховка по языку: промпт требует русский, но требование можно и проигнорировать —
+    // англоязычный разбор до читателя доходить не должен. Считаем долю кириллицы среди букв.
+    for (let k = 0; k < parsed.length; k++) {
+      const t = parsed[k];
+      if (!t) continue;
+      const cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
+      const lat = (t.match(/[a-zA-Z]/g) || []).length;
+      if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) {
+        console.error(`${model}: ответ на событие ${k} не на русском (кириллицы ${Math.round((100 * cyr) / (cyr + lat))}%) — отброшен`);
+        parsed[k] = null;
+      }
+    }
+    // Совсем нечего показать — пусть попробует следующая модель, вдруг она послушнее.
+    if (parsed.every((t) => !t)) return { comments: null, tryNext: true };
+    return { comments: parsed, tryNext: false };
   } catch (e) {
-    console.error("LLM-комментарий недоступен, работает шаблон:", String(e.message || e));
-    return null;
+    console.error(`${model}: запрос не удался — ${String(e.message || e)}`);
+    return { comments: null, tryNext: true };
   } finally {
     clearTimeout(timer);
   }
 }
+
+async function llmComments(events, panel) {
+  const key = process.env.OPENROUTER_KEY;
+  if (!key || !events.length) return null;
+  const chain = modelChain();
+  // Платный предохранитель: ни одна модель без суффикса :free в сеть не уходит без явного
+  // разрешения. Проверяем ВСЮ цепочку, а не только первую.
+  const paid = chain.filter((m) => !m.endsWith(":free"));
+  if (paid.length && !paidAllowed()) {
+    console.error(`модель «${paid[0]}» платная, а NOTIFY_ALLOW_PAID не выставлен — комментарии из шаблона`);
+    return null;
+  }
+  for (let k = 0; k < chain.length; k++) {
+    const { comments, tryNext } = await askModel(chain[k], events, panel, key);
+    if (comments) {
+      if (k > 0) console.log(`комментарий получен запасной моделью ${chain[k]} (основная не ответила)`);
+      LAST_MODEL = chain[k];
+      return comments;
+    }
+    if (!tryNext) break;
+    if (k + 1 < chain.length) console.error(`перехожу к следующей модели: ${chain[k + 1]}`);
+  }
+  console.error("ни одна бесплатная модель не дала разбора — комментарии из шаблона");
+  return null;
+}
+
 
 /* =================================== 6. ОТПРАВКА =================================== */
 
@@ -1648,7 +1687,7 @@ async function main() {
       }];
       const got = await llmComments(probe, panel);
       verdictLine = got?.[0]
-        ? `Комментатор работает (${resolveModel()}). Пример разбора:\n<i>${esc(got[0].slice(0, 600))}</i>`
+        ? `Комментатор работает (${LAST_MODEL || resolveModel()}). Пример разбора:\n<i>${esc(got[0].slice(0, 600))}</i>`
         : `Комментатор НЕ ответил (${resolveModel()}) — сообщения пойдут без разбора, причина в логе прогона`;
     }
     const text = `${pingMessage(panel)}\n\n${verdictLine}`;
@@ -1683,7 +1722,7 @@ async function main() {
     const capped = events.slice(0, MAX_EVENTS);
     if (events.length > MAX_EVENTS) console.log(`ПРЕДОХРАНИТЕЛЬ: событий ${events.length} > ${MAX_EVENTS}, отправляются первые ${MAX_EVENTS} по важности`);
     const llm = await llmComments(capped, panel);
-    console.log(`комментарии: ${llm ? `модель (${resolveModel()})` : "шаблон"}`);
+    console.log(`комментарии: ${llm ? `модель (${LAST_MODEL || resolveModel()})` : "шаблон"}`);
     for (let i = 0; i < capped.length; i++) {
       const ev = capped[i];
       const comment = (llm && llm[i]) || templateComment(ev);

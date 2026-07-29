@@ -703,6 +703,50 @@ testAsync("англоязычный разбор до читателя не до
   assert.match(said, /не на русском/);
 });
 
+testAsync("перегрузка бесплатного провайдера — переход к запасной модели", async () => {
+  // Боевой случай: «Upstream error from Nvidia: ResourceExhausted: Worker local total request
+  // limit reached (163/32)» оставил уведомление без разбора. Одна модель = единая точка отказа.
+  const tried = [];
+  const impl = async (_u, o) => {
+    const m = JSON.parse(o.body).model;
+    tried.push(m);
+    if (m.startsWith("nvidia/")) return { ok: true, json: async () => ({ error: { message: "Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (163/32)" } }) };
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор от запасной\n===1===\nвторой" } }] }) };
+  };
+  let out;
+  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.equal(out[0], "разбор от запасной", "перегрузка одного провайдера не должна лишать разбора");
+  assert.ok(tried.length >= 2, `должна быть попытка у следующей модели: ${tried}`);
+  assert.ok(!tried[1].startsWith("nvidia/"), `запасная обязана быть у ДРУГОГО провайдера: ${tried}`);
+});
+
+testAsync("вся цепочка запасных моделей — бесплатная", async () => {
+  const tried = [];
+  const impl = async (_u, o) => {
+    tried.push(JSON.parse(o.body).model);
+    return { ok: true, json: async () => ({ error: { message: "exhausted" } }) };
+  };
+  await quiet(async () => { await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.ok(tried.length >= 3, `цепочка должна быть не из одной модели: ${tried}`);
+  for (const m of tried) assert.ok(m.endsWith(":free"), `платная модель в цепочке: ${m}`);
+  assert.equal(new Set(tried).size, tried.length, "повторов в цепочке быть не должно");
+});
+
+testAsync("явно заданная модель отменяет цепочку", async () => {
+  const tried = [];
+  const impl = async (_u, o) => {
+    tried.push(JSON.parse(o.body).model);
+    return { ok: true, json: async () => ({ error: { message: "exhausted" } }) };
+  };
+  process.env.NOTIFY_MODEL = "google/gemma-4-31b-it:free";
+  try {
+    await quiet(async () => { await withFetch(impl, () => llmComments(evs, panel)); });
+  } finally {
+    delete process.env.NOTIFY_MODEL;
+  }
+  assert.deepEqual(tried, ["google/gemma-4-31b-it:free"], "выбор владельца не подменяется цепочкой");
+});
+
 testAsync("тело-ошибка при статусе 200 объясняется в логе", async () => {
   // OpenRouter умеет вернуть 200 с телом-ошибкой и пустым choices; без этой ветки в логе было
   // только «ответ пуст», и причина оставалась невидимой.
@@ -725,6 +769,37 @@ testAsync("провайдер, не понявший подавление раз
   await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
   assert.deepEqual(seen, ["с подавлением", "без подавления"], "должен быть ровно один повтор");
   assert.equal(out[0], "разбор", "разбор не теряется из-за неподдержанного параметра");
+});
+
+testAsync("отказ параметра телом при коде 200 тоже даёт повтор", async () => {
+  // Провайдеры сообщают об отказе по-разному: одни HTTP-кодом, другие полем error при 200.
+  const seen = [];
+  const impl = async (_u, o) => {
+    const body = JSON.parse(o.body);
+    seen.push(body.reasoning ? "с подавлением" : "без подавления");
+    if (body.reasoning) return { ok: true, json: async () => ({ error: { message: "unsupported parameter: reasoning" } }) };
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор\n===1===\nвторой" } }] }) };
+  };
+  let out;
+  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.deepEqual(seen, ["с подавлением", "без подавления"]);
+  assert.equal(out[0], "разбор");
+});
+
+testAsync("перегрузка провайдера НЕ путается с отказом параметра", async () => {
+  // «ResourceExhausted» — это не про параметры: повторять тот же запрос бессмысленно, надо
+  // сразу идти к следующей модели, иначе на каждую перегрузку тратится лишний запрос квоты.
+  const seen = [];
+  const impl = async (_u, o) => {
+    const body = JSON.parse(o.body);
+    seen.push(`${body.model}|${body.reasoning ? "подавл" : "без"}`);
+    if (body.model.startsWith("nvidia/")) return { ok: true, json: async () => ({ error: { message: "ResourceExhausted: Worker local total request limit reached (163/32)" } }) };
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор\n===1===\nвторой" } }] }) };
+  };
+  let out;
+  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.equal(seen.filter((x) => x.startsWith("nvidia/")).length, 1, `на перегруженную модель — один запрос, а не два: ${seen}`);
+  assert.equal(out[0], "разбор");
 });
 
 testAsync("бюджет токенов рассчитан на размышления модели", async () => {
