@@ -3,6 +3,7 @@ import { allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1, policySuiteContractV1 } from "../docs/policy-suite-v1.mjs";
 import { POLICY_V2_CANDIDATE, allocationTargetV2Candidate, evaluateAcceptanceV2, evaluateReviewV2, policyV2CandidateMetadata, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
+import { DAILY_INPUT_SUMMARY_DAYS, pruneDailyInputSummaryV1 } from "./public-snapshot-contract.mjs";
 
 const DAY=86_400_000,YEAR_DAYS=365.25;
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
@@ -489,6 +490,11 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,v2_diverged:finite(v2Target)&&finite(decision.target_pct)&&Number(v2Target)!==Number(decision.target_pct),input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
   const sameDay=monitor.daily.findIndex(x=>x.date===date);if(sameDay>=0)monitor.daily[sameDay]=dailyRow;else monitor.daily.push(dailyRow);
   monitor.daily=monitor.daily.filter(x=>now-Date.parse(x.t)<=cfg.daily_history_days*DAY).sort((a,b)=>Date.parse(a.t)-Date.parse(b.t));
+  // Детальные входы держим только за свежее окно: NAV-серия обязана покрывать 365 дней, а
+  // подробный input_summary каждого из 370 дней стоил бы ~0.87 МБ и пробивал кап публичного файла
+  // (страж бюджета поймал это 30.07 до наступления дедлока). `input_hash` остаётся в каждой строке,
+  // поэтому предъявленные входы по-прежнему проверяемы, а их долгосрочный якорь — git-история.
+  monitor.daily=pruneDailyInputSummaryV1(monitor.daily,{now,keepDays:DAILY_INPUT_SUMMARY_DAYS});
   monitor.updated_at=at;monitor.last_at=at;monitor.last_price=Number(price);monitor.last_cash_quote_pct=finite(cashQuotePct)?Number(cashQuotePct):null;monitor.last_cash_quote_basis=cashQuoteBasis;delete monitor.last_cash_annual_pct;monitor.cash_yield_available=finite(cashQuotePct);
   monitor.assumptions={...(monitor.assumptions||{}),transaction_cost_bps_per_full_turnover:cfg.transaction_cost_bps_per_full_turnover,cash_yield_source:"FRED DTB3, discount basis converted to effective annual yield (91-day convention)",cash_yield_basis:"3-month Treasury bill discount quote; ACT/360 price conversion, effective ACT/365.25 annualization",timezone:cfg.timezone,observation_mode:cfg.observation_mode};
   monitor.days_elapsed=Math.max(0,Math.floor((now-Date.parse(monitor.started_at))/DAY));monitor.observation_days=monitor.daily.length;monitor.review_schedule_days=cfg.review_days;monitor.next_review_day=cfg.review_days.find(x=>x>monitor.days_elapsed)??null;monitor.trend_vol_context=simple.trend_vol_context;

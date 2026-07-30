@@ -30,6 +30,29 @@ export function compactHistoryEntryV1(entry) {
 
 export const jsonBytesV1 = value => Buffer.byteLength(JSON.stringify(value));
 
+// Детальные входы решения (`daily[].input_summary`, ~2.3 КБ) нужны для аудита СВЕЖИХ решений;
+// на 370-дневном окне они дают ~0.87 МБ и в одиночку пробивают кап файла. NAV-серия обязана
+// покрывать 365 дней (окна R1/R2/R3 и отставки), а подробные входы — нет: их долгосрочный якорь —
+// git-история снимков, а проверяемость каждой строки сохраняет остающийся `input_hash`.
+// Ни фронтенд, ни монитор, ни тесты старые input_summary не читают (проверено grep'ом).
+export const DAILY_INPUT_SUMMARY_DAYS = 30;
+
+// Форма прореженной дневной строки. Одна функция для прореживания и для проекции размера —
+// иначе они разъедутся (тот же класс дрейфа, что зашитый в двух местах порог).
+export function prunedDailyRowV1(row) {
+  if (!row || typeof row !== "object" || row.input_summary === undefined) return row;
+  const { input_summary, ...rest } = row;
+  return { ...rest, input_summary_pruned: true };
+}
+
+export function pruneDailyInputSummaryV1(daily, { now = Date.now(), keepDays = DAILY_INPUT_SUMMARY_DAYS } = {}) {
+  const cut = now - keepDays * 86_400_000;
+  return (daily || []).map(row => {
+    const t = Date.parse(row?.t || "");
+    return Number.isFinite(t) && t < cut ? prunedDailyRowV1(row) : row;
+  });
+}
+
 // Byte budget for the published history array. The row COUNT retention (days) cannot bound the
 // file alone: individual rows grow as the schema evolves, and the steady-state projection then
 // breaches the hard cap and deadlocks publication (the 02:50–04:50 2026-07-21 failures, same class
@@ -52,16 +75,24 @@ export function boundedPublicHistoryV1(history, { budget = HISTORY_BYTE_BUDGET, 
 // Forecast the largest public file allowed by all retention settings, using the most
 // recent row of each log as a conservative size sample. Static audit calls this on the
 // compacted representation, including while migrating an older un-compacted snapshot.
-export function projectedPublicSnapshotBytesV1({ snapshotBytes, snapshot, dailyLimit, decisionLogLimit, historyMaxRows = HISTORY_MAX_ROWS }) {
+export function projectedPublicSnapshotBytesV1({ snapshotBytes, snapshot, dailyLimit, decisionLogLimit, historyMaxRows = HISTORY_MAX_ROWS, dailyInputSummaryDays = DAILY_INPUT_SUMMARY_DAYS }) {
   const daily = snapshot?.monitoring?.daily || [];
   const decisions = snapshot?.monitoring?.decision_log || [];
   const history = snapshot?.history || [];
   const addedBytes = (rows, limit) => rows.length ? Math.max(0, limit - rows.length) * jsonBytesV1(rows.at(-1)) : 0;
+  // Daily at the limit: only the freshest `dailyInputSummaryDays` rows carry input_summary, the
+  // rest are pruned — projecting the full row size across all 370 days overstates the steady
+  // state by ~0.8 MB and would demand a budget the storage policy never actually needs.
+  let dailyGrowth = 0;
+  if (daily.length) {
+    const sample = daily.at(-1);
+    const fresh = Math.min(dailyLimit, dailyInputSummaryDays), old = Math.max(0, dailyLimit - dailyInputSummaryDays);
+    // Точный размер JSON-массива: элементы + запятые между ними + квадратные скобки.
+    const projected = fresh * jsonBytesV1(sample) + old * jsonBytesV1(prunedDailyRowV1(sample)) + (fresh + old) + 1;
+    dailyGrowth = Math.max(0, projected - jsonBytesV1(daily));
+  }
   // History growth is bounded by the collector's byte budget, not by row count alone: future rows
   // beyond the remaining budget will be evicted oldest-first, so they cannot enlarge the file.
   const historyGrowth = Math.min(addedBytes(history, historyMaxRows), Math.max(0, HISTORY_BYTE_BUDGET - jsonBytesV1(history)));
-  return snapshotBytes +
-    addedBytes(daily, dailyLimit) +
-    addedBytes(decisions, decisionLogLimit) +
-    historyGrowth;
+  return snapshotBytes + dailyGrowth + addedBytes(decisions, decisionLogLimit) + historyGrowth;
 }

@@ -27,7 +27,10 @@ const ok=(x,msg)=>{if(!x)fail.push(msg)};
 
   const daily=[{x:"d".repeat(30)}],decision_log=[{x:"l".repeat(20)}],history=[compact];
   const projected=projectedPublicSnapshotBytesV1({snapshotBytes:1000,snapshot:{monitoring:{daily,decision_log},history},dailyLimit:3,decisionLogLimit:4,historyMaxRows:5});
-  const expected=1000+2*jsonBytesV1(daily[0])+3*jsonBytesV1(decision_log[0])+4*jsonBytesV1(history[0]);
+  // Рост daily считается по ТОЧНОМУ размеру заполненного массива (элементы + запятые + скобки),
+  // а не «строк осталось × размер строки»: прежняя оценка занижала стационар на разделителях.
+  const dailyAtLimit=jsonBytesV1([daily[0],daily[0],daily[0]]);
+  const expected=1000+(dailyAtLimit-jsonBytesV1(daily))+3*jsonBytesV1(decision_log[0])+4*jsonBytesV1(history[0]);
   eq(projected,expected,"max-filled retention projection");
   ok(HISTORY_MAX_ROWS===1066,"history retention row ceiling remains explicit");
   ok(PUBLIC_SNAPSHOT_MAX_BYTES===3_000_000,"public snapshot byte ceiling remains explicit");
@@ -271,15 +274,36 @@ for(const [id,cfg] of Object.entries(FRED_SERIES)){
 }
 // ---- Байтовый бюджет истории согласован с жёстким капом файла ----
 {
-  const {HISTORY_BYTE_BUDGET,boundedPublicHistoryV1}=await import("./public-snapshot-contract.mjs");
+  const {HISTORY_BYTE_BUDGET,boundedPublicHistoryV1,prunedDailyRowV1,pruneDailyInputSummaryV1,DAILY_INPUT_SUMMARY_DAYS}=await import("./public-snapshot-contract.mjs");
   const {MODEL_POLICY_V1}=await import("../docs/model-policy-v1.mjs");
   const snap=JSON.parse(readFileSync(new URL("../docs/snapshot.json",import.meta.url),"utf8"));
   const bytes=v=>Buffer.byteLength(JSON.stringify(v));
-  const dailyRow=snap.monitoring?.daily?.at(-1),logRow=snap.monitoring?.decision_log?.at(-1);
-  if(dailyRow&&logRow){
+  // Страж считает проекцию ТОЙ ЖЕ функцией, что и static-audit: собственная арифметика здесь
+  // разъехалась с политикой хранения (не знала о прореживании input_summary) и 30.07 заблокировала
+  // публикацию ложным пробоем капа. Один источник правды — projectedPublicSnapshotBytesV1.
+  if(snap.monitoring?.daily?.length&&snap.monitoring?.decision_log?.length&&snap.history?.length){
     const cfg=MODEL_POLICY_V1.forward_monitoring;
-    const steadyOthers=bytes(dailyRow)*cfg.daily_history_days+bytes(logRow)*cfg.observation_log_limit+(bytes(snap)-bytes(snap.history||[])-bytes(snap.monitoring.daily)-bytes(snap.monitoring.decision_log));
-    ok(steadyOthers+HISTORY_BYTE_BUDGET<PUBLIC_SNAPSHOT_MAX_BYTES,`бюджет истории + прочие компоненты на лимитах (${((steadyOthers+HISTORY_BYTE_BUDGET)/1e6).toFixed(2)}МБ) обязаны помещаться в кап ${(PUBLIC_SNAPSHOT_MAX_BYTES/1e6).toFixed(1)}МБ — иначе мёртвая зона дедлока публикации возвращается`);
+    const projected=projectedPublicSnapshotBytesV1({snapshotBytes:bytes(snap),snapshot:snap,dailyLimit:cfg.daily_history_days,decisionLogLimit:cfg.observation_log_limit,historyMaxRows:HISTORY_MAX_ROWS});
+    ok(projected<PUBLIC_SNAPSHOT_MAX_BYTES,`проекция стационарного размера (${(projected/1e6).toFixed(2)}МБ) обязана помещаться в кап ${(PUBLIC_SNAPSHOT_MAX_BYTES/1e6).toFixed(1)}МБ — иначе мёртвая зона дедлока публикации возвращается`);
+    ok(PUBLIC_SNAPSHOT_MAX_BYTES-projected>150_000,`запас до капа ${((PUBLIC_SNAPSHOT_MAX_BYTES-projected)/1e3).toFixed(0)}КБ слишком мал: ниже 150КБ добавление одного поля в строку снова упирает публикацию в кап`);
+  }
+  // Прореживание детальных входов: свежие строки полные, старые теряют input_summary, но сохраняют
+  // проверяемость через input_hash; функция идемпотентна (повторный прогон ничего не ломает).
+  {
+    const now=Date.UTC(2026,7,1);
+    const mk=(daysAgo,extra={})=>({t:new Date(now-daysAgo*86400000).toISOString(),date:"x",input_hash:"h"+daysAgo,input_summary:{metrics:[1,2,3]},...extra});
+    const pruned=pruneDailyInputSummaryV1([mk(200),mk(31),mk(29),mk(0)],{now,keepDays:DAILY_INPUT_SUMMARY_DAYS});
+    eq(pruned.map(r=>r.input_summary!==undefined),[false,false,true,true],"input_summary остаётся только в свежем окне");
+    eq(pruned.map(r=>r.input_hash),["h200","h31","h29","h0"],"input_hash обязан сохраняться во всех строках — проверяемость не теряется");
+    ok(pruned[0].input_summary_pruned===true,"урезание помечается явно, а не молча");
+    eq(pruneDailyInputSummaryV1(pruned,{now,keepDays:DAILY_INPUT_SUMMARY_DAYS}),pruned,"идемпотентность");
+    ok(bytes(prunedDailyRowV1(mk(0)))<bytes(mk(0)),"прореженная строка обязана быть меньше полной");
+    eq(prunedDailyRowV1({t:"x",input_hash:"h"}),{t:"x",input_hash:"h"},"строка без input_summary не меняется");
+    // Проекция обязана учитывать прореживание: иначе она завышает стационар на сотни КБ.
+    const fakeSnap={monitoring:{daily:[mk(0)],decision_log:[{a:1}]},history:[{h:1}]};
+    const withPrune=projectedPublicSnapshotBytesV1({snapshotBytes:1000,snapshot:fakeSnap,dailyLimit:370,decisionLogLimit:1,historyMaxRows:1,dailyInputSummaryDays:30});
+    const noPrune=projectedPublicSnapshotBytesV1({snapshotBytes:1000,snapshot:fakeSnap,dailyLimit:370,decisionLogLimit:1,historyMaxRows:1,dailyInputSummaryDays:370});
+    ok(withPrune<noPrune,"проекция с прореживанием обязана быть меньше проекции без него");
   }
   const rows=Array.from({length:200},(_,i)=>({t:new Date(Date.UTC(2026,0,1)+i*86400000).toISOString(),strategic:-10,tactical:0,price:60000,pad:"x".repeat(50)}));
   const bounded=boundedPublicHistoryV1(rows,{budget:bytes(rows.slice(100))+2,minRows:48});
