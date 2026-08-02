@@ -1578,6 +1578,30 @@ async function sendTelegram(text) {
   }
 }
 
+// Второй независимый канал: сохраняет ровно тот же текст в приватной ленте NEXUS.
+// Сбой ленты не влияет ни на Telegram, ни на состояние решающего контура.
+async function sendNexusEvent(text, eventId, occurredAt) {
+  const url = process.env.NEXUS_EVENTS_URL;
+  const token = process.env.NEXUS_INGEST_TOKEN;
+  const sitesToken = process.env.NEXUS_SITES_TOKEN;
+  const source = process.env.NEXUS_SOURCE_ID;
+  if (!url || !token || !sitesToken || !source) return;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "OAI-Sites-Authorization": `Bearer ${sitesToken}`,
+      },
+      body: JSON.stringify({ source, text, eventId, occurredAt }),
+    });
+    if (!res.ok) console.error(`NEXUS HTTP ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+  } catch (error) {
+    console.error(`NEXUS недоступен: ${error?.message || error}`);
+  }
+}
+
 /* ================================ 7. СОСТОЯНИЕ И MAIN ================================ */
 
 // Идемпотентность: база сравнения двигается ОДИН раз в конце прогона, а список уже доставленных
@@ -1779,6 +1803,7 @@ async function main() {
         console.log("\n--- сообщение " + (i + 1) + " ---\n" + plain);
       } else {
         await sendTelegram(text);
+        await sendNexusEvent(text, sentKey(ev), panel.generated_at);
         console.log(`  → отправлено: ${KIND[ev.kind]?.label || ev.kind} · ${ev.title}${ev.before || ev.after ? ` (${ev.before || "—"} → ${ev.after || "—"})` : ""} · комментарий: ${llm && llm[i] ? "модель" : "шаблон"}`);
         sent++;
         sentIndex[sentKey(ev)] = new Date().toISOString();
