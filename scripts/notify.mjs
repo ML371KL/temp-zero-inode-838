@@ -1583,16 +1583,14 @@ async function sendTelegram(text) {
 async function sendNexusEvent(text, eventId, occurredAt) {
   const url = process.env.NEXUS_EVENTS_URL;
   const token = process.env.NEXUS_INGEST_TOKEN;
-  const sitesToken = process.env.NEXUS_SITES_TOKEN;
   const source = process.env.NEXUS_SOURCE_ID;
-  if (!url || !token || !sitesToken || !source) return;
+  if (!url || !token || !source) return;
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
-        "OAI-Sites-Authorization": `Bearer ${sitesToken}`,
       },
       body: JSON.stringify({ source, text, eventId, occurredAt }),
     });
