@@ -28,7 +28,10 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45, а не 30: публикация Pages ждёт до получаса (см. `timeout` у deploy-pages ниже),
+    # и при потолке в 30 раннер убивал бы прогон раньше, чем истекает ожидание — то есть
+    # ровно в том случае, ради которого ожидание и подняли.
+    timeout-minutes: 45
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -112,27 +115,16 @@ jobs:
           cp .candidate/snapshot.json docs/snapshot.json
           cp .candidate/cache.json .state/cache.json
 
-      # 7. САЙТ ПУБЛИКУЕТСЯ ОТСЮДА, а не коммитом.
-      #    Документация GitHub: «Commits pushed by a GitHub Actions workflow that uses the
-      #    GITHUB_TOKEN do not trigger a GitHub Pages build.» То есть при источнике Pages
-      #    «Deploy from a branch» коммит снимка НЕ пересобрал бы сайт: Action был бы зелёным,
-      #    данные легли бы в репозиторий, а страница вечно показывала бы старый снимок.
-      #    Поэтому источник Pages = «GitHub Actions», и развёртывание здесь явное.
-      - name: Настроить Pages
-        uses: actions/configure-pages@v5
-
-      - name: Загрузить артефакт сайта
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: docs
-
-      - name: Развернуть сайт
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-      # 8. Коммит — только ради истории публичных снимков. Он НЕ заменяет Actions Cache: public JSON
-      #    не содержит raw datasets, поэтому при вытеснении cache stale-fallback на один цикл исчезает.
-      #    На доступность уже развёрнутого сайта этот коммит не влияет.
+      # 7. КОММИТ ИДЁТ ПЕРВЫМ, и это не вкусовщина. Пока он стоял после публикации, любой сбой
+      #    Pages уносил вместе с собой и данные: 6 августа развёртывание десять минут висело в
+      #    очереди GitHub и падало по таймауту, шаг коммита не выполнялся ни разу, и снимок
+      #    замер на 11:56 UTC — на шесть часов, при живом сборщике и полностью исправных
+      #    источниках. Две публикации независимы, и порядок между ними обязан быть таким,
+      #    чтобы отказ внешней не отменял внутреннюю: история снимков в репозитории — это то,
+      #    из чего страница восстанавливается, а не наоборот.
+      #
+      #    Коммит НЕ заменяет Actions Cache: public JSON не содержит raw datasets, поэтому при
+      #    вытеснении кэша stale-fallback на один цикл исчезает.
       - name: Сохранить снимок в репозиторий
         run: |
           set -euo pipefail
@@ -169,6 +161,30 @@ jobs:
             echo "::error::snapshot commit was not pushed after 3 attempts"
             exit 1
           fi
+
+      # 8. САЙТ ПУБЛИКУЕТСЯ ОТСЮДА, а не коммитом выше.
+      #    Документация GitHub: «Commits pushed by a GitHub Actions workflow that uses the
+      #    GITHUB_TOKEN do not trigger a GitHub Pages build.» То есть при источнике Pages
+      #    «Deploy from a branch» коммит снимка НЕ пересобрал бы сайт: Action был бы зелёным,
+      #    данные легли бы в репозиторий, а страница вечно показывала бы старый снимок.
+      #    Поэтому источник Pages = «GitHub Actions», и развёртывание здесь явное.
+      - name: Настроить Pages
+        uses: actions/configure-pages@v5
+
+      - name: Загрузить артефакт сайта
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+      - name: Развернуть сайт
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          # Тридцать минут вместо десяти по умолчанию. Десять — это не «столько занимает
+          # публикация», а потолок, за которым действие отменяет развёртывание; 6 августа
+          # очередь Pages переползла за него, и каждый час подряд прогон падал на публикации,
+          # которая при этом наполовину доезжала. Ждать дольше дешевле, чем ронять прогон.
+          timeout: 1800000
 
       # 9. Встроенный сторож. Отдельный monitor.yml получает от GitHub-планировщика 2–6 тиков из
       #    ожидаемых 12/сутки и проспал единственный реальный инцидент (протухание >3ч ночью 21.07).
