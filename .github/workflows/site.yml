@@ -1,0 +1,77 @@
+name: Публикация сайта в Cloudflare Pages
+
+# Сайт публикуется ТОЛЬКО когда меняется его код. Данные едут отдельно и в другое
+# место — снимок кладётся в бакет R2 шагом внутри snapshot.yml, а страница забирает
+# его через functions/snapshot.json.js. Пока данные ехали публикацией, каждый час
+# стоил одной сборки; при бесплатном потолке Pages в 500 сборок в месяц это 720 в
+# месяц у одной этой панели, и то же самое у соседних.
+#
+# snapshot.json из публикации исключён намеренно: если бы он в неё попал, статический
+# файл соревновался бы с функцией за один и тот же путь, и какая версия ответит —
+# зависело бы от порядка, которого мы не контролируем.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "!docs/snapshot.json"
+      - "functions/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Публикация сайта не отменяется на полпути: половина загруженных файлов — это
+  # страница, которой не существовало ни до, ни после.
+  group: btc-21m-site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Собрать каталог публикации
+        run: |
+          set -euo pipefail
+          rm -rf site
+          mkdir -p site
+          # cp вместо rsync: rsync на раннере есть, но зависимость ради одного
+          # исключения не окупается.
+          cp -r docs/. site/
+          rm -f site/snapshot.json
+          echo "публикуется:"; ls -la site
+
+      - name: Опубликовать
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # Версия зафиксирована мажорно и точечно: публикация сайта — это тот шаг,
+          # который не должен однажды утром начать вести себя иначе сам по себе.
+          npx --yes wrangler@4.119.0 pages deploy site \
+            --project-name tzi-838 \
+            --branch main \
+            --commit-dirty=true
+
+      - name: Проверить, что опубликованное отвечает
+        run: |
+          set -euo pipefail
+          # Публикация Pages доезжает до края не мгновенно, поэтому проверка с
+          # повторами, а не однократный curl: иначе шаг был бы красным ровно
+          # столько раз, сколько сеть оказалась чуть медленнее обычного.
+          for attempt in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-838.pages.dev/ || true)
+            data=$(curl -s -o /dev/null -w '%{http_code}' https://tzi-838.pages.dev/snapshot.json || true)
+            echo "попытка $attempt: страница $code, снимок $data"
+            if [ "$code" = "200" ] && [ "$data" = "200" ]; then exit 0; fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::опубликованный сайт не отвечает 200 на / и /snapshot.json"
+          exit 1

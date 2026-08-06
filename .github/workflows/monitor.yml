@@ -27,5 +27,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           MONITOR_ALERT: "1"
-          SNAPSHOT_URL: https://ml371kl.github.io/temp-zero-inode-838/snapshot.json
+          SNAPSHOT_URL: https://tzi-838.pages.dev/snapshot.json
         run: node scripts/monitor-live.mjs

@@ -11,7 +11,7 @@ assert.match(y,/path:\s*\.state\/cache\.json/,"state cache path missing");
 assert.match(y,/restore-keys:[\s\S]*btc21m-state-/,"rolling state restore key missing");
 assert.match(y,/node-version:\s*24/);
 assert.match(y,/package-manager-cache:\s*false/,"automatic package-manager cache must stay disabled");
-assert.match(y,/timeout-minutes:\s*30/,"job timeout must stay bounded (30m covers the worst-case retry budget across ~40 network calls)");
+assert.match(y,/^\s*timeout-minutes:\s*20\s*$/m,"job timeout must stay bounded (20m covers the worst-case retry budget across ~40 network calls; the half-hour of GitHub Pages queue it used to cover left with the queue)");
 // FRED_KEY is OPTIONAL (the collector has a keyless fredgraph.csv fallback): the workflow must not
 // hard-gate on it, or a keyless deployment — the project's headline promise — would fail CI.
 assert.doesNotMatch(y,/::error::[^\n]*FRED_KEY/,"FRED_KEY must stay optional — no hard secret gate");
@@ -100,20 +100,41 @@ assert.match(html,/value="anthropic\/claude-fable-5"/,"default OpenRouter model 
 assert.match(html,/"stream":?\s*true|stream:\s*true/,"OpenRouter request must use streaming");
 assert.match(html,/id="aiRemember"/,"opt-in remember-on-device checkbox missing");
 assert.match(html,/"X-OpenRouter-Title"/,"OpenRouter attribution should use the current X-OpenRouter-Title header");
-// The site MUST be deployed by the workflow itself. GitHub does not rebuild a "Deploy from a branch"
-// Pages site for commits pushed with the GITHUB_TOKEN — the run would be green, the data would land
-// in the repo, and the live page would serve a stale snapshot forever. So the workflow deploys Pages.
-// Привязка к СТРУКТУРЕ, а не к упоминанию: грепом по всему файлу инвариант удовлетворяется
-// комментарием, и шаг можно удалить целиком, оставив CI зелёным. Проверено мутацией: замена
-// «uses: actions/deploy-pages» на закомментированную строку раньше не краснела.
-assert.match(y,/^\s*uses:\s*actions\/configure-pages/m,"настройка Pages обязана быть ШАГОМ uses:, а не упоминанием в комментарии");
-assert.match(y,/^\s*uses:\s*actions\/upload-pages-artifact/m,"загрузка артефакта обязана быть ШАГОМ uses:, а не упоминанием");
-assert.match(y,/^\s*uses:\s*actions\/deploy-pages/m,"деплой обязан быть ШАГОМ uses:, а не упоминанием");
-assert.match(y,/path:\s*docs/,"the Pages artifact must be the docs/ folder");
-assert.match(y,/pages:\s*write/,"pages: write permission missing");
-assert.match(y,/id-token:\s*write/,"id-token: write permission missing");
-assert.match(y,/name:\s*github-pages/,"the github-pages environment is required by deploy-pages");
-assert.ok(promoteAt.index<y.match(/^\s*uses:\s*actions\/upload-pages-artifact/m).index,"the artifact must be uploaded AFTER the verified candidate is promoted");
+// ДАННЫЕ ПУБЛИКУЮТСЯ В R2, а сайт — отдельным прогоном в Cloudflare Pages. Прежний
+// инвариант требовал здесь шагов GitHub Pages; он ушёл вместе с ними 6 августа, когда
+// очередь Pages встала и остановила вместе с публикацией ещё и сбор данных. Те же
+// правила привязки остаются в силе: только ЗАЯКОРЕННЫЕ строки, потому что незаякоренная
+// регулярка удовлетворяется комментарием, и шаг можно вырезать, оставив CI зелёным.
+const R2_PUT_LINE=/^\s*"\$\{endpoint\}\/dash-838\/snapshot\.json"\)?\s*$/m;
+assert.match(y,/^\s*--aws-sigv4 "aws:amz:auto:s3"\s*\\?\s*$/m,"публикация в R2 обязана быть подписанным запросом, а не упоминанием");
+assert.match(y,R2_PUT_LINE,"публикация обязана идти в бакет dash-838 по ключу snapshot.json");
+assert.match(y,/^\s*--data-binary @docs\/snapshot\.json \\\s*$/m,"в R2 обязан уезжать именно принятый снимок, а не кандидат");
+assert.match(y,/^\s*if ! cmp -s docs\/snapshot\.json \/tmp\/r2-readback\.json; then\s*$/m,"опубликованное обязано считываться обратно и сверяться побайтово");
+// GitHub Pages не должен вернуться незамеченным: два публикатора на один и тот же файл —
+// это два разных ответа на вопрос «какие сейчас данные», и какой из них увидит владелец,
+// зависело бы от того, чья очередь оказалась быстрее.
+assert.doesNotMatch(y,/^\s*uses:\s*actions\/(configure-pages|upload-pages-artifact|deploy-pages)/m,"GitHub Pages больше не публикует эту панель — данные идут в R2, сайт в Cloudflare");
+assert.doesNotMatch(y,/^\s*pages:\s*write\s*$/m,"право на публикацию GitHub Pages этому прогону больше не нужно");
+assert.doesNotMatch(y,/^\s*id-token:\s*write\s*$/m,"id-token нужен был только actions/deploy-pages");
+{
+  const r2At=y.indexOf("Опубликовать снимок в R2");
+  assert.ok(r2At>0,"шаг публикации в R2 отсутствует");
+  assert.ok(promoteAt.index<r2At,"в R2 уезжает только проверенный и принятый кандидат");
+  // Порядок 6 августа: коммит ДО внешней публикации. Пока он стоял после, отказ Pages
+  // уносил вместе с собой и данные — снимок замер на шесть часов при живом сборщике.
+  assert.ok(y.indexOf("Сохранить снимок в репозиторий")<r2At,"коммит обязан идти ДО внешней публикации: её отказ не должен уносить данные");
+}
+// Сайт публикуется отдельно и только по изменению кода — иначе бесплатный потолок
+// Cloudflare Pages в 500 сборок в месяц выбирается за трое суток одними данными.
+{
+  const siteY=readFileSync(new URL("../.github/workflows/site.yml",import.meta.url),"utf8");
+  assert.match(siteY,/^\s*- "!docs\/snapshot\.json"\s*$/m,"обновление снимка не должно публиковать сайт");
+  assert.match(siteY,/^\s*rm -f site\/snapshot\.json\s*$/m,"снимок обязан быть исключён из публикации: статический файл спорил бы с функцией за один путь");
+  assert.match(siteY,/^\s*npx --yes wrangler@\d+\.\d+\.\d+ pages deploy site \\\s*$/m,"версия wrangler обязана быть зафиксирована точечно");
+  assert.match(siteY,/--project-name tzi-838/,"проект публикации задан неверно");
+  const fn=readFileSync(new URL("../functions/snapshot.json.js",import.meta.url),"utf8");
+  assert.match(fn,/env\.DATA\.get\("snapshot\.json"/,"функция обязана читать снимок из привязанного бакета");
+}
 // Honest partial verdicts must publish rather than freeze the site, so the production gate is
 // REQUIRE_LIVE only. REQUIRE_COMPLETE stays an opt-in capability (self-test.mjs), not a workflow gate.
 assert.doesNotMatch(y,/REQUIRE_COMPLETE/,"the production publish gate must not force both regimes complete");
@@ -122,7 +143,7 @@ assert.match(monitorY,/^\s*workflow_dispatch:\s*$/m,"monitor must accept an exte
 assert.match(monitorY,/^\s*issues:\s*write\s*$/m,"monitor cannot open/close an external incident issue");
 assert.match(monitorY,/^\s*run:\s*node scripts\/monitor-live\.mjs\s*$/m,"monitor runner missing");
 assert.match(monitorY,/^\s*MONITOR_ALERT:\s*"1"\s*$/m,"GitHub issue alerting is not enabled");
-assert.match(monitorY,/ml371kl\.github\.io\/temp-zero-inode-838\/snapshot\.json/,"monitor must check the published Pages artifact, not a local file");
+assert.match(monitorY,/tzi-838\.pages\.dev\/snapshot\.json/,"monitor must check the published artifact over the network, not a local file");
 // Сторож продублирован ВНУТРИ ежечасного прогона: GitHub-планировщик отдаёт монитору 2–6 тиков из
 // ожидаемых, и единственный реальный инцидент (протухание >3ч ночью 21.07) пришёлся на несработавший
 // тик. Встроенный шаг не блокирует публикацию, но синхронизирует инцидент каждым прогоном.
@@ -134,9 +155,9 @@ assert.match(y,/^\s*issues:\s*write\s*(#.*)?$/m,"snapshot workflow needs issues:
   const inRunMonitor=y.slice(inRunMonitorAt,inRunMonitorAt+600);
   assert.match(inRunMonitor,/continue-on-error:\s*true/,"in-run monitor must never block publication");
   assert.match(inRunMonitor,/^\s*MONITOR_ALERT:\s*"1"\s*$/m,"in-run monitor must sync the incident issue");
-  // Сторож обязан стоять ПОСЛЕ деплоя и коммита: перенесённый выше, он каждый час сравнивал бы
-  // свежий кандидат со СТАРОЙ ещё-не-передеплоенной страницей и открывал/закрывал ложный инцидент.
-  assert.ok(inRunMonitorAt>y.match(/^\s*uses:\s*actions\/deploy-pages/m).index,"in-run monitor must run AFTER the Pages deploy");
+  // Сторож обязан стоять ПОСЛЕ публикации и коммита: перенесённый выше, он каждый час сравнивал бы
+  // свежий кандидат со СТАРЫМ ещё-не-переписанным объектом и открывал/закрывал ложный инцидент.
+  assert.ok(inRunMonitorAt>y.indexOf("Опубликовать снимок в R2"),"in-run monitor must run AFTER the R2 publish");
   assert.ok(inRunMonitorAt>y.indexOf("Сохранить снимок в репозиторий"),"in-run monitor must run AFTER the snapshot commit");
 }
 for(const asset of ["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs"])assert.ok(monitorScript.includes(`"${asset}"`),`external monitor does not check ${asset}`);

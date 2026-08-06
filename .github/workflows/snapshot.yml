@@ -16,11 +16,13 @@ on:
 
 permissions:
   contents: write   # коммит публичного снимка в репозиторий; raw datasets живут только в Actions Cache
-  pages: write      # публикация сайта
-  id-token: write   # требуется actions/deploy-pages
   issues: write     # встроенный сторож синхронизирует инцидент-issue каждым прогоном
+  # `pages: write` и `id-token: write` убраны вместе с развёртыванием GitHub Pages:
+  # данные теперь уезжают в R2, сайт публикуется отдельным site.yml в Cloudflare, и
+  # права на публикацию страницы этому прогону больше не нужны ни на секунду.
 
-# Развёртывание не отменяется на полпути: иначе можно оставить Pages в подвешенном состоянии.
+# Публикация не отменяется на полпути: снимок, доехавший в бакет наполовину, — это
+# страница, показывающая обрезанный JSON.
 concurrency:
   group: btc-21m-snapshot
   cancel-in-progress: false
@@ -28,13 +30,9 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    # 45, а не 30: публикация Pages ждёт до получаса (см. `timeout` у deploy-pages ниже),
-    # и при потолке в 30 раннер убивал бы прогон раньше, чем истекает ожидание — то есть
-    # ровно в том случае, ради которого ожидание и подняли.
-    timeout-minutes: 45
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    # Сборщику своих 8 минут хватает с запасом; 20 — это страховка узла, а не бюджет.
+    # Тридцать минут ожидания очереди GitHub Pages отсюда ушли вместе с самой очередью.
+    timeout-minutes: 20
     steps:
       # fetch-depth: 1. Публикация делает rebase на свежий tip ветки — полная история не нужна,
       # а полный клон дорожает каждый день: snapshot.json переписывается десятки раз в сутки.
@@ -134,9 +132,9 @@ jobs:
           # Гонка с параллельным пушем разрешается ДЕТЕРМИНИРОВАННО, а не ретраями: если origin
           # ушёл вперёд и там другой docs/snapshot.json, ребейз конфликтует на каждой попытке
           # одинаково (файл целиком переписывается), и три ретрая просто трижды падают. При этом
-          # правильный исход очевиден: побеждает снимок ЭТОГО прогона — он собран позже и уже
-          # опубликован на Pages шагом выше. Поэтому вместо ребейза мы каждый раз переносим свой
-          # файл поверх свежего origin (reset --soft + повторный add), что конфликтов не создаёт.
+          # правильный исход очевиден: побеждает снимок ЭТОГО прогона — он собран позже.
+          # Поэтому вместо ребейза мы каждый раз переносим свой файл поверх свежего origin
+          # (reset + повторный add), что конфликтов не создаёт.
           pushed=0
           for attempt in 1 2 3; do
             git fetch origin "$branch" || { sleep $((attempt*5)); continue; }
@@ -162,29 +160,45 @@ jobs:
             exit 1
           fi
 
-      # 8. САЙТ ПУБЛИКУЕТСЯ ОТСЮДА, а не коммитом выше.
-      #    Документация GitHub: «Commits pushed by a GitHub Actions workflow that uses the
-      #    GITHUB_TOKEN do not trigger a GitHub Pages build.» То есть при источнике Pages
-      #    «Deploy from a branch» коммит снимка НЕ пересобрал бы сайт: Action был бы зелёным,
-      #    данные легли бы в репозиторий, а страница вечно показывала бы старый снимок.
-      #    Поэтому источник Pages = «GitHub Actions», и развёртывание здесь явное.
-      - name: Настроить Pages
-        uses: actions/configure-pages@v5
-
-      - name: Загрузить артефакт сайта
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: docs
-
-      - name: Развернуть сайт
-        id: deployment
-        uses: actions/deploy-pages@v4
-        with:
-          # Тридцать минут вместо десяти по умолчанию. Десять — это не «столько занимает
-          # публикация», а потолок, за которым действие отменяет развёртывание; 6 августа
-          # очередь Pages переползла за него, и каждый час подряд прогон падал на публикации,
-          # которая при этом наполовину доезжала. Ждать дольше дешевле, чем ронять прогон.
-          timeout: 1800000
+      # 8. ДАННЫЕ ПУБЛИКУЮТСЯ ОТСЮДА — одним объектом в R2, а не публикацией сайта.
+      #    Раньше здесь стояло развёртывание GitHub Pages, и это связывало две частоты,
+      #    которым связываться незачем: снимок обновляется каждый час, код страницы —
+      #    раз в несколько дней. 6 августа очередь Pages встала, и вместе с публикацией
+      #    встали данные. Теперь страница живёт в Cloudflare Pages (проект tzi-838,
+      #    публикуется отдельным site.yml при изменении кода), а functions/snapshot.json.js
+      #    отдаёт этот объект с того же адреса, с которого страница его и просила.
+      #
+      #    curl --aws-sigv4, а не AWS CLI: R2 говорит по протоколу S3, подпись у curl
+      #    встроенная, и это на одну предустановленную зависимость меньше.
+      - name: Опубликовать снимок в R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          code=$(curl -sS -X PUT -o /tmp/r2-put.log -w '%{http_code}' \
+            --user "${R2_ACCESS_KEY_ID}:${R2_SECRET_ACCESS_KEY}" \
+            --aws-sigv4 "aws:amz:auto:s3" \
+            -H "Content-Type: application/json" \
+            --data-binary @docs/snapshot.json \
+            "${endpoint}/dash-838/snapshot.json")
+          if [ "$code" != "200" ]; then
+            echo "::error::R2 PUT вернул $code"; cat /tmp/r2-put.log; exit 1
+          fi
+          # Читаем обратно и сверяем побайтово. Успешный PUT говорит, что запрос принят,
+          # а вопрос, на который надо ответить, другой: лежит ли теперь в бакете именно
+          # тот снимок, который собрал этот прогон.
+          curl -sS --fail \
+            --user "${R2_ACCESS_KEY_ID}:${R2_SECRET_ACCESS_KEY}" \
+            --aws-sigv4 "aws:amz:auto:s3" \
+            -o /tmp/r2-readback.json \
+            "${endpoint}/dash-838/snapshot.json"
+          if ! cmp -s docs/snapshot.json /tmp/r2-readback.json; then
+            echo "::error::в R2 лежит не то, что опубликовали"; exit 1
+          fi
+          echo "опубликовано $(wc -c < docs/snapshot.json) байт, сверено побайтово"
 
       # 9. Встроенный сторож. Отдельный monitor.yml получает от GitHub-планировщика 2–6 тиков из
       #    ожидаемых 12/сутки и проспал единственный реальный инцидент (протухание >3ч ночью 21.07).
@@ -195,5 +209,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           MONITOR_ALERT: "1"
-          SNAPSHOT_URL: https://ml371kl.github.io/temp-zero-inode-838/snapshot.json
+          SNAPSHOT_URL: https://tzi-838.pages.dev/snapshot.json
         run: node scripts/monitor-live.mjs

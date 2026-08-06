@@ -6,7 +6,7 @@ import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
 import { policySuiteDigestV1, sha256, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
 
-const DEFAULT_URL="https://ml371kl.github.io/temp-zero-inode-838/snapshot.json";
+const DEFAULT_URL="https://tzi-838.pages.dev/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
 const PACKAGE_VERSION=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8")).version;
