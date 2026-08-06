@@ -6,3 +6,7 @@
 .sandbox/
 .notify/
 node_modules/
+
+# Локальный кэш wrangler: рабочее состояние публикатора, не код.
+.wrangler/
+site/
