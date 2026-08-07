@@ -3,6 +3,18 @@ import assert from "node:assert/strict";
 const y=readFileSync(new URL("../.github/workflows/snapshot.yml",import.meta.url),"utf8");
 const monitorY=readFileSync(new URL("../.github/workflows/monitor.yml",import.meta.url),"utf8");
 const monitorScript=readFileSync(new URL("./monitor-live.mjs",import.meta.url),"utf8");
+const notifyY=readFileSync(new URL("../.github/workflows/notify.yml",import.meta.url),"utf8");
+// Сбор данных живёт на VPS (systemd-таймер dash-838), а этот прогон выключен условием.
+// Инвариант сторожит не «выключенность» саму по себе, а то, что включение не пройдёт
+// незамеченным: два писателя в один docs/snapshot.json — это гонка и два разных ответа
+// на вопрос «какие сейчас данные». Возврат сюда обязан быть осознанным.
+assert.match(y,/^\s*if:\s*vars\.COLLECTOR\s*==\s*'github'\s*$/m,"прогон сборки обязан оставаться под условием: писатель должен быть один");
+// Уведомления будит коммит снимка, а не прогон сборки, которого больше не бывает.
+// Без этой проверки переезд сборщика молча выключил бы Telegram — ровно тот класс
+// поломки, который не виден ни в одном красном прогоне.
+assert.match(notifyY,/^\s*push:\s*$/m,"уведомления обязаны просыпаться на push");
+assert.match(notifyY,/^\s*- "docs\/snapshot\.json"\s*$/m,"уведомления обязаны следить за файлом снимка");
+assert.doesNotMatch(notifyY,/^\s*workflow_run:\s*$/m,"workflow_run сборки больше не наступает: этот триггер молчал бы вечно");
 assert.match(y,/cron:\s*"23 \* \* \* \*"/,"hourly schedule missing");
 assert.match(y,/actions\/checkout@v6/);
 assert.match(y,/actions\/setup-node@v6/);
