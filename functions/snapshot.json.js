@@ -48,7 +48,15 @@ export async function onRequestGet({ env, request }) {
   headers.set("cache-control", "no-store");
   // Метка публикации отдельным заголовком: по ней сторож отличает «страница не
   // обновилась» от «страница обновилась, но источники молчат», не разбирая тело.
-  if (object.uploaded) headers.set("x-snapshot-uploaded", object.uploaded.toISOString());
+  // Last-Modified, а не только собственный заголовок. Это стандартный признак возраста
+  // публикации, и его отсутствие — не мелочь: канарейка 839 определяет по нему, не встал ли
+  // публикатор, и без него отказывается выносить вердикт вовсе, чтобы остановившаяся
+  // публикация не пряталась за неполным заголовком. `writeHttpMetadata` его не пишет — она
+  // переносит только httpMetadata объекта, а время выгрузки лежит отдельным полем.
+  if (object.uploaded) {
+    headers.set("x-snapshot-uploaded", object.uploaded.toISOString());
+    headers.set("last-modified", object.uploaded.toUTCString());
+  }
 
   // При сработавшем `onlyIf` R2 возвращает объект без тела — это и есть 304.
   if (!("body" in object) || object.body === null) {
