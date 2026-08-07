@@ -798,13 +798,23 @@ async function fetchBitcoinDataMvrv(){
 // Держать его тёплым достаточно раз в сутки: ряд дневной, а каждый лишний опрос отнимался у
 // когортного слоя на том же хосте, которому нужно три запроса за раз из пятнадцати суточных.
 const MVRV_FALLBACK_REFETCH = 24*HOUR;
+// Пауза после НЕУДАЧНОЙ попытки. Без неё троттлинг превращался в усилитель: метка
+// ставится только на успехе, значит при отказе нога считалась «давно не обновлённой» и
+// переспрашивалась КАЖДЫЙ такт — то есть под 429 источник получал не один запрос в
+// сутки, а двадцать четыре, ровно тогда, когда он и так отказывает. Час — компромисс:
+// запасной путь не ждёт суток, но и не долбит.
+const MVRV_RETRY_AFTER_FAILURE = 1*HOUR;
 async function fetchBlockchainOnchain(){
   // Троттлится ровно одна нога из четырёх — та, у которой квота. Три остальные идут на
   // blockchain.info, где лимитов нет, и опрашиваются каждый такт, как и раньше: они кормят
   // решающие семьи, и притормаживать их заодно значило бы платить за чужую проблему.
   const prevPacket=previous?.datasets?.blockchain_onchain,prevMvrv=prevPacket?.data?.MVRV;
+  // Качаем, когда И суточный срок вышел, И пауза после прошлой попытки истекла.
+  // Метка попытки ставится независимо от исхода, метка успеха — только на успехе.
+  const dueBySchedule=legNeedsRefetch(prevPacket?.mvrv_fetched_at,MVRV_FALLBACK_REFETCH);
+  const retryAllowed=legNeedsRefetch(prevPacket?.mvrv_tried_at,MVRV_RETRY_AFTER_FAILURE);
   const reuseMvrv=Array.isArray(prevMvrv)&&prevMvrv.length>=180
-    &&!legNeedsRefetch(prevPacket?.mvrv_fetched_at,MVRV_FALLBACK_REFETCH);
+    &&!(dueBySchedule&&retryAllowed);
   const tasks=await Promise.all([
   reuseMvrv?{ok:true,label:"mvrv",value:prevMvrv}:settled("mvrv",()=>fetchBitcoinDataMvrv()),
   settled("addresses",()=>fetchBlockchainChart("n-unique-addresses","5years",{minPoints:500})),
@@ -814,7 +824,8 @@ async function fetchBlockchainOnchain(){
   // Метка ставится только когда ногу ДЕЙСТВИТЕЛЬНО скачали. Ставить её после неудачи значило
   // бы отодвинуть следующую попытку на сутки: один 429 стоил бы дня без запасного пути.
   const mvrvFetchedAt=reuseMvrv?prevPacket.mvrv_fetched_at:(tasks[0]?.ok?iso(NOW):prevPacket?.mvrv_fetched_at??null);
-  return{data,observed_at:q.observed_at,mvrv_fetched_at:mvrvFetchedAt,source:"Blockchain.com · bitcoin-data.com",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitcoindata],partial:errors.length>0,errors};}
+  const mvrvTriedAt=reuseMvrv?(prevPacket?.mvrv_tried_at??null):iso(NOW);
+  return{data,observed_at:q.observed_at,mvrv_fetched_at:mvrvFetchedAt,mvrv_tried_at:mvrvTriedAt,source:"Blockchain.com · bitcoin-data.com",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitcoindata],partial:errors.length>0,errors};}
 
 function mockWalk(days,start,drift,vol,seed=1){let x=start,s=seed>>>0,out=[];for(let i=days-1;i>=0;i--){s=(1664525*s+1013904223)>>>0;const u=s/4294967296-.5;x=Math.max(.0001,x*(1+drift+u*vol));out.push({t:NOW-i*DAY,v:x});}return out;}
 function makeMock(){
