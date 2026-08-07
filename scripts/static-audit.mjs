@@ -140,4 +140,34 @@ const mdBody=html.slice(mdIdx,html.indexOf("function",mdIdx+10));
 assert.ok(mdBody.indexOf("esc(")>=0&&mdBody.indexOf("esc(")<mdBody.indexOf("<b>"),"mdRender must escape before markdown substitution");
 // The page must re-render periodically so freshness captions and the contractual age gate stay honest.
 assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-render missing");
+
+// Загрузчик, переданный в loadDataset по имени, вызывается БЕЗ аргументов — если он сам
+// не попросил кэш через cacheAware. Проверка появилась после того, как обратное стоило
+// суток источнику золота: `loader(cached)` отдавал кэш всем подряд первым позиционным
+// аргументом, а `fetchPaxgHistory(days=420)` ждёт там число. Он получил объект,
+// `NOW - {}*DAY` дал NaN, цикл не выполнился ни разу — и вместо внятного отказа вышло
+// «PAXG history too short: 0» при полностью живом источнике. Отказ был тихим: снимок
+// продолжал публиковаться на кэше.
+//
+// Проверяется СИГНАТУРА, а не намерение: любой будущий загрузчик с параметром по
+// умолчанию попадёт в ту же ловушку, и покраснеет здесь, а не через сутки на витрине.
+{
+  // Механизм обязан оставаться ЯВНЫМ. Пока вызов был безусловным, кэш доставался всем.
+  assert.match(collector,/await\s*\(\s*cacheAware\s*\?\s*loader\(cached\)\s*:\s*loader\(\)\s*\)/,
+    "кэш обязан передаваться загрузчику только по явному cacheAware, а не всем подряд");
+  // А тот, кто его просит, обязан ждать его первым аргументом — иначе кэш снова займёт
+  // чужое место, только теперь в одном загрузчике вместо всех.
+  // Окно не имеет права перепрыгнуть в соседний вызов, иначе сообщение назовёт чужой
+  // источник и отправит читателя чинить не то место.
+  const optedIn=[...collector.matchAll(/loadDataset\(\s*"([a-z_]+)"((?:(?!loadDataset\()[\s\S]){0,600}?)cacheAware:\s*true/g)];
+  assert.ok(optedIn.length>=1,"ни один источник не просит кэш — проверка ниже прошла бы впустую");
+  for(const [call,key] of optedIn){
+    const loader=/,\s*(fetch[A-Za-z0-9]+)\s*,/.exec(call);
+    assert.ok(loader,`"${key}": загрузчик не разобран`);
+    const signature=new RegExp(`async function ${loader[1]}\\(([^)]*)\\)`).exec(collector);
+    assert.ok(signature,`"${key}": загрузчик ${loader[1]} объявлен не здесь`);
+    assert.match(signature[1].trim(),/^cached\b/,
+      `"${key}" просит cacheAware, но ${loader[1]}(${signature[1].trim()}) ждёт первым аргументом не кэш`);
+  }
+}
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);

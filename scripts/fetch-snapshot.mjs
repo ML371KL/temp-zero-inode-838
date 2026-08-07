@@ -336,7 +336,7 @@ function legNeedsRefetch(prevFetchedAt,interval,now=NOW){
  */
 function lastAttemptAt(packet){return packet?.probed_at||packet?.fetched_at||null;}
 
-async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true,minFetchInterval=0}={}){
+async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true,minFetchInterval=0,cacheAware=false}={}){
   const cached=oldDataset(key,ttl,maxObservedAge);
   // Пропуск опроса — не то же самое, что провал опроса. Данные берутся из кэша, состояние
   // остаётся "ok", а `fetched_at` показывает НАСТОЯЩЕЕ время последней загрузки, и карточка
@@ -361,9 +361,13 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
   // пропуске и живёт рядом с данными, а `fetched_at` остаётся честным временем загрузки.
   if(minFetchInterval>0&&cached&&!legNeedsRefetch(lastAttemptAt(cached),minFetchInterval)){reuse(cached);return;}
   try{
-    // Загрузчик получает кэш, чтобы иметь возможность спросить у источника только «есть ли
-    // новое» и вернуть UNCHANGED, не выкачивая ряды заново.
-    const payload=await loader(cached);
+    // Кэш передаётся ТОЛЬКО тем, кто его попросил. Первая редакция отдавала его всем
+    // подряд первым позиционным аргументом — и сломала единственный загрузчик, у
+    // которого первый аргумент занят: `fetchPaxgHistory(days=420)` получил вместо числа
+    // объект, `NOW - {}*DAY` дал NaN, цикл не выполнился ни разу, и источник золота лёг
+    // с сообщением «history too short: 0» — ровно то, чего от него было не ожидать.
+    // Отказ вышел тихим: снимок продолжал публиковаться на кэше со статусом stale.
+    const payload=await (cacheAware?loader(cached):loader());
     if(payload===UNCHANGED){
       // Нечего переиспользовать — значит загрузчик соврал или кэш успел протухнуть между
       // двумя проверками. Молча оставлять источник пустым нельзя: это тот самый случай,
@@ -1185,7 +1189,7 @@ async function collect(){
   // такт, когда у источника сменился день. Суточный расход: 8 разведок + 3 на одну загрузку
   // + 1 на запасной MVRV = 12 из 15, с запасом на повтор при сбое. Отставание от появления
   // новой точки — не больше трёх часов (было двенадцать при фиксированном интервале).
-  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:3*HOUR});
+  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:3*HOUR,cacheAware:true});
 }
 
 function metric(def){return{
