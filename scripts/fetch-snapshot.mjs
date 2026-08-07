@@ -306,7 +306,27 @@ function oldDataset(key,ttl,maxObservedAge=ttl){
   const fetched=new Date(old.fetched_at||previous.generated_at||0).getTime();
   return NOW-fetched<=ttl&&validObservationAge(old,maxObservedAge)?old:null;
 }
-async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true}={}){
+async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true,minFetchInterval=0}={}){
+  // Источник с квотой на IP не обязан опрашиваться каждый такт, если его ряд дневной.
+  // До 7 августа это сходилось само: сбор жил на раннерах GitHub, каждый прогон приходил
+  // с нового адреса и получал свежую квоту. С переездом на сервер адрес стал один, и
+  // бесплатный тариф bitcoin-data.com — 10 запросов в час, 15 в сутки — начал кончаться
+  // на четвёртом такте: 4 запроса за прогон против 15 в сутки это 96 против 15.
+  //
+  // Пропуск опроса — не то же самое, что провал опроса. Данные берутся из кэша, состояние
+  // остаётся "ok", а `fetched_at` показывает НАСТОЯЩЕЕ время последней загрузки, и карточка
+  // честно говорит «загрузка N ч назад». Условие свежести наблюдения то же самое, что у
+  // запасного пути: пропуск не может подсунуть ряд старше, чем позволено провалу.
+  if(minFetchInterval>0){
+    const fresh=oldDataset(key,minFetchInterval,maxObservedAge);
+    if(fresh){
+      datasets[key]=fresh;
+      const u=fresh.source_url||SOURCE_URLS[source],urls=uniqueHttps(fresh.source_urls?.length?fresh.source_urls:[u]);
+      sourceStates[key]={state:"ok",source:fresh.source||source,url:u,urls,observed_at:fresh.observed_at,fetched_at:fresh.fetched_at,error:null};
+      if(!decisionRelevant)sourceStates[key].decision_relevant=false;
+      return;
+    }
+  }
   try{
     const payload=await loader();
     const packet=payload?.data!==undefined&&payload?.observed_at?payload:{data:payload,observed_at:iso(NOW)};
@@ -1070,7 +1090,12 @@ async function collect(){
     // Coin Metrics is enrichment only: any surviving series is accepted, total failure costs
     // MVRV/flows/activity/miners and nothing else.
     loadDataset("coinmetrics","coinmetrics",4*DAY,fetchCoinMetrics,x=>CM_METRICS.some(k=>x?.[k]?.length>=180),{maxObservedAge:4*DAY}),
-    loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY}),
+    // Раз в 4 часа, а не каждый такт. Один из четырёх его лучей — MVRV с bitcoin-data.com,
+    // и это ГОЛОСУЮЩИЙ запасной путь для Coin Metrics: он обязан получать квоту первым и
+    // не имеет права остаться без неё из-за теневого слоя. Остальные три луча —
+    // blockchain.info без лимитов, но у всех четырёх ряды дневные, и опрашивать их
+    // двадцать четыре раза в сутки было тратой без выигрыша: точка появляется одна.
+    loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY,minFetchInterval:4*HOUR}),
     // 7 days: publication lag (1-2d) + a long US-holiday weekend must not zero out the family.
     loadDataset("etf","theblock",7*DAY,fetchEtfFlows,x=>validateEtfSeries(x,7*DAY),{maxObservedAge:7*DAY}),
     loadDataset("stablecoins","defillama",4*DAY,async()=>{const s=normalizeStableHistory(await request("https://stablecoins.llama.fi/stablecoincharts/all"));return{data:s,observed_at:s.length?iso(last(s).t):iso(NOW)};},x=>x?.length>100,{maxObservedAge:4*DAY}),
@@ -1084,7 +1109,12 @@ async function collect(){
   ]);
   // bitcoin-data.com — ПОСЛЕ основного пакета: голосующий MVRV-fallback (blockchain_onchain)
   // ходит на тот же хост, и теневой слой не имеет права конкурировать с ним за free-tier-лимит.
-  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false});
+  //
+  // Раз в 12 часов, и это самый дорогой опрос из всех: три запроса за раз при квоте 15 в
+  // сутки на IP. Два опроса — шесть запросов, плюс шесть у MVRV выше = двенадцать из
+  // пятнадцати, с запасом на повтор при сбое. Ряды здесь дневные (SOPR, LTH-SOPR,
+  // себестоимость STH), точка появляется одна за сутки, и чаще спрашивать нечего.
+  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:12*HOUR});
 }
 
 function metric(def){return{
