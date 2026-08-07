@@ -269,7 +269,7 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
   // против 15. Две функции ниже — вся арифметика, на которой держится экономия, и обе
   // ошибаются молча: неверное «нового нет» замораживает ряд навсегда, ни разу не покраснев.
   {
-    const {probeIsOlderOrSame,legNeedsRefetch}=await import("./fetch-snapshot.mjs");
+    const {probeIsOlderOrSame,legNeedsRefetch,lastAttemptAt}=await import("./fetch-snapshot.mjs");
     const cached="2026-08-05T00:00:00.000Z";
     assert.equal(probeIsOlderOrSame("2026-08-05",cached),true,"тот же день — качать нечего");
     assert.equal(probeIsOlderOrSame("2026-08-04",cached),true,"источник откатился назад — тоже не повод качать");
@@ -290,6 +290,18 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
     // Отсутствие метки означает «никогда не качали»: холодный старт обязан качать, а не ждать.
     for(const bad of [undefined,null,"","не дата"])
       assert.equal(legNeedsRefetch(bad,DAY_MS,now),true,`без метки времени (${JSON.stringify(bad)}) обязаны качать`);
+
+    // Интервал отсчитывается от последнего ОБРАЩЕНИЯ, а не от последней удачной загрузки.
+    // Разведка, ответившая «нового нет», обращением считается: если считать от загрузки, то
+    // через интервал после неё порог оказывается пройден навсегда и разведка уходит в
+    // источник каждый такт — 21 запрос в сутки вместо восьми, и квота кончается к обеду.
+    const packet={fetched_at:"2026-08-07T00:00:00Z",probed_at:"2026-08-07T09:00:00Z"};
+    assert.equal(lastAttemptAt(packet),"2026-08-07T09:00:00Z","метка разведки обязана перебивать метку загрузки");
+    assert.equal(lastAttemptAt({fetched_at:"2026-08-07T00:00:00Z"}),"2026-08-07T00:00:00Z","без разведки считаем от загрузки");
+    assert.equal(lastAttemptAt(null),null,"нечего считать — значит обращаемся");
+    const t3=3*3600e3,probedAt=Date.parse("2026-08-07T09:00:00Z");
+    assert.equal(legNeedsRefetch(lastAttemptAt(packet),t3,probedAt+t3-1),false,"до истечения интервала со времени разведки — молчим");
+    assert.equal(legNeedsRefetch(lastAttemptAt(packet),t3,probedAt+t3),true,"после — снова разведываем");
   }
   console.log("Fallback contract tests OK");
 }finally{globalThis.fetch=originalFetch;globalThis.setTimeout=originalSetTimeout;}

@@ -328,6 +328,14 @@ function legNeedsRefetch(prevFetchedAt,interval,now=NOW){
   return !Number.isFinite(t)||now-t>=interval;
 }
 
+/**
+ * Когда к источнику ОБРАЩАЛИСЬ в последний раз — неважно, чем обращение кончилось.
+ * Разведка, ответившая «нового нет», обращением считается: если отсчитывать интервал от
+ * последней удачной ЗАГРУЗКИ, то через интервал после неё порог оказывается пройден
+ * навсегда, и разведка уходит в источник каждый такт вместо раза в три часа.
+ */
+function lastAttemptAt(packet){return packet?.probed_at||packet?.fetched_at||null;}
+
 async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true,minFetchInterval=0}={}){
   const cached=oldDataset(key,ttl,maxObservedAge);
   // Пропуск опроса — не то же самое, что провал опроса. Данные берутся из кэша, состояние
@@ -345,7 +353,13 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
   // прогон приходил с нового адреса за свежей квотой. С переездом на один сервер бесплатный
   // тариф bitcoin-data.com — 10 запросов в час, 15 в сутки — начал кончаться на четвёртом
   // такте: 4 запроса за прогон против 15 в сутки это 96 против 15.
-  if(minFetchInterval>0&&cached&&!legNeedsRefetch(cached.fetched_at,minFetchInterval)){reuse(cached);return;}
+  //
+  // Отсчёт идёт от последней ПОПЫТКИ, а не от последней удачной загрузки. Иначе схема
+  // разваливается на второй же день: разведка отвечает «нового нет», `fetched_at` остаётся
+  // старым, и через три часа порог оказывается пройден НАВСЕГДА — разведка пошла бы каждый
+  // такт, то есть 21 запрос в сутки вместо восьми. `probed_at` ставится только при таком
+  // пропуске и живёт рядом с данными, а `fetched_at` остаётся честным временем загрузки.
+  if(minFetchInterval>0&&cached&&!legNeedsRefetch(lastAttemptAt(cached),minFetchInterval)){reuse(cached);return;}
   try{
     // Загрузчик получает кэш, чтобы иметь возможность спросить у источника только «есть ли
     // новое» и вернуть UNCHANGED, не выкачивая ряды заново.
@@ -355,7 +369,8 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
       // двумя проверками. Молча оставлять источник пустым нельзя: это тот самый случай,
       // когда «всё в порядке» и «данных нет» выглядят одинаково.
       if(!cached)throw new Error("loader reported no change with nothing cached");
-      reuse(cached);
+      // Метка попытки — чтобы следующая разведка пришла через интервал, а не следующим тактом.
+      reuse({...cached,probed_at:iso(NOW)});
       return;
     }
     const packet=payload?.data!==undefined&&payload?.observed_at?payload:{data:payload,observed_at:iso(NOW)};
@@ -1786,7 +1801,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
