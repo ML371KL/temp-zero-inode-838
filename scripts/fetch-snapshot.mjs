@@ -27,7 +27,7 @@ import { riskOffConfirmationDeferredV2 } from "../docs/policy-v2-candidate.mjs";
 // по started_at). Отсутствие файла — штатный режим без графта.
 let MONITOR_GRAFT_V1=null;
 try{MONITOR_GRAFT_V1=JSON.parse(readFileSync(new URL("../docs/monitor-graft-v1.json",import.meta.url),"utf8"));}catch{}
-import { boundedPublicHistoryV1, compactHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
+import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
 const VERSION = "2.13.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
@@ -1808,7 +1808,7 @@ function compute(){
   // Байтовый бюджет истории: строки растут по мере эволюции схемы, и счётный ретеншен один
   // не удерживает проекцию файла под жёстким лимитом — публикация вставала намертво
   // (падения 02:50–04:50 21.07, класс дедлока c913472). Жертвуем самыми старыми дневными строками.
-  const boundedHistory=boundedPublicHistoryV1(history);
+  const boundedHistory=boundedPublicHistoryV1(history,{hourlyCut:recentCut});
   if(boundedHistory.trimmed)console.error(`history byte budget: dropped ${boundedHistory.trimmed} oldest rows`);
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
@@ -1848,7 +1848,12 @@ function atomicJson(path,value){
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   await collect();
   const snapshot=compute();
-  const publicSnapshot={...snapshot,history:(snapshot.history||[]).map(({raw,...h})=>h)};
+  // Публикуемая форма строки — одна на весь файл (см. publicHistoryEntryV1): `raw` режется,
+  // кроме `oi_by_venue` внутри почасового окна. Именно это делает накопленный ряд OI
+  // самовосстанавливающимся из опубликованного снимка — свойство, которого не хватило
+  // 7 августа, когда сбор сменил машину и семидневная база исчезла вместе с кэшем Actions.
+  const publicHourlyCut=NOW-HISTORY_HOURLY_DAYS*DAY;
+  const publicSnapshot={...snapshot,history:(snapshot.history||[]).map(h=>publicHistoryEntryV1(h,{hourlyCut:publicHourlyCut}))};
   delete publicSnapshot.datasets;
   atomicJson(STATE,snapshot);
   atomicJson(OUT,publicSnapshot);

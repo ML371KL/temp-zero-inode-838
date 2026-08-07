@@ -6,11 +6,55 @@ import {
   validObservationAge, percentChangeCommonVenues, classifyIntegrity, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore,
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request
 } from "./fetch-snapshot.mjs";
-import { compactHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
+import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const fail=[];
 const eq=(a,b,msg)=>{if(JSON.stringify(a)!==JSON.stringify(b))fail.push(`${msg}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`)};
 const ok=(x,msg)=>{if(!x)fail.push(msg)};
+
+// Накопленный ряд OI обязан переживать смену машины.
+//
+// Это регрессия на потерю 7 августа: `oi_by_venue` — единственный ряд, который проект
+// копит сам, а не перекачивает у провайдера, и он публиковался вырезанным. Жил он в
+// .state/cache.json, который в .gitignore и между прогонами ехал кэшем Actions; переезд
+// сбора на другую машину стёр семидневную базу и выбил голосующую карточку oi_quality.
+// Проверяется поэтому не «функция что-то возвращает», а ровно то свойство, которого не
+// хватило: опубликованного снимка ДОСТАТОЧНО, чтобы поднять ряд с нуля.
+{
+  const cut = Date.parse("2026-08-01T00:00:00.000Z");
+  const byVenue = { Deribit: 723376140, OKX: 1952221508 };
+  const fresh = { t:"2026-08-05T11:00:00.000Z", strategic:10, tactical:5, price:70000,
+    raw:{ oi_usd:2675597648, oi_by_venue:byVenue, premium_bps:3, stable_supply:1e11, etf_20d:5e8 } };
+  const old_  = { ...fresh, t:"2026-07-20T11:00:00.000Z" };
+
+  const pubFresh = publicHistoryEntryV1(fresh, { hourlyCut: cut });
+  // Первой — самая грубая проверка: OI вообще доехал. Без неё вырезанный raw роняет
+  // прогон на `in` вместо того, чтобы назвать причину.
+  ok(pubFresh.raw?.oi_by_venue, "OI не опубликован — накопленный ряд снова не переживёт смену машины");
+  eq(pubFresh.raw, { oi_by_venue: byVenue }, "публикуется только oi_by_venue, остальное из raw режется");
+  eq(pubFresh.price, 70000, "остальные поля строки не трогаются");
+  ok(!("oi_usd" in (pubFresh.raw || {})), "внутренние входы не утекают в публикацию");
+
+  // За почасовым окном строки прорежены до одной в сутки, и базы из них не считаются.
+  ok(!("raw" in publicHistoryEntryV1(old_, { hourlyCut: cut })), "вне почасового окна OI не публикуется");
+  ok("oi_by_venue" in fresh.raw, "публикация не мутирует вход");
+  ok(!("raw" in publicHistoryEntryV1({ t:fresh.t, price:1 }, { hourlyCut: cut })), "строка без raw остаётся без него");
+
+  // Учёт байтов и публикация — одна и та же форма. Разъедутся — бюджет начнёт считать не то,
+  // что уезжает в файл, и жёсткий кап снова упрётся в дедлок публикации (падения 21.07).
+  //
+  // Проверка построена так, чтобы РАЗЪЕЗД был единственным способом её пройти: бюджет
+  // выставлен ровно в размер строк БЕЗ OI. Учёт по публикуемой форме обязан увидеть
+  // перебор и выбросить строки; учёт по урезанной форме решит, что всё влезло.
+  const rows = [1, 2, 3, 4].map(i => ({ ...fresh, t: `2026-08-0${i}T11:00:00.000Z` }));
+  const strippedTotal = rows.reduce((a, r) => a + jsonBytesV1((({ raw, ...p }) => p)(r)) + 1, 1);
+  const publishedTotal = rows.reduce((a, r) => a + jsonBytesV1(publicHistoryEntryV1(r, { hourlyCut: cut })) + 1, 1);
+  ok(publishedTotal > strippedTotal, "публикуемая строка обязана быть тяжелее урезанной — иначе проверка пуста");
+  const tight = boundedPublicHistoryV1(rows, { budget: strippedTotal, minRows: 1, hourlyCut: cut });
+  ok(tight.trimmed > 0, "бюджет считает не публикуемую форму: перебор не замечен");
+  const roomy = boundedPublicHistoryV1(rows, { budget: publishedTotal, minRows: 1, hourlyCut: cut });
+  eq(roomy.trimmed, 0, "при бюджете ровно в публикуемый размер выбрасывать нечего");
+}
 
 // Public history is a compact explanatory view. Immutable policy metadata belongs at the
 // snapshot root, while the exact forward hash chain belongs in monitoring.decision_log.

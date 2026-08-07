@@ -30,6 +30,37 @@ export function compactHistoryEntryV1(entry) {
 
 export const jsonBytesV1 = value => Buffer.byteLength(JSON.stringify(value));
 
+// Форма ПУБЛИКУЕМОЙ строки истории. Одна функция и для байтового учёта, и для самой
+// публикации — иначе они разъедутся, как уже разъезжались дважды в этом файле.
+//
+// `raw` — внутренние входы прогона, и целиком он в разы больше самой строки; поэтому
+// публикация его резала. Но вместе с ним резался `oi_by_venue` — почасовой открытый
+// интерес по площадкам, единственный ряд, который проект копит САМ и не может
+// перекачать у провайдера. Он жил ровно в одном месте: в `.state/cache.json`, который
+// лежит в .gitignore и между прогонами переносился кэшем Actions.
+//
+// 7 августа сбор переехал на VPS, кэш Actions на другую машину не поехал, сборщик
+// честно откатился на опубликованный снимок — а там этого поля нет. Семидневная база
+// исчезла, и карточка «Качество движения · цена × OI» ушла в «история накапливается»,
+// забрав с собой одну из двадцати голосующих карточек и тактическое покрытие с 1.0 до
+// 0.92. Записи удалось достать из ещё живого кэша Actions, но второй раз доставать
+// будет неоткуда.
+//
+// Поэтому OI теперь публикуется — и ряд лечится сам из опубликованного артефакта на
+// любой машине, без переноса состояния и без чьего-либо участия. Платим за это только
+// внутри почасового окна: дальше него строки прорежены до одной в сутки, а базы, которые
+// из них считаются, — семидневная и суточная — целиком лежат внутри окна. Цена замерена
+// на живом снимке: 118 байт на строку, ~41 КБ на 14 суток при бюджете истории в 1 МБ.
+export function publicHistoryEntryV1(entry, { hourlyCut = null } = {}) {
+  if (!entry || typeof entry !== "object") return entry;
+  const { raw, ...rest } = entry;
+  const byVenue = raw?.oi_by_venue;
+  if (!byVenue) return rest;
+  const t = Date.parse(entry.t);
+  if (hourlyCut !== null && Number.isFinite(t) && t < hourlyCut) return rest;
+  return { ...rest, raw: { oi_by_venue: byVenue } };
+}
+
 // Детальные входы решения (`daily[].input_summary`, ~2.3 КБ) нужны для аудита СВЕЖИХ решений;
 // на 370-дневном окне они дают ~0.87 МБ и в одиночку пробивают кап файла. NAV-серия обязана
 // покрывать 365 дней (окна R1/R2/R3 и отставки), а подробные входы — нет: их долгосрочный якорь —
@@ -63,9 +94,13 @@ export function pruneDailyInputSummaryV1(daily, { now = Date.now(), keepDays = D
 // + non-history base ≈ 0.31 MB → ~1.88 MB steady-state without history. 1.0 MB history budget keeps
 // ~0.1 MB of slack at every limit simultaneously; a larger budget re-opens the deadlock dead zone.
 export const HISTORY_BYTE_BUDGET = 1_000_000;
-export function boundedPublicHistoryV1(history, { budget = HISTORY_BYTE_BUDGET, minRows = 48 } = {}) {
+export function boundedPublicHistoryV1(history, { budget = HISTORY_BYTE_BUDGET, minRows = 48, hourlyCut = null } = {}) {
   const rows = [...(history || [])];
-  const rowBytes = rows.map(h => { const { raw, ...p } = h; return jsonBytesV1(p) + 1; });
+  // Мерить обязано ровно ту форму, которая уедет в файл, — см. publicHistoryEntryV1.
+  // Раньше здесь стояло `const {raw,...p}=h`, и это совпадало с публикацией; теперь
+  // публикация оставляет OI внутри почасового окна, и повтор правила здесь означал бы
+  // бюджет, считающий не то, что публикуется.
+  const rowBytes = rows.map(h => jsonBytesV1(publicHistoryEntryV1(h, { hourlyCut })) + 1);
   let total = rowBytes.reduce((a, b) => a + b, 1);
   let drop = 0;
   while (rows.length - drop > minRows && total > budget) { total -= rowBytes[drop]; drop++; }
