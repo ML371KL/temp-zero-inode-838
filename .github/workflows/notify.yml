@@ -74,5 +74,4 @@ jobs:
           NEXUS_EVENTS_URL: ${{ vars.NEXUS_EVENTS_URL }}
           NEXUS_SOURCE_ID: "838"
           NEXUS_INGEST_TOKEN: ${{ secrets.NEXUS_INGEST_TOKEN }}
-          NEXUS_SITES_TOKEN: ${{ secrets.NEXUS_SITES_TOKEN }}
         run: node scripts/notify.mjs
