@@ -1,0 +1,86 @@
+name: Достать внутренний кэш сборщика из Actions
+
+# Одноразовый спасатель, а не часть конвейера. Запускается только руками.
+#
+# Внутреннее состояние сборщика (`.state/cache.json`) в git не лежит — оно в .gitignore, —
+# и пока сбор жил на раннерах, между прогонами его переносил `actions/cache`. Когда сбор
+# переехал на VPS, состояние осталось здесь: на другую машину кэш Actions не ездит.
+#
+# Потеря не пустая. В опубликованный снимок история попадает БЕЗ поля `raw`
+# (`publicSnapshot` его вырезает), а именно в нём лежит `oi_by_venue` — почасовой
+# открытый интерес по площадкам, который проект копит сам и из которого считается
+# карточка «Качество движения · цена × OI» с базой в семь суток. На VPS сборщик
+# честно откатился на опубликованный снимок, истории OI там нет, и карточка ушла
+# в «история накапливается».
+#
+# Этот воркфлоу ничего не чинит сам: он достаёт последний кэш и отдаёт артефактом,
+# чтобы записи можно было перенести в состояние на сервере. Восстанавливаются
+# НАСТОЯЩИЕ наблюдения, записанные этим же конвейером, а не выдуманные значения.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_key:
+        description: Точный ключ кэша (btc21m-state-main-<run_id>)
+        required: true
+
+permissions:
+  contents: read
+  actions: write   # cache/restore обращается к API кэшей
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Восстановить кэш состояния
+        id: restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .state/cache.json
+          key: ${{ inputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Показать, что достали
+        run: |
+          set -euo pipefail
+          ls -la .state/
+          node -e '
+            const s = JSON.parse(require("fs").readFileSync(".state/cache.json", "utf8"));
+            const h = s.history || [];
+            const oi = h.filter(x => x?.raw?.oi_by_venue);
+            const t = oi.map(x => Date.parse(x.t)).sort((a, b) => a - b);
+            const f = v => new Date(v).toISOString().slice(0, 16);
+            console.log("снимок состояния:", s.generated_at);
+            console.log("записей истории:", h.length, "· с oi_by_venue:", oi.length);
+            if (t.length) console.log("глубина OI:", f(t[0]), "→", f(t.at(-1)),
+              "=", ((t.at(-1) - t[0]) / 86400000).toFixed(2), "суток");
+          '
+
+      # Только история: датасеты в артефакте не нужны (сервер их давно перекачал сам),
+      # а весят они больше всего остального вместе взятого.
+      - name: Оставить только историю
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const s = JSON.parse(fs.readFileSync(".state/cache.json", "utf8"));
+            const rows = (s.history || [])
+              .filter(x => x?.raw?.oi_by_venue)
+              .map(x => ({ t: x.t, raw: x.raw }));
+            fs.writeFileSync("oi-history.json", JSON.stringify(
+              { source: "actions-cache", cache_key: process.env.KEY, generated_at: s.generated_at, rows }));
+            console.log("строк на выгрузку:", rows.length);
+          '
+        env:
+          KEY: ${{ inputs.cache_key }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oi-history
+          path: oi-history.json
+          retention-days: 1
