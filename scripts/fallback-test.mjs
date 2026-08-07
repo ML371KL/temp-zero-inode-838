@@ -263,5 +263,33 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
   assert.equal(eSx.spliced,0);
   mode="cftc";const c=await fetchCftc();assert.equal(c.partial,true);assert.match(c.source,/CSV/);assert.equal(c.data.length,24);
   mode="derivatives";const d=await fetchDerivatives();assert.equal(d.partial,true);assert.equal(d.data.funding.length,1);assert.equal(d.data.funding[0].venue,"Kraken Futures");assert.equal(d.data.funding[0].rate8h,.00008,"absolute Kraken funding * markPrice * 8");assert.equal(d.data.funding[0].oiUsd,2e9);assert.equal(d.data.basisSource,"Kraken Futures");assert.ok(Number.isFinite(d.data.basis));
+  // --- экономия квоты bitcoin-data.com (10 запросов в час, 15 в сутки на IP) -------------
+  // Пока сбор жил на раннерах GitHub, каждый прогон приходил с нового адреса и квота была
+  // как бы бесконечной. С переездом на один сервер расход стал виден: 96 запросов в сутки
+  // против 15. Две функции ниже — вся арифметика, на которой держится экономия, и обе
+  // ошибаются молча: неверное «нового нет» замораживает ряд навсегда, ни разу не покраснев.
+  {
+    const {probeIsOlderOrSame,legNeedsRefetch}=await import("./fetch-snapshot.mjs");
+    const cached="2026-08-05T00:00:00.000Z";
+    assert.equal(probeIsOlderOrSame("2026-08-05",cached),true,"тот же день — качать нечего");
+    assert.equal(probeIsOlderOrSame("2026-08-04",cached),true,"источник откатился назад — тоже не повод качать");
+    assert.equal(probeIsOlderOrSame("2026-08-06",cached),false,"появился новый день — обязаны выкачать ряды");
+    // Сравнение идёт по календарным дням: точка за 6 августа остаётся точкой за 6 августа,
+    // в котором бы часу её ни опубликовали.
+    assert.equal(probeIsOlderOrSame("2026-08-06T23:59:59Z",cached),false,"время внутри дня не должно менять решение");
+    // Нераспознанный ответ — НЕ «нового нет»: смена формата у провайдера обязана привести к
+    // загрузке (и, если та не пройдёт, к честному отказу), а не к вечному молчанию.
+    for(const bad of [undefined,null,"","мусор",{}])
+      assert.equal(probeIsOlderOrSame(bad,cached),false,`неразобранный ответ разведки (${JSON.stringify(bad)}) не имеет права считаться «нового нет»`);
+    assert.equal(probeIsOlderOrSame("2026-08-06",null),false,"без кэша сравнивать не с чем — качаем");
+
+    const now=Date.parse("2026-08-07T12:00:00Z"),DAY_MS=864e5;
+    assert.equal(legNeedsRefetch("2026-08-07T06:00:00Z",DAY_MS,now),false,"шесть часов назад — рано");
+    assert.equal(legNeedsRefetch("2026-08-06T11:00:00Z",DAY_MS,now),true,"больше суток назад — пора");
+    assert.equal(legNeedsRefetch("2026-08-06T12:00:00Z",DAY_MS,now),true,"ровно сутки — граница включительно");
+    // Отсутствие метки означает «никогда не качали»: холодный старт обязан качать, а не ждать.
+    for(const bad of [undefined,null,"","не дата"])
+      assert.equal(legNeedsRefetch(bad,DAY_MS,now),true,`без метки времени (${JSON.stringify(bad)}) обязаны качать`);
+  }
   console.log("Fallback contract tests OK");
 }finally{globalThis.fetch=originalFetch;globalThis.setTimeout=originalSetTimeout;}

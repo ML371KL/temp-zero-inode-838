@@ -306,29 +306,58 @@ function oldDataset(key,ttl,maxObservedAge=ttl){
   const fetched=new Date(old.fetched_at||previous.generated_at||0).getTime();
   return NOW-fetched<=ttl&&validObservationAge(old,maxObservedAge)?old:null;
 }
+// Ответ загрузчика «у источника нет ничего нового». Это НЕ отказ: данные остаются те же,
+// состояние — "ok", запрос к источнику не потрачен. Нужен там, где квота на запросы дороже
+// самих данных.
+const UNCHANGED = Symbol("dataset unchanged");
+
+/**
+ * Разведка сказала «новее нет»? Сравниваются КАЛЕНДАРНЫЕ дни, а не метки времени: ряд
+ * дневной, и точка за 6 августа остаётся точкой за 6 августа, в котором бы часу её ни
+ * опубликовали. Нераспознанный ответ разведки не считается «нет нового» — иначе сломанный
+ * формат заморозил бы ряд навсегда, ни разу не покраснев.
+ */
+function probeIsOlderOrSame(probeDay,cachedObservedAt){
+  const p=Date.parse(String(probeDay??"").slice(0,10)+"T00:00:00Z"),c=Date.parse(String(cachedObservedAt??""));
+  return Number.isFinite(p)&&Number.isFinite(c)&&p<=c;
+}
+
+/** Пора ли снова качать то, у чего своя квота. Отсутствие метки означает «пора». */
+function legNeedsRefetch(prevFetchedAt,interval,now=NOW){
+  const t=Date.parse(String(prevFetchedAt??""));
+  return !Number.isFinite(t)||now-t>=interval;
+}
+
 async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true,minFetchInterval=0}={}){
-  // Источник с квотой на IP не обязан опрашиваться каждый такт, если его ряд дневной.
-  // До 7 августа это сходилось само: сбор жил на раннерах GitHub, каждый прогон приходил
-  // с нового адреса и получал свежую квоту. С переездом на сервер адрес стал один, и
-  // бесплатный тариф bitcoin-data.com — 10 запросов в час, 15 в сутки — начал кончаться
-  // на четвёртом такте: 4 запроса за прогон против 15 в сутки это 96 против 15.
-  //
+  const cached=oldDataset(key,ttl,maxObservedAge);
   // Пропуск опроса — не то же самое, что провал опроса. Данные берутся из кэша, состояние
   // остаётся "ok", а `fetched_at` показывает НАСТОЯЩЕЕ время последней загрузки, и карточка
   // честно говорит «загрузка N ч назад». Условие свежести наблюдения то же самое, что у
   // запасного пути: пропуск не может подсунуть ряд старше, чем позволено провалу.
-  if(minFetchInterval>0){
-    const fresh=oldDataset(key,minFetchInterval,maxObservedAge);
-    if(fresh){
-      datasets[key]=fresh;
-      const u=fresh.source_url||SOURCE_URLS[source],urls=uniqueHttps(fresh.source_urls?.length?fresh.source_urls:[u]);
-      sourceStates[key]={state:"ok",source:fresh.source||source,url:u,urls,observed_at:fresh.observed_at,fetched_at:fresh.fetched_at,error:null};
-      if(!decisionRelevant)sourceStates[key].decision_relevant=false;
+  const reuse=packet=>{
+    datasets[key]=packet;
+    const u=packet.source_url||SOURCE_URLS[source],urls=uniqueHttps(packet.source_urls?.length?packet.source_urls:[u]);
+    sourceStates[key]={state:"ok",source:packet.source||source,url:u,urls,observed_at:packet.observed_at,fetched_at:packet.fetched_at,error:null};
+    if(!decisionRelevant)sourceStates[key].decision_relevant=false;
+  };
+  // Нижняя граница между попытками. Источник с квотой на IP не обязан опрашиваться каждый
+  // такт: до 7 августа это сходилось само, потому что сбор жил на раннерах GitHub и каждый
+  // прогон приходил с нового адреса за свежей квотой. С переездом на один сервер бесплатный
+  // тариф bitcoin-data.com — 10 запросов в час, 15 в сутки — начал кончаться на четвёртом
+  // такте: 4 запроса за прогон против 15 в сутки это 96 против 15.
+  if(minFetchInterval>0&&cached&&!legNeedsRefetch(cached.fetched_at,minFetchInterval)){reuse(cached);return;}
+  try{
+    // Загрузчик получает кэш, чтобы иметь возможность спросить у источника только «есть ли
+    // новое» и вернуть UNCHANGED, не выкачивая ряды заново.
+    const payload=await loader(cached);
+    if(payload===UNCHANGED){
+      // Нечего переиспользовать — значит загрузчик соврал или кэш успел протухнуть между
+      // двумя проверками. Молча оставлять источник пустым нельзя: это тот самый случай,
+      // когда «всё в порядке» и «данных нет» выглядят одинаково.
+      if(!cached)throw new Error("loader reported no change with nothing cached");
+      reuse(cached);
       return;
     }
-  }
-  try{
-    const payload=await loader();
     const packet=payload?.data!==undefined&&payload?.observed_at?payload:{data:payload,observed_at:iso(NOW)};
     if(!validator(packet.data))throw new Error("validation failed");
     const age=observationAge(packet);
@@ -745,12 +774,28 @@ async function fetchBitcoinDataMvrv(){
   if(rows.length<180)throw new Error(`bitcoin-data MVRV too short: ${rows.length}`);
   return rows;
 }
-async function fetchBlockchainOnchain(){const tasks=await Promise.all([
-  settled("mvrv",()=>fetchBitcoinDataMvrv()),
+// Раз в сутки. MVRV здесь — ЗАПАСНОЙ путь: основной приезжает от Coin Metrics тем же
+// прогоном, бесплатно и без лимитов, и запасной нужен на случай, когда основного не будет.
+// Держать его тёплым достаточно раз в сутки: ряд дневной, а каждый лишний опрос отнимался у
+// когортного слоя на том же хосте, которому нужно три запроса за раз из пятнадцати суточных.
+const MVRV_FALLBACK_REFETCH = 24*HOUR;
+async function fetchBlockchainOnchain(){
+  // Троттлится ровно одна нога из четырёх — та, у которой квота. Три остальные идут на
+  // blockchain.info, где лимитов нет, и опрашиваются каждый такт, как и раньше: они кормят
+  // решающие семьи, и притормаживать их заодно значило бы платить за чужую проблему.
+  const prevPacket=previous?.datasets?.blockchain_onchain,prevMvrv=prevPacket?.data?.MVRV;
+  const reuseMvrv=Array.isArray(prevMvrv)&&prevMvrv.length>=180
+    &&!legNeedsRefetch(prevPacket?.mvrv_fetched_at,MVRV_FALLBACK_REFETCH);
+  const tasks=await Promise.all([
+  reuseMvrv?{ok:true,label:"mvrv",value:prevMvrv}:settled("mvrv",()=>fetchBitcoinDataMvrv()),
   settled("addresses",()=>fetchBlockchainChart("n-unique-addresses","5years",{minPoints:500})),
   settled("transactions",()=>fetchBlockchainChart("n-transactions","5years",{minPoints:500})),
   settled("miner revenue",()=>fetchBlockchainChart("miners-revenue","5years",{minPoints:500,expectedUnit:"USD"})),
-]);const by=Object.fromEntries(tasks.filter(x=>x.ok).map(x=>[x.label,x.value])),errors=tasks.filter(x=>!x.ok).map(x=>`${x.label}: ${x.error}`),data={MVRV:safeContract("mvrv",by.mvrv||[],errors),AdrActCnt:safeContract("activeAddresses",by.addresses||[],errors),TxCnt:safeContract("txCount",by.transactions||[],errors),MinerRevUSD:safeContract("minerRevenue",by["miner revenue"]||[],errors)};const q=validateBlockchainOnchainData(data);errors.push(...q.errors);return{data,observed_at:q.observed_at,source:"Blockchain.com · bitcoin-data.com",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitcoindata],partial:errors.length>0,errors};}
+]);const by=Object.fromEntries(tasks.filter(x=>x.ok).map(x=>[x.label,x.value])),errors=tasks.filter(x=>!x.ok).map(x=>`${x.label}: ${x.error}`),data={MVRV:safeContract("mvrv",by.mvrv||[],errors),AdrActCnt:safeContract("activeAddresses",by.addresses||[],errors),TxCnt:safeContract("txCount",by.transactions||[],errors),MinerRevUSD:safeContract("minerRevenue",by["miner revenue"]||[],errors)};const q=validateBlockchainOnchainData(data);errors.push(...q.errors);
+  // Метка ставится только когда ногу ДЕЙСТВИТЕЛЬНО скачали. Ставить её после неудачи значило
+  // бы отодвинуть следующую попытку на сутки: один 429 стоил бы дня без запасного пути.
+  const mvrvFetchedAt=reuseMvrv?prevPacket.mvrv_fetched_at:(tasks[0]?.ok?iso(NOW):prevPacket?.mvrv_fetched_at??null);
+  return{data,observed_at:q.observed_at,mvrv_fetched_at:mvrvFetchedAt,source:"Blockchain.com · bitcoin-data.com",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitcoindata],partial:errors.length>0,errors};}
 
 function mockWalk(days,start,drift,vol,seed=1){let x=start,s=seed>>>0,out=[];for(let i=days-1;i>=0;i--){s=(1664525*s+1013904223)>>>0;const u=s/4294967296-.5;x=Math.max(.0001,x*(1+drift+u*vol));out.push({t:NOW-i*DAY,v:x});}return out;}
 function makeMock(){
@@ -821,7 +866,19 @@ async function fetchTgaDaily(){
 // краткосрочных держателей и реализованный P&L. Значения приходят СТРОКАМИ — обязателен Number().
 // Запросы СТРОГО последовательные с паузой: три конкурентных запроса теневого слоя съедали
 // free-tier-лимит хоста и валили ГОЛОСУЮЩИЙ MVRV-fallback того же прогона (ревью 2026-07-21).
-async function fetchSthOnchain(){
+async function fetchSthOnchain(cached){
+  // РАЗВЕДКА ОДНИМ ЗАПРОСОМ вместо трёх. Полный опрос стоит три запроса из пятнадцати
+  // суточных, а суффикс `/last` отдаёт только последнюю точку и стоит один. Ряды дневные:
+  // если день не сменился, качать три истории заново незачем — они побайтово те же.
+  //
+  // Провал самой разведки наверх и уходит, как отказ источника: это те же 429, и честнее
+  // потратить на них один запрос, чем три. Нераспознанный ответ разведки не считается
+  // «нового нет» (см. probeIsOlderOrSame) — иначе смена формата у провайдера заморозила бы
+  // ряд навсегда, ни разу не покраснев.
+  if(cached?.observed_at){
+    const probe=await request(`https://bitcoin-data.com/v1/sth-realized-price/last`,{tries:1});
+    if(probeIsOlderOrSame(probe?.d??probe?.day??probe?.date,cached.observed_at))return UNCHANGED;
+  }
   const grab=async path=>{
     const rows=await request(`https://bitcoin-data.com/v1/${path}`,{tries:2});
     if(!Array.isArray(rows))throw new Error(`${path}: not an array`);
@@ -1090,12 +1147,10 @@ async function collect(){
     // Coin Metrics is enrichment only: any surviving series is accepted, total failure costs
     // MVRV/flows/activity/miners and nothing else.
     loadDataset("coinmetrics","coinmetrics",4*DAY,fetchCoinMetrics,x=>CM_METRICS.some(k=>x?.[k]?.length>=180),{maxObservedAge:4*DAY}),
-    // Раз в 4 часа, а не каждый такт. Один из четырёх его лучей — MVRV с bitcoin-data.com,
-    // и это ГОЛОСУЮЩИЙ запасной путь для Coin Metrics: он обязан получать квоту первым и
-    // не имеет права остаться без неё из-за теневого слоя. Остальные три луча —
-    // blockchain.info без лимитов, но у всех четырёх ряды дневные, и опрашивать их
-    // двадцать четыре раза в сутки было тратой без выигрыша: точка появляется одна.
-    loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY,minFetchInterval:4*HOUR}),
+    // Каждый такт, как и раньше: три ноги из четырёх идут на blockchain.info без лимитов и
+    // кормят решающие семьи. Квота есть только у четвёртой — MVRV с bitcoin-data.com, — и
+    // притормаживается именно она, внутри самого загрузчика (MVRV_FALLBACK_REFETCH).
+    loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY}),
     // 7 days: publication lag (1-2d) + a long US-holiday weekend must not zero out the family.
     loadDataset("etf","theblock",7*DAY,fetchEtfFlows,x=>validateEtfSeries(x,7*DAY),{maxObservedAge:7*DAY}),
     loadDataset("stablecoins","defillama",4*DAY,async()=>{const s=normalizeStableHistory(await request("https://stablecoins.llama.fi/stablecoincharts/all"));return{data:s,observed_at:s.length?iso(last(s).t):iso(NOW)};},x=>x?.length>100,{maxObservedAge:4*DAY}),
@@ -1110,11 +1165,12 @@ async function collect(){
   // bitcoin-data.com — ПОСЛЕ основного пакета: голосующий MVRV-fallback (blockchain_onchain)
   // ходит на тот же хост, и теневой слой не имеет права конкурировать с ним за free-tier-лимит.
   //
-  // Раз в 12 часов, и это самый дорогой опрос из всех: три запроса за раз при квоте 15 в
-  // сутки на IP. Два опроса — шесть запросов, плюс шесть у MVRV выше = двенадцать из
-  // пятнадцати, с запасом на повтор при сбое. Ряды здесь дневные (SOPR, LTH-SOPR,
-  // себестоимость STH), точка появляется одна за сутки, и чаще спрашивать нечего.
-  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:12*HOUR});
+  // Три часа — это нижняя граница между РАЗВЕДКАМИ, а не между загрузками. Разведка стоит
+  // один запрос и почти всегда отвечает «нового нет»; три ряда выкачиваются только в тот
+  // такт, когда у источника сменился день. Суточный расход: 8 разведок + 3 на одну загрузку
+  // + 1 на запасной MVRV = 12 из 15, с запасом на повтор при сбое. Отставание от появления
+  // новой точки — не больше трёх часов (было двенадцать при фиксированном интервале).
+  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:3*HOUR});
 }
 
 function metric(def){return{
@@ -1730,7 +1786,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
