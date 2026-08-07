@@ -27,5 +27,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           MONITOR_ALERT: "1"
+          # Голос в общий канал ошибок. Имя отличается от TELEGRAM_*: тот бот шлёт
+          # СИГНАЛЫ (смена вердикта, доли), и сообщение «панель сломана» не должно
+          # теряться среди них.
+          ALERT_BOT_TOKEN: ${{ secrets.ALERT_BOT_TOKEN }}
+          ALERT_CHAT_ID: ${{ secrets.ALERT_CHAT_ID }}
           SNAPSHOT_URL: https://tzi-838.pages.dev/snapshot.json
         run: node scripts/monitor-live.mjs

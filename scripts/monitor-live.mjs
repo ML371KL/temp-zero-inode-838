@@ -76,6 +76,21 @@ async function githubRequest(path,{method="GET",body}={}){
   return r.status===204?null:r.json();
 }
 
+// Голос в общий канал ошибок. Инцидент-issue остаётся памятью и подробным протоколом,
+// но её никто не видит, пока не зайдёт в репозиторий; сообщение приходит само.
+// Отказ доставки НИКОГДА не роняет сторожа: канал — дополнение к issue, а не замена,
+// и сломанный бот не имеет права превратить рабочую проверку в упавшую.
+async function speak(text){
+  const token=process.env.ALERT_BOT_TOKEN,chat=process.env.ALERT_CHAT_ID;
+  if(!token||!chat)return;
+  try{
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({chat_id:chat,parse_mode:"HTML",disable_web_page_preview:true,text}),
+    });
+  }catch(error){console.error(`telegram: ${error.message}`);}
+}
+
 async function syncAlert(result){
   if(process.env.MONITOR_ALERT!=="1")return;
   const issues=await githubRequest("/issues?state=open&per_page=100");
@@ -83,11 +98,23 @@ async function syncAlert(result){
   const open=issues.find(x=>!x.pull_request&&x.title===ISSUE_TITLE);
   if(!result.ok){
     const body=`Проверка ${result.checked_at} не пройдена.\n\n\`\`\`json\n${JSON.stringify(result,null,2)}\n\`\`\``;
+    // Комментарий к уже открытому инциденту — не новость: об этом отказе уже сказали.
+    // Сообщение уходит только при ЗАВЕДЕНИИ инцидента, иначе каждые два часа приходило
+    // бы «всё ещё сломано», и канал перестал бы читаться за сутки.
     if(open)await githubRequest(`/issues/${open.number}/comments`,{method:"POST",body:{body}});
-    else await githubRequest("/issues",{method:"POST",body:{title:ISSUE_TITLE,body,labels:["bug"]}}).catch(()=>githubRequest("/issues",{method:"POST",body:{title:ISSUE_TITLE,body}}));
+    else{
+      const created=await githubRequest("/issues",{method:"POST",body:{title:ISSUE_TITLE,body,labels:["bug"]}}).catch(()=>githubRequest("/issues",{method:"POST",body:{title:ISSUE_TITLE,body}}));
+      await speak(
+        `🔴 <b>838 · проверка панели не пройдена</b>\n`
+        +`${(result.issues||[]).slice(0,4).join("\n")}\n\n`
+        +`Панель может показывать неверное решение или устаревшие данные.\n`
+        +(created?.html_url?`Инцидент: ${created.html_url}`:"Инцидент заведён в репозитории."),
+      );
+    }
   }else if(open){
     await githubRequest(`/issues/${open.number}/comments`,{method:"POST",body:{body:`Восстановлено: проверка ${result.checked_at} прошла; decision ${result.decision_hash?.slice(0,12)||"—"}.`}});
     await githubRequest(`/issues/${open.number}`,{method:"PATCH",body:{state:"closed",state_reason:"completed"}});
+    await speak(`🟢 <b>838 · проверка панели снова проходит</b>\nИнцидент #${open.number} закрыт.`);
   }
 }
 
