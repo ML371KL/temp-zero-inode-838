@@ -359,7 +359,27 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
   // старым, и через три часа порог оказывается пройден НАВСЕГДА — разведка пошла бы каждый
   // такт, то есть 21 запрос в сутки вместо восьми. `probed_at` ставится только при таком
   // пропуске и живёт рядом с данными, а `fetched_at` остаётся честным временем загрузки.
-  if(minFetchInterval>0&&cached&&!legNeedsRefetch(lastAttemptAt(cached),minFetchInterval)){reuse(cached);return;}
+  //
+  // Метка попытки берётся из СЫРОГО прошлого пакета, а не из `cached`. Первая редакция
+  // читала её из `cached`, а `oldDataset` возвращает null, как только пакет старше ttl, —
+  // и защита выключалась ровно в том случае, ради которого писалась. Источник лежит
+  // дольше своего ttl → кэш признан негодным → интервал перестаёт действовать → в
+  // источник, который и так не отвечает, идёт запрос каждый такт. При такте 838 в
+  // пятнадцать минут это 96 обращений в сутки против квоты в 15.
+  const lastPacket=previous?.datasets?.[key]||null;
+  if(minFetchInterval>0&&!legNeedsRefetch(lastAttemptAt(lastPacket),minFetchInterval)){
+    if(cached){reuse(cached);return;}
+    // Кэш есть, но просрочен, — или его нет вовсе. Обращаться всё равно нельзя: квота
+    // общая, и вторая попытка в том же окне удачнее первой не станет. Показывать
+    // просроченный ряд тоже нельзя — это тот же порог, что и у запасного пути ниже.
+    // Поэтому источник честно нездоров, и причина названа своим именем: это не сеть.
+    const left=minFetchInterval-(NOW-Date.parse(String(lastAttemptAt(lastPacket))));
+    const u=SOURCE_URLS[source];
+    sourceStates[key]={state:"fail",source,url:u,urls:uniqueHttps([u]),observed_at:null,fetched_at:null,
+      error:`source quota: next attempt in ${Math.max(0,Math.round(left/60000))} min`};
+    if(!decisionRelevant)sourceStates[key].decision_relevant=false;
+    return;
+  }
   try{
     // Кэш передаётся ТОЛЬКО тем, кто его попросил. Первая редакция отдавала его всем
     // подряд первым позиционным аргументом — и сломала единственный загрузчик, у

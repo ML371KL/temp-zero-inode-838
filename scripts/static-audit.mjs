@@ -170,4 +170,18 @@ assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-ren
       `"${key}" просит cacheAware, но ${loader[1]}(${signature[1].trim()}) ждёт первым аргументом не кэш`);
   }
 }
+
+// Интервал между обращениями к источнику с квотой обязан отсчитываться от СЫРОГО прошлого
+// пакета, а не от `cached`. `cached` — это результат `oldDataset`, то есть null, как только
+// пакет старше ttl; отсчёт от него отключает защиту ровно в том случае, ради которого она
+// написана: источник не отвечает дольше ttl, и в него начинают ломиться каждый такт.
+// Ошибка тихая — снимок продолжает публиковаться, а квота кончается за один вечер.
+{
+  const guard=/if\(minFetchInterval>0&&!legNeedsRefetch\(lastAttemptAt\((\w+)\),minFetchInterval\)\)/.exec(collector);
+  assert.ok(guard,"порог между обращениями к источнику с квотой не найден");
+  assert.equal(guard[1],"lastPacket",
+    `интервал отсчитывается от "${guard[1]}"; годен только сырой прошлый пакет — иначе ttl отключает защиту`);
+  assert.match(collector,/const lastPacket=previous\?\.datasets\?\.\[key\]\|\|null;/,
+    "lastPacket обязан читаться из прошлого снимка напрямую, без фильтра по ttl");
+}
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);
