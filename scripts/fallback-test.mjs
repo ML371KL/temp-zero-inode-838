@@ -269,7 +269,31 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
   // против 15. Две функции ниже — вся арифметика, на которой держится экономия, и обе
   // ошибаются молча: неверное «нового нет» замораживает ряд навсегда, ни разу не покраснев.
   {
-    const {probeIsOlderOrSame,legNeedsRefetch,lastAttemptAt}=await import("./fetch-snapshot.mjs");
+    const {probeIsOlderOrSame,legNeedsRefetch,lastAttemptAt,dailySeriesIsCurrent}=await import("./fetch-snapshot.mjs");
+    // Главная экономия квоты: пока в кэше есть точка за вчерашний UTC-день, дневному ряду
+    // взяться неоткуда — не тратится даже разведочный запрос. Раньше интервал в три часа
+    // сам по себе разрешал восемь разведок в сутки на ряд, который меняется раз в день.
+    {
+      const now=Date.parse("2026-08-10T05:30:00Z");
+      assert.equal(dailySeriesIsCurrent("2026-08-09T00:00:00.000Z",now),true,"точка за вчера — ряд актуален, запросов не нужно");
+      assert.equal(dailySeriesIsCurrent("2026-08-10T00:00:00.000Z",now),true,"точка за сегодня — тем более актуален");
+      assert.equal(dailySeriesIsCurrent("2026-08-08T00:00:00.000Z",now),false,"позавчерашняя точка — отстали, идём за данными");
+      // Ровно на границе суток: 00:00 нового дня не должно объявлять позавчерашний ряд свежим.
+      assert.equal(dailySeriesIsCurrent("2026-08-08T23:59:59Z",Date.parse("2026-08-10T00:00:00Z")),false,"граница суток считается по календарю, а не по «24 часам назад»");
+      assert.equal(dailySeriesIsCurrent("2026-08-09T00:00:00Z",Date.parse("2026-08-10T23:59:59Z")),true,"весь день актуальности — целиком наш");
+      // Нет кэша или мусор в метке — обязаны идти за данными, а не молчать.
+      for(const bad of [undefined,null,"","не дата"])
+        assert.equal(dailySeriesIsCurrent(bad,now),false,`без разобранной метки (${JSON.stringify(bad)}) обязаны качать`);
+      // Расход за сутки при исправном провайдере: 1 разведка + 3 ряда, дальше тишина.
+      let requests=0,cachedAt="2026-08-09T00:00:00.000Z";
+      for(let tick=0;tick<8;tick++){ // такты каждые 3 часа
+        const t=Date.parse("2026-08-10T00:00:00Z")+tick*3*3600e3;
+        if(dailySeriesIsCurrent(cachedAt,t))continue;
+        requests+=1; // разведка
+        if(t>=Date.parse("2026-08-11T00:00:00Z")){requests+=3;cachedAt="2026-08-10T00:00:00.000Z";}
+      }
+      assert.ok(requests<=4,`расход за сутки обязан оставаться в пределах четырёх запросов из квоты 15, получилось ${requests}`);
+    }
     const cached="2026-08-05T00:00:00.000Z";
     assert.equal(probeIsOlderOrSame("2026-08-05",cached),true,"тот же день — качать нечего");
     assert.equal(probeIsOlderOrSame("2026-08-04",cached),true,"источник откатился назад — тоже не повод качать");

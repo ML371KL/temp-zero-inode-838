@@ -327,6 +327,15 @@ function legNeedsRefetch(prevFetchedAt,interval,now=NOW){
   const t=Date.parse(String(prevFetchedAt??""));
   return !Number.isFinite(t)||now-t>=interval;
 }
+// Дневной ряд считается АКТУАЛЬНЫМ, пока у нас есть точка за вчерашний UTC-день: провайдер
+// публикует значение за прошедшие сутки, поэтому новому взяться неоткуда, и тратить квоту
+// даже на разведку незачем. Именно этот пропуск — главная экономия: интервал в три часа сам
+// по себе разрешал восемь разведок в сутки при ряде, который меняется раз в день.
+function dailySeriesIsCurrent(observedAt,now=NOW){
+  const t=Date.parse(String(observedAt??""));
+  if(!Number.isFinite(t))return false;
+  return Math.floor(t/DAY)>=Math.floor(now/DAY)-1;
+}
 
 /**
  * Когда к источнику ОБРАЩАЛИСЬ в последний раз — неважно, чем обращение кончилось.
@@ -925,12 +934,20 @@ async function fetchSthOnchain(cached){
   // потратить на них один запрос, чем три. Нераспознанный ответ разведки не считается
   // «нового нет» (см. probeIsOlderOrSame) — иначе смена формата у провайдера заморозила бы
   // ряд навсегда, ни разу не покраснев.
+  // Ноль запросов, пока ряд актуален по календарю. Квота 15/сутки на IP стала жёстко нашей
+  // после переезда сбора на постоянный адрес, а разведка каждые три часа тратила восемь
+  // запросов в сутки на ряд, который обновляется раз в день. Ходим только тогда, когда
+  // вчерашней точки у нас ещё нет, — то есть один раз за сутки плюс повторы, пока провайдер
+  // её не выложит.
+  if(dailySeriesIsCurrent(cached?.observed_at))return UNCHANGED;
   if(cached?.observed_at){
     const probe=await request(`https://bitcoin-data.com/v1/sth-realized-price/last`,{tries:1});
     if(probeIsOlderOrSame(probe?.d??probe?.day??probe?.date,cached.observed_at))return UNCHANGED;
   }
   const grab=async path=>{
-    const rows=await request(`https://bitcoin-data.com/v1/${path}`,{tries:2});
+    // tries:1 — повтор внутри прогона удваивал бы расход квоты на ровном месте: при 429
+    // вторая попытка успешнее не станет, а следующий такт всё равно придёт через три часа.
+    const rows=await request(`https://bitcoin-data.com/v1/${path}`,{tries:1});
     if(!Array.isArray(rows))throw new Error(`${path}: not an array`);
     const out=rows.map(r=>{
       const dateRaw=String(r.d||r.day||r.date||"");
@@ -1836,7 +1853,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});
