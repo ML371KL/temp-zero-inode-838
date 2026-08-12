@@ -45,11 +45,15 @@ const FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
 // local total request limit reached» — именно это оставило боевое уведомление без разбора.
 // Поэтому не одна модель, а ЦЕПОЧКА, и намеренно у РАЗНЫХ провайдеров: перегрузка NVIDIA не
 // должна выключать разбор целиком. Все до единой — с суффиксом :free.
+// КАТАЛОГ ЖИВОЙ, и модели из него исчезают. «inclusionai/ling-3.0-flash:free» отдаёт 404 —
+// то есть последний рубеж цепочки был мёртв, и заметить это можно было только в тот день,
+// когда первые три окажутся перегружены разом. Пришедший ему на смену «ling-3.0-tiny»
+// разметку ответа игнорирует вовсе. Замену проверять живым запросом, а не по названию.
 const FREE_CHAIN = [
   FREE_MODEL,                          // NVIDIA, самая крупная — первый выбор по качеству
   "google/gemma-4-31b-it:free",        // Google
   "openai/gpt-oss-20b:free",           // OpenAI OSS
-  "inclusionai/ling-3.0-flash:free",   // InclusionAI
+  "poolside/laguna-s-2.1:free",        // Poolside, последний рубеж
 ];
 const resolveModel = () => (process.env.NOTIFY_MODEL || "").trim() || FREE_MODEL;
 const paidAllowed = () => process.env.NOTIFY_ALLOW_PAID === "1";
