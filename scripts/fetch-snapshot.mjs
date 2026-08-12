@@ -297,6 +297,14 @@ async function krakenRequest(url){const j=await request(url);if(Array.isArray(j?
 
 const datasets={};
 const sourceStates={};
+// Реестр ПОПЫТОК опроса, отдельный от данных. Метка обязана переживать неудачу: пока она жила
+// внутри пакета (`probed_at`/`fetched_at`), провалившаяся попытка её не ставила — интервал между
+// обращениями переставал действовать ровно тогда, когда источник отвечал отказом, и в него шёл
+// запрос КАЖДЫЙ такт. На такте в 15 минут это 4 обращения в час против часовой квоты в 10:
+// один 429 выжигал окно и делал отказ самоподдерживающимся (bitcoin-data.com завис на двое суток).
+// Реестр живёт рядом с данными и переносится вперёд, поэтому переживает и отказ, и потерю кэша.
+const attempts={};
+const lastAttemptFor=key=>attempts[key]??previous?.attempts?.[key]??lastAttemptAt(previous?.datasets?.[key]||null);
 function observationAge(packet){const t=Date.parse(packet?.observed_at||"");return Number.isFinite(t)?NOW-t:Infinity;}
 function validObservationAge(packet,maxObservedAge){const age=observationAge(packet);return Number.isFinite(age)&&age>=-HOUR&&age<=maxObservedAge;}
 function oldDataset(key,ttl,maxObservedAge=ttl){
@@ -376,19 +384,23 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
   // источник, который и так не отвечает, идёт запрос каждый такт. При такте 838 в
   // пятнадцать минут это 96 обращений в сутки против квоты в 15.
   const lastPacket=previous?.datasets?.[key]||null;
-  if(minFetchInterval>0&&!legNeedsRefetch(lastAttemptAt(lastPacket),minFetchInterval)){
+  if(minFetchInterval>0&&!legNeedsRefetch(lastAttemptFor(key),minFetchInterval)){
     if(cached){reuse(cached);return;}
     // Кэш есть, но просрочен, — или его нет вовсе. Обращаться всё равно нельзя: квота
     // общая, и вторая попытка в том же окне удачнее первой не станет. Показывать
     // просроченный ряд тоже нельзя — это тот же порог, что и у запасного пути ниже.
     // Поэтому источник честно нездоров, и причина названа своим именем: это не сеть.
-    const left=minFetchInterval-(NOW-Date.parse(String(lastAttemptAt(lastPacket))));
+    const left=minFetchInterval-(NOW-Date.parse(String(lastAttemptFor(key))));
     const u=SOURCE_URLS[source];
     sourceStates[key]={state:"fail",source,url:u,urls:uniqueHttps([u]),observed_at:null,fetched_at:null,
       error:`source quota: next attempt in ${Math.max(0,Math.round(left/60000))} min`};
     if(!decisionRelevant)sourceStates[key].decision_relevant=false;
     return;
   }
+  // Метка ставится ДО обращения и потому фиксирует ПОПЫТКУ, а не её исход: отказ обязан
+  // отодвигать следующий заход ровно так же, как успех, иначе источник с квотой уходит в
+  // самоподдерживающийся отказ (см. комментарий у реестра `attempts`).
+  attempts[key]=iso(NOW);
   try{
     // Кэш передаётся ТОЛЬКО тем, кто его попросил. Первая редакция отдавала его всем
     // подряд первым позиционным аргументом — и сломала единственный загрузчик, у
@@ -1833,6 +1845,11 @@ function compute(){
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
     regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
     sources:sourceStates,source_vintages:sourceVintages,source_revision_alerts:revisionAlerts,monitoring,history:boundedHistory.history,datasets,
+    // Метки попыток переносятся вперёд целиком: источник, не опрошенный в этом прогоне из-за
+    // интервала, обязан помнить, когда к нему ходили в последний раз. Реестр остаётся и в
+    // публичном снимке — он крошечный, а при потере внутреннего кэша именно из него берётся
+    // защита от того, чтобы начать долбить источник с квотой каждый такт.
+    attempts:{...(previous?.attempts||{}),...attempts},
     methodology:{
       indicator_scale:"−2…+2; числовые баллы вторичны относительно гейтов",
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",

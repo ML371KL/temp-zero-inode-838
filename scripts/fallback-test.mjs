@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdtempSync,writeFileSync,rmSync} from "node:fs";
+import {mkdtempSync,writeFileSync,rmSync,readFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
@@ -270,6 +270,28 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
   // ошибаются молча: неверное «нового нет» замораживает ряд навсегда, ни разу не покраснев.
   {
     const {probeIsOlderOrSame,legNeedsRefetch,lastAttemptAt,dailySeriesIsCurrent}=await import("./fetch-snapshot.mjs");
+    // САМОПОДДЕРЖИВАЮЩИЙСЯ ОТКАЗ (bitcoin-data.com завис на двое суток, 10-12.08). Метка попытки
+    // жила внутри пакета и ставилась только при УСПЕХЕ, поэтому после отказа интервал переставал
+    // действовать: на такте в 15 минут это 4 обращения в час против часовой квоты в 10 — один 429
+    // выжигал окно, и отказ сам себя продлевал. Здесь закреплено, что отказ отодвигает следующую
+    // попытку ровно так же, как успех: реестр `attempts` ведётся отдельно от данных.
+    {
+      const src=readFileSync(new URL("./fetch-snapshot.mjs",import.meta.url),"utf8");
+      assert.match(src,/^\s*attempts\[key\]=iso\(NOW\);\s*$/m,"метка попытки обязана ставиться ДО обращения — иначе отказ её не поставит");
+      const guard=src.indexOf("attempts[key]=iso(NOW);"),tryAt=src.indexOf("try{",guard);
+      assert.ok(guard>0&&tryAt>guard,"метка обязана стоять перед try, а не внутри успешной ветки");
+      assert.match(src,/lastAttemptFor\(key\)/,"интервал обязан отсчитываться от реестра попыток");
+      assert.match(src,/attempts:\{\.\.\.\(previous\?\.attempts\|\|\{\}\),\.\.\.attempts\}/,"реестр обязан переноситься вперёд, иначе метка теряется на следующем прогоне");
+      // Носитель метки переживает и потерю кэша: реестр лежит в снимке, а не в пакете данных.
+      assert.ok(src.indexOf("attempts:{...(previous?.attempts")>0,"реестр обязан публиковаться в снимке");
+      // Арифметика самого интервала: после отказа следующая попытка приходит через порог, а не тактом.
+      const failedAt="2026-08-12T04:38:00Z";
+      assert.equal(legNeedsRefetch(failedAt,3*3600e3,Date.parse("2026-08-12T04:53:00Z")),false,"через такт после отказа обращаться нельзя");
+      assert.equal(legNeedsRefetch(failedAt,3*3600e3,Date.parse("2026-08-12T07:38:00Z")),true,"через три часа — можно");
+      // 15-минутный такт против квоты: за час обращений должно быть не больше одного.
+      let hits=0;for(let m=0;m<60;m+=15)if(legNeedsRefetch(failedAt,3*3600e3,Date.parse(failedAt)+m*60000))hits++;
+      assert.equal(hits,0,`за час после отказа обращений быть не должно, получилось ${hits}`);
+    }
     // Главная экономия квоты: пока в кэше есть точка за вчерашний UTC-день, дневному ряду
     // взяться неоткуда — не тратится даже разведочный запрос. Раньше интервал в три часа
     // сам по себе разрешал восемь разведок в сутки на ряд, который меняется раз в день.

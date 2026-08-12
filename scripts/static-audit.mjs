@@ -176,12 +176,24 @@ assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-ren
 // пакет старше ttl; отсчёт от него отключает защиту ровно в том случае, ради которого она
 // написана: источник не отвечает дольше ttl, и в него начинают ломиться каждый такт.
 // Ошибка тихая — снимок продолжает публиковаться, а квота кончается за один вечер.
+// Вторая половина той же защиты: метка обязана переживать НЕУДАЧУ. Пока она жила только внутри
+// пакета и ставилась при успехе, отказ её не обновлял — интервал переставал действовать ровно
+// тогда, когда источник отвечал отказом, и в него уходил запрос каждый такт. На такте в 15 минут
+// это 4 обращения в час против часовой квоты в 10: один 429 выжигал окно и продлевал сам себя
+// (bitcoin-data.com завис на двое суток, 10–12.08).
 {
-  const guard=/if\(minFetchInterval>0&&!legNeedsRefetch\(lastAttemptAt\((\w+)\),minFetchInterval\)\)/.exec(collector);
+  const guard=/if\(minFetchInterval>0&&!legNeedsRefetch\((\w+)\(key\),minFetchInterval\)\)/.exec(collector);
   assert.ok(guard,"порог между обращениями к источнику с квотой не найден");
-  assert.equal(guard[1],"lastPacket",
-    `интервал отсчитывается от "${guard[1]}"; годен только сырой прошлый пакет — иначе ttl отключает защиту`);
-  assert.match(collector,/const lastPacket=previous\?\.datasets\?\.\[key\]\|\|null;/,
-    "lastPacket обязан читаться из прошлого снимка напрямую, без фильтра по ttl");
+  assert.equal(guard[1],"lastAttemptFor",
+    `интервал отсчитывается от "${guard[1]}"; годен только реестр попыток — он один переживает и ttl, и отказ`);
+  assert.match(collector,/const lastAttemptFor=key=>attempts\[key\]\?\?previous\?\.attempts\?\.\[key\]\?\?lastAttemptAt\(previous\?\.datasets\?\.\[key\]\|\|null\)/,
+    "реестр попыток обязан читаться из прошлого снимка напрямую, без фильтра по ttl");
+  // Метка ставится ДО обращения — иначе провалившаяся попытка её не поставит.
+  const mark=collector.indexOf("attempts[key]=iso(NOW);"),tryStart=collector.indexOf("try{",mark);
+  assert.ok(mark>0,"метка попытки не ставится вовсе");
+  assert.ok(tryStart>mark&&/^\s*$/.test(collector.slice(mark+"attempts[key]=iso(NOW);".length,tryStart).replace(/\/\/[^\n]*\n/g,"").replace(/\n/g,"")),
+    "между меткой попытки и try не должно быть кода: метка обязана фиксировать ПОПЫТКУ, а не её исход");
+  assert.match(collector,/attempts:\{\.\.\.\(previous\?\.attempts\|\|\{\}\),\.\.\.attempts\}/,
+    "реестр попыток обязан публиковаться в снимке и переноситься вперёд — иначе метка теряется между прогонами");
 }
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);
