@@ -10,8 +10,40 @@
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="%23EAEDEB"/><circle cx="16" cy="16" r="9" fill="none" stroke="%23C96B22" stroke-width="2.5"/><path d="M2 19h7l3-9 5 15 4-11 3 5h6" stroke="%231B2321" stroke-width="2" fill="none"/></svg>'>
 <script>
 /* Тема ставится ДО первой отрисовки, иначе тёмная страница моргнёт белым.
-   Ключ общий с хабом NEXUS, поэтому выбор темы переезжает между сайтами. */
-(()=>{try{const s=localStorage.getItem("nexus-theme");document.documentElement.dataset.theme=s==="light"||s==="dark"?s:(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")}catch(e){document.documentElement.dataset.theme="light"}})();
+   Ключ общий с хабом NEXUS и соседними панелями — выбор темы переезжает между сайтами.
+
+   С 20:00 до 07:00 по часам устройства панель открывается тёмной, что бы ни было
+   выбрано раньше, а постоянный выбор при этом НЕ затирается: утром вернётся он.
+   Запиши мы навязанную тёмную в память — один вечер сделал бы её «последней темой»
+   навсегда, и правило съело бы себя. Переключение в эти часы живёт в sessionStorage:
+   переживает перезагрузку страницы, исчезает с закрытием вкладки.
+
+   Правило лежит здесь одной копией — переключатель ниже берёт его через window.__theme
+   и не повторяет: две копии однажды разошлись бы, и вечер начинался бы в разное время. */
+(function () {
+  var KEY = "nexus-theme", NIGHT_KEY = "nexus-theme-tonight";
+  var NIGHT_FROM = 20, NIGHT_TO = 7;
+  function isNight(d) { var h = (d || new Date()).getHours(); return h >= NIGHT_FROM || h < NIGHT_TO; }
+  function read(store, key) {
+    try { var v = window[store].getItem(key); return v === "light" || v === "dark" ? v : null; }
+    catch (e) { return null; }
+  }
+  function stored() { return read("localStorage", KEY); }
+  function resolve() {
+    if (isNight()) return read("sessionStorage", NIGHT_KEY) || "dark";
+    return stored() || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }
+  function remember(theme) {
+    try {
+      if (isNight()) window.sessionStorage.setItem(NIGHT_KEY, theme);
+      else window.localStorage.setItem(KEY, theme);
+    } catch (e) { /* приватный режим: выбор просто не переживёт вкладку */ }
+  }
+  try { document.documentElement.dataset.theme = resolve(); }
+  catch (e) { document.documentElement.dataset.theme = "light"; }
+  window.__theme = { isNight: isNight, stored: stored, resolve: resolve, remember: remember,
+                     NIGHT_FROM: NIGHT_FROM, NIGHT_TO: NIGHT_TO };
+})();
 </script>
 <style>
 /* ТОКЕНЫ NEXUS — три независимых слоя.
@@ -368,7 +400,7 @@ const syncThemeWord=()=>{const d=document.documentElement.dataset.theme==="dark"
 const _hero=document.querySelector(".hero"),_sb=$("stickyBar");
 const syncSticky=()=>{if(!_hero||!_sb)return;const gone=_hero.getBoundingClientRect().bottom<0;if(gone&&SNAP&&$("sbText").textContent!==SNAP.verdict)$("sbText").textContent=SNAP.verdict||"";_sb.classList.toggle("show",gone)};
 addEventListener("scroll",syncSticky,{passive:true});syncSticky();
-$("themeBtn").onclick=()=>{const next=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=next;try{localStorage.setItem("nexus-theme",next)}catch(e){}syncThemeWord();if(SNAP){renderBlocks();drawTape()}};
+$("themeBtn").onclick=()=>{const next=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=next;window.__theme.remember(next);syncThemeWord();if(SNAP){renderBlocks();drawTape()}};
 $("refresh").onclick=()=>location.reload();$("aiBtn").onclick=askAI;let rsz=null;addEventListener("resize",()=>{clearTimeout(rsz);rsz=setTimeout(()=>{if(SNAP){renderBlocks();drawTape();}},250)});setInterval(()=>{if(SNAP)render()},5*60*1000);load();
 </script>
 </body>
