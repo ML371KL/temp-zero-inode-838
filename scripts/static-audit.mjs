@@ -196,4 +196,17 @@ assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-ren
   assert.match(collector,/attempts:\{\.\.\.\(previous\?\.attempts\|\|\{\}\),\.\.\.attempts\}/,
     "реестр попыток обязан публиковаться в снимке и переноситься вперёд — иначе метка теряется между прогонами");
 }
+{
+  // ДИАГНОСТИКА НЕ ИМЕЕТ ПРАВА ЖЕЧЬ КВОТУ ДАННЫХ. probe.mjs ходит с того же IP, что и
+  // сборщик, а у bitcoin-data.com 10 запросов в час и 15 в сутки: опрос каждые 15 минут
+  // (да ещё всей историей ряда, а не последней точкой) съедал лимит источника решения.
+  // Пин: только /last и только внутри окна квоты. Инцидент 28.08–01.09.2026.
+  const probe=readFileSync(new URL("./probe.mjs",import.meta.url),"utf8");
+  for(const m of probe.matchAll(/https:\/\/bitcoin-data\.com\/v1\/[a-z-]+(\/last)?/g))
+    assert.ok(m[0].endsWith("/last"),`probe.mjs: полный ряд bitcoin-data в диагностике запрещён (${m[0]}) — история качается целиком при каждом вызове`);
+  assert.match(probe,/const BITCOIN_DATA_WINDOW=/,
+    "probe.mjs: строки bitcoin-data обязаны ходить в окне квоты, а не каждый такт");
+  const gated=probe.match(/\.\.\.\(BITCOIN_DATA_WINDOW\?/g)||[];
+  assert.equal(gated.length,2,"probe.mjs: обе строки bitcoin-data (MVRV и STH-RP) обязаны стоять за окном квоты");
+}
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);

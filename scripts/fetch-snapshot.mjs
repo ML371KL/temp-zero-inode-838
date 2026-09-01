@@ -954,7 +954,19 @@ async function fetchSthOnchain(cached){
   if(dailySeriesIsCurrent(cached?.observed_at))return UNCHANGED;
   if(cached?.observed_at){
     const probe=await request(`https://bitcoin-data.com/v1/sth-realized-price/last`,{tries:1});
-    if(probeIsOlderOrSame(probe?.d??probe?.day??probe?.date,cached.observed_at))return UNCHANGED;
+    if(probeIsOlderOrSame(probe?.d??probe?.day??probe?.date,cached.observed_at)){
+      // Ряд-разведчик может отстать у провайдера сам, пока SOPR-конвейер уже обновился:
+      // 28.08–01.09.2026 sth-realized-price застрял на четверо суток при свежих sopr и
+      // lth-sopr — и пакет замер целиком, потому что «нового нет» спрашивали только у
+      // отставшего. Пока разрыв не превышает двух суток, одной разведки достаточно — это
+      // штатный ритм ожидания вчерашней точки. С третьих суток молчание одного ряда уже
+      // не доказательство, и прежде чем уснуть ещё на три часа, спрашиваем второй конвейер.
+      const lagDays=Math.floor(NOW/DAY)-Math.floor(Date.parse(String(cached.observed_at))/DAY);
+      if(lagDays<3)return UNCHANGED;
+      await sleep(900);
+      const probe2=await request(`https://bitcoin-data.com/v1/sopr/last`,{tries:1});
+      if(probeIsOlderOrSame(probe2?.d??probe2?.day??probe2?.date,cached.observed_at))return UNCHANGED;
+    }
   }
   const grab=async path=>{
     // tries:1 — повтор внутри прогона удваивал бы расход квоты на ровном месте: при 429
@@ -1870,7 +1882,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchSthOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});

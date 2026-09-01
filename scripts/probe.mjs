@@ -3,6 +3,12 @@ import { readFileSync as __rf } from "node:fs";
 const PKG_VERSION = JSON.parse(__rf(new URL("../package.json", import.meta.url), "utf8")).version;
 
 const FRED_KEY=String(process.env.FRED_KEY||"").trim(),CM_KEY=String(process.env.CM_API_KEY||"").trim(),SOSO_KEY=String(process.env.SOSO_API_KEY||"").trim(),TIMEOUT=20_000;
+// Квота bitcoin-data.com — 10 запросов в час и 15 в сутки на IP, и с этого же адреса живёт
+// резерв MVRV для решения и теневая сюита STH. Диагностика каждые 15 минут жгла ~192 запроса
+// в сутки (одна из строк качала ВЕСЬ ряд целиком) и доедала лимит до 429 у сборщика. Поэтому
+// строки bitcoin-data ходят дважды в сутки — в первый такт часов 05 и 17 UTC; в остальное
+// время пропуск печатается явно, чтобы журнал не выглядел так, будто проверка исчезла.
+const BITCOIN_DATA_WINDOW=(d=>d.getUTCMinutes()<15&&[5,17].includes(d.getUTCHours()))(new Date());
 const host=u=>{try{return new URL(u).host}catch{return"?"}},safe=v=>String(v??"").replace(/[\r\n\t]+/g," ").slice(0,180);
 async function probe(name,url,inspect,{critical=false,text=false,method="GET",payload=null,headers={}}={}){const t=Date.now();try{const r=await fetch(url,{method,headers:{"User-Agent":"btc-21m-dashboard/"+PKG_VERSION+"-probe","Accept":text?"text/plain,text/csv,text/html,*/*":"application/json,*/*",...(payload?{"Content-Type":"application/json"}:{}),...headers},body:payload?JSON.stringify(payload):undefined,signal:AbortSignal.timeout(TIMEOUT)}),raw=await r.text();let body=null;try{body=JSON.parse(raw)}catch{}let note="";try{note=safe(inspect?.(body,raw,r)||"")}catch(e){note=`!inspect ${safe(e.message||e)}`;}return{name,critical,ok:r.ok&&!note.startsWith("!"),status:r.status,ms:Date.now()-t,host:host(url),note};}catch(e){return{name,critical,ok:false,status:"-",ms:Date.now()-t,host:host(url),note:safe(e.message||e)};}}
 const fredApi=`https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&api_key=${encodeURIComponent(FRED_KEY)}&file_type=json&sort_order=desc&limit=3`;
@@ -23,10 +29,10 @@ const checks=[
  ["mempool fees","https://mempool.space/api/v1/fees/recommended",b=>Number.isFinite(Number(b?.fastestFee))?`sat/vB 1-block ${b.fastestFee}`:'!fees missing'],
  ["Blockstream fees","https://blockstream.info/api/fee-estimates",b=>Number.isFinite(Number(b?.["1"]))?`sat/vB targets 1=${b["1"]},3=${b["3"]},6=${b["6"]}`:'!fee estimates missing'],
  ["Coin Metrics enrichment",`${cmRoot}/timeseries/asset-metrics?${cmQ}`,b=>{const row=b?.data?.[0],served=row?Object.keys(row).filter(k=>!['asset','time'].includes(k)):[];return row?`${served.length}/9 fields · ${row.time?.slice(0,10)} · ${served.join(',')}`:'!no rows';}],
- ["bitcoin-data MVRV","https://bitcoin-data.com/v1/mvrv/last",b=>{const x=Array.isArray(b)?b.at(-1):(b?.data??b),v=Number(x?.mvrv??x?.value);return Number.isFinite(v)?`MVRV ratio ${v}`:"!MVRV missing";}],
+ ...(BITCOIN_DATA_WINDOW?[["bitcoin-data MVRV","https://bitcoin-data.com/v1/mvrv/last",b=>{const x=Array.isArray(b)?b.at(-1):(b?.data??b),v=Number(x?.mvrv??x?.value);return Number.isFinite(v)?`MVRV ratio ${v}`:"!MVRV missing";}]]:[]),
  // Теневой слой (vote:false): отказ этих эндпоинтов не деградирует quality решения, но виден здесь.
  ["FiscalData TGA daily","https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/dts/operating_cash_balance?fields=record_date,account_type,close_today_bal,open_today_bal&filter="+encodeURIComponent("account_type:eq:Treasury General Account (TGA) Closing Balance")+"&sort=-record_date&page[size]=3",b=>{const r=b?.data?.[0],v=[r?.close_today_bal,r?.open_today_bal].map(Number).find(Number.isFinite);return Number.isFinite(v)?`${r.record_date} · $${(v/1000).toFixed(0)} млрд (open_today_bal — квирк DTS)`:'!TGA row missing'}],
- ["bitcoin-data STH-RP","https://bitcoin-data.com/v1/sth-realized-price",b=>{const x=Array.isArray(b)?b.at(-1):null,v=x?Number(Object.entries(x).find(([k,y])=>!["d","day","date","unixTs","ts","time"].includes(k)&&Number.isFinite(Number(y)))?.[1]):NaN;return Number.isFinite(v)?`последняя точка $${Math.round(v)} · строки-значения, нужен Number()`:'!STH-RP missing'}],
+ ...(BITCOIN_DATA_WINDOW?[["bitcoin-data STH-RP","https://bitcoin-data.com/v1/sth-realized-price/last",b=>{const x=Array.isArray(b)?b.at(-1):b,v=x?Number(Object.entries(x).find(([k,y])=>!["d","day","date","unixTs","ts","time"].includes(k)&&Number.isFinite(Number(y)))?.[1]):NaN;return Number.isFinite(v)?`точка ${x?.d??x?.day??x?.date} · ${Math.round(v)} · строки-значения, нужен Number()`:'!STH-RP missing'}]]:[]),
  ["Coinbase PAXG-USD","https://api.exchange.coinbase.com/products/PAXG-USD/candles?granularity=86400",b=>Array.isArray(b)&&b.length?`${b.length} candles · gold proxy close $${b[0]?.[4]}`:'!PAXG candles missing'],
  ["Blockchain active addresses","https://api.blockchain.info/charts/n-unique-addresses?timespan=30days&format=json&sampled=false",chart("addresses","count")],
  ["Blockchain transactions","https://api.blockchain.info/charts/n-transactions?timespan=30days&format=json&sampled=false",chart("transactions","count")],
@@ -72,6 +78,7 @@ const checks=[
 const results=[];for(const [n,u,i,o] of checks)results.push(await probe(n,u,i,o));
 console.log("STATE CRIT HTTP    MS HOST                         NAME · CONTRACT");for(const x of results)console.log(`${x.ok?'OK  ':'FAIL'}  ${x.critical?'YES ':' no '} ${String(x.status).padEnd(4)} ${String(x.ms).padStart(5)} ${x.host.padEnd(28)} ${x.name} · ${x.note}`);
 const cf=results.filter(x=>x.critical&&!x.ok),of=results.filter(x=>!x.critical&&!x.ok);console.log(`\nCritical failures: ${cf.length}${cf.length?' · '+cf.map(x=>x.name).join(', '):''}`);console.log(`Optional/fallback failures: ${of.length}${of.length?' · '+of.map(x=>x.name).join(', '):''}`);console.log('Probe is diagnostic; candidate validation and TTL remain authoritative.');
+if(!BITCOIN_DATA_WINDOW)console.log("bitcoin-data MVRV/STH-RP: вне окна квоты (первый такт 05 и 17 UTC) — пропущено сознательно, не потеряно.");
 // ---- Разведка SosoValue: свежесть и согласие с каноническим рядом The Block ----
 // Единственная проверка, которая отвечает на вопрос «стоит ли интегрировать»: опережает ли
 // SosoValue The Block НА РАННЕРЕ и совпадают ли они на общих днях. Ничего не блокирует.

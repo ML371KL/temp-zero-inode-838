@@ -10,7 +10,7 @@ import {execFileSync} from "node:child_process";
 // несуществующие файлы ДО импорта модуля — поэтому импорт динамический.
 process.env.PREVIOUS_STATE=".state/__test_absent__.json";
 process.env.PREVIOUS_PUBLIC=".state/__test_absent__.json";
-const {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives,fetchEtfFlows}=await import("./fetch-snapshot.mjs");
+const {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives,fetchEtfFlows,fetchSthOnchain}=await import("./fetch-snapshot.mjs");
 const NOW=Date.now(),DAY=864e5;
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json"}}),text=(body,status=200)=>new Response(body,{status,headers:{"content-type":"text/plain"}});
 const originalFetch=globalThis.fetch,originalSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
@@ -349,5 +349,48 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
     assert.equal(legNeedsRefetch(lastAttemptAt(packet),t3,probedAt+t3-1),false,"до истечения интервала со времени разведки — молчим");
     assert.equal(legNeedsRefetch(lastAttemptAt(packet),t3,probedAt+t3),true,"после — снова разведываем");
   }
+  {
+    // ДВУХКОНВЕЙЕРНАЯ РАЗВЕДКА STH. Ряд-разведчик может отстать у провайдера сам по себе
+    // (28.08–01.09.2026: sth-realized-price молчал четверо суток при свежих sopr/lth-sopr),
+    // и опрос одного ряда замораживал весь пакет вместе со свежими соседями. Контракт: до
+    // трёх суток отставания — одна разведка (штатное ожидание вчерашней точки провайдером);
+    // с третьих суток обязан спрашиваться второй конвейер; «есть новое» от любого из двух
+    // запускает полный захват. Экономия и спасение проверяются здесь ОБЕ: лишний запрос в
+    // штатном ритме — регрессия квоты, отсутствие второго — возврат заморозки.
+    const floorDay=Math.floor(NOW/DAY)*DAY;
+    const day=t=>new Date(t).toISOString().slice(0,10);
+    const mkSeries=endT=>Array.from({length:220},(_,i)=>({d:day(endT-(219-i)*DAY),v:60000+i}));
+    let calls=[];
+    const stub=map=>{calls=[];globalThis.fetch=async u=>{const s=String(u);calls.push(s);
+      for(const [frag,resp] of map)if(s.includes(frag))return json(resp);
+      return json({error:"unexpected "+s},404);};};
+    const cacheAt=lag=>({observed_at:new Date(floorDay-lag*DAY).toISOString(),data:{}});
+
+    // 1. Штатное утро: точка позавчерашняя, разведчик говорит «нового нет» — ровно один запрос.
+    stub([["sth-realized-price/last",{d:day(floorDay-2*DAY)}]]);
+    await fetchSthOnchain(cacheAt(2));
+    assert.equal(calls.length,1,"отставание в двое суток — штатный ритм, вторая разведка запрещена");
+
+    // 2. Слепое пятно: разведчик молчит четвёртые сутки, а SOPR-конвейер уже свежий — захват обязан случиться.
+    stub([
+      ["sth-realized-price/last",{d:day(floorDay-4*DAY)}],
+      ["sopr/last",{d:day(floorDay-DAY)}],
+      ["sth-realized-price",mkSeries(floorDay-4*DAY)],
+      ["lth-sopr",mkSeries(floorDay-DAY)],
+      ["sopr",mkSeries(floorDay-DAY)],
+    ]);
+    const grabbed=await fetchSthOnchain(cacheAt(4));
+    assert.equal(calls.length,5,"с третьих суток: две разведки и полный захват трёх рядов");
+    assert.equal(day(Date.parse(grabbed.observed_at)),day(floorDay-DAY),"наблюдение обязано дотянуться до свежего конвейера, а не до отставшего разведчика");
+
+    // 3. Отстали оба конвейера: две разведки — и тишина до следующего интервала, без захвата.
+    stub([
+      ["sth-realized-price/last",{d:day(floorDay-4*DAY)}],
+      ["sopr/last",{d:day(floorDay-4*DAY)}],
+    ]);
+    await fetchSthOnchain(cacheAt(4));
+    assert.equal(calls.length,2,"молчат оба — захват не запускается, расход ограничен двумя разведками");
+  }
+
   console.log("Fallback contract tests OK");
 }finally{globalThis.fetch=originalFetch;globalThis.setTimeout=originalSetTimeout;}
