@@ -70,7 +70,7 @@ cron-job.org (например, в :20 каждые 2 часа) на `monitor.ym
 | Хешрейт, сложность | mempool.space | blockchain.info | — | — | **H/s** (сырые хеши) |
 | Комиссии | mempool.space | Blockstream | — | — | sat/vB |
 | Потоки spot-ETF | **свежайшее из двух зеркал The Block** | + SosoValue дополняет свежие дни | кэш канона + SosoValue | SosoValue целиком | USD/день |
-| **MVRV** | **Coin Metrics** | **bitcoin-data.com/BGeometrics (без ключа)** | — | — | безразмерное отношение |
+| **MVRV** | **Coin Metrics** | **bitview.space — Bitcoin Research Kit (без ключа; 4 года, короче Coin Metrics намеренно)** | — | — | безразмерное отношение |
 | Адреса, транзакции | Coin Metrics | blockchain.info | — | — | шт/день |
 | Доход майнеров | Coin Metrics (эмиссия + комиссии) | blockchain.info (total) | — | — | USD/день |
 | Пеги USDT/USDC | DefiLlama | медиана Kraken/Gemini/Bitstamp (минимум 2 котировки; Coinbase USDC-USD отдаёт 404) | — | — | USD за токен |
@@ -79,7 +79,7 @@ cron-job.org (например, в :20 каждые 2 часа) на `monitor.ym
 | Деривативы | Deribit | Kraken Futures, OKX, **Hyperliquid** (geo-free) | — | — | USD; funding за 8ч |
 | **Теневой слой:** TGA дневная | Treasury FiscalData (DTS, T+1; значение строки «Closing Balance» лежит в `open_today_bal`) | — | — | — | млрд USD |
 | Теневой слой: G3-балансы ЦБ | FRED `ECBASSETSW`+`JPNASSETS`+`DEX*` | FRED CSV (без ключа) | — | — | трлн USD |
-| Теневой слой: STH cost basis, SOPR | bitcoin-data.com/BGeometrics (без ключа; значения — строки) | — | — | — | USD; безразмерное |
+| Теневой слой: STH cost basis, SOPR | bitview.space — Bitcoin Research Kit (без ключа; STH — 150 дней, только закрытые сутки) | — | — | — | USD; безразмерное |
 | Теневой слой: золото | Coinbase candles `PAXG-USD` (трекинг фьючерса ~0.3%) | — | — | — | USD |
 | Теневой слой: терм IV, put/call OI | Deribit (тот же ответ опционов, ноль новых запросов) | — | — | — | п.п.; отношение |
 

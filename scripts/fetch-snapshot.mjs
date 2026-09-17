@@ -74,6 +74,7 @@ const SOURCE_URLS = {
   blockchain: "https://www.blockchain.com/explorer/api/charts_api",
   blockstream: "https://github.com/Blockstream/esplora/blob/master/API.md",
   bitcoindata: "https://bitcoin-data.com/bguser/free-features.html",
+  bitview: "https://bitview.space/api",
   fiscaldata: "https://fiscaldata.treasury.gov/api-documentation/",
   sosovalue: "https://sosovalue.gitbook.io/soso-value-api-doc",
 };
@@ -825,19 +826,56 @@ function parseCftc(rows){return (rows||[]).map(r=>({
 function parseBlockchainChart(j,{scale=1,minPoints=30,expectedUnit=null}={}){if(j?.status&&j.status!=="ok")throw new Error(`Blockchain chart status ${j.status}`);if(expectedUnit&&j?.unit&&!String(j.unit).toLowerCase().includes(String(expectedUnit).toLowerCase()))throw new Error(`Blockchain chart unit ${j.unit}, expected ${expectedUnit}`);const a=(j?.values||[]).map(x=>({t:Number(x.x)*1000,v:Number(x.y)*scale})).filter(x=>finite(x.t)&&finite(x.v)).sort((x,y)=>x.t-y.t);if(a.length<minPoints)throw new Error(`Blockchain chart too short: ${a.length}`);return a;}
 async function fetchBlockchainChart(name,timespan,{scale=1,minPoints=30,expectedUnit=null}={}){const u=`https://api.blockchain.info/charts/${name}?timespan=${encodeURIComponent(timespan)}&format=json&sampled=false`;return parseBlockchainChart(await request(u,{tries:2}),{scale,minPoints,expectedUnit});}
 function validateBlockchainOnchainData(data,maxAge=4*DAY){const errors=[],dates=[];for(const[k,a]of Object.entries(data||{})){const t=Number(last(a)?.t),age=NOW-t;if(!Array.isArray(a)||a.length<180||!Number.isFinite(t)||age< -HOUR||age>maxAge){data[k]=[];errors.push(`series unavailable/stale: ${k}`);}else dates.push(t);}if(!dates.length)throw new Error(errors.join("; ")||"no Blockchain on-chain series");return{observed_at:iso(Math.min(...dates)),partial:errors.length>0,errors};}
-// Keyless realized-cap MVRV ratio (BGeometrics / bitcoin-data.com). blockchain.info publishes no MVRV
-// chart, so this is the only free, vendor-independent MVRV fallback for Coin Metrics' CapMVRVCur.
-async function fetchBitcoinDataMvrv(){
-  const payload=await request("https://bitcoin-data.com/v1/mvrv",{tries:2});
-  const arr=Array.isArray(payload)?payload:Array.isArray(payload?.data)?payload.data:[];
-  const rows=arr.map(x=>{const raw=x?.unixTs??x?.timestamp??x?.time??x?.date,number=Number(raw),t=Number.isFinite(number)?(number<1e12?number*1000:number):Date.parse(raw),v=Number(x?.mvrv??x?.value);return{t,v};}).filter(x=>finite(x.t)&&finite(x.v)).sort((a,b)=>a.t-b.t);
-  if(rows.length<180)throw new Error(`bitcoin-data MVRV too short: ${rows.length}`);
+// bitview.space — бесплатный хостинг Bitcoin Research Kit (MIT): метрики считаются по собственной
+// копии блокчейна, ключ не нужен. Сменил bitcoin-data.com (BGeometrics), который с 10–11.09.2026
+// отдаёт бесплатно только точки старше семи суток («Real-time data (last 7 days) requires an active
+// subscription»): такой ряд валидатор свежести отвергает всегда, и оба слоя на нём стояли пустыми.
+//
+// Сетка дневная, календарная, с 2009-01-01. ПОСЛЕДНЯЯ СТРОКА — ТЕКУЩИЕ СУТКИ, и она пересчитывается
+// с каждым блоком (сверено: значение дня совпадает со значением последнего блока). Поэтому берутся
+// только закрытые дни, и с запасом в час после полуночи UTC: блок с меткой прошлых суток может
+// прийти и позже неё. Закрытые дни между выгрузками не менялись (сверка 17.09.2026).
+//
+// Даты и значения запрашиваются ОТДЕЛЬНО с одним и тем же абсолютным диапазоном индексов, а не одним
+// пакетным /bulk. В ответе ряда нет его имени, а два ряда одного типа (sopr_24h и lth_sopr_24h — оба
+// StoredF32) при смене порядка в пакете поменялись бы местами молча. Относительный старт (-N) — только
+// у дат: между запросами могли начаться новые сутки, и у рядов значений он съехал бы на день.
+// Ответ, у которого диапазон не совпал с датами, отвергается целиком. Переименованный ряд отдаёт 404.
+const BITVIEW_API = "https://bitview.space/api";
+const BITVIEW_DAY_SETTLE = 1*HOUR;
+async function fetchBitviewDaily(names,{days}){
+  const span=b=>b?.index==="day1"&&Number.isInteger(b?.start)&&Number.isInteger(b?.end)&&Array.isArray(b?.data)&&b.data.length===b.end-b.start;
+  const dates=await request(`${BITVIEW_API}/series/date/day1?start=-${days+2}&format=json`,{tries:2});
+  if(!span(dates)||dates.type!=="Date")throw new Error("bitview: unexpected date index response");
+  const out={};
+  for(const name of names){
+    const b=await request(`${BITVIEW_API}/series/${name}/day1?start=${dates.start}&end=${dates.end}&format=json`,{tries:2});
+    if(!span(b)||b.start!==dates.start||b.end!==dates.end)throw new Error(`bitview ${name}: index range mismatch`);
+    out[name]=dates.data.map((d,i)=>({t:Date.parse(String(d)+"T00:00:00Z"),v:b.data[i]===null?NaN:Number(b.data[i])}))
+      .filter(r=>finite(r.t)&&finite(r.v)&&r.v>0&&r.t+DAY+BITVIEW_DAY_SETTLE<=NOW)
+      .sort((x,y)=>x.t-y.t).slice(-days);
+  }
+  return out;
+}
+// Резерв MVRV для CapMVRVCur Coin Metrics. Сверка 17.09.2026 на 1461 дне: корреляция с CapMVRVCur
+// 0,99996, медиана расхождения +0,05 %, 90 % дней в −0,3…+0,4 %; ступень балла (перцентиль 4 лет,
+// пороги 95/82/10) совпала в 984 днях из 990, все шесть расхождений — у порога 82 в пределах 0,9 п.
+// У прежнего резерва корреляция ДНЕВНЫХ изменений с Coin Metrics была 0,52, у этого — 0,99.
+//
+// ГЛУБИНА ОБРЕЗАЕТСЯ ДО ЧЕТЫРЁХ ЛЕТ НАМЕРЕННО. Глубокое окно теневого кандидата v2 (mvrvDeepSeries)
+// берёт БОЛЕЕ ДЛИННЫЙ из двух рядов — Coin Metrics (~5 лет) или этого резерва, — а история BRK идёт с
+// 2010 года. Полный ряд молча перевёл бы v2 на другого поставщика и другое окно при исправном Coin
+// Metrics. Прежний резерв отдавал ровно четыре года (ограничение бесплатного тарифа) — столько и берём.
+const MVRV_FALLBACK_DAYS = 4*365;
+async function fetchBitviewMvrv(){
+  const rows=(await fetchBitviewDaily(["mvrv"],{days:MVRV_FALLBACK_DAYS})).mvrv;
+  if(rows.length<180)throw new Error(`bitview MVRV too short: ${rows.length}`);
   return rows;
 }
 // Раз в сутки. MVRV здесь — ЗАПАСНОЙ путь: основной приезжает от Coin Metrics тем же
 // прогоном, бесплатно и без лимитов, и запасной нужен на случай, когда основного не будет.
 // Держать его тёплым достаточно раз в сутки: ряд дневной, а каждый лишний опрос отнимался у
-// когортного слоя на том же хосте, которому нужно три запроса за раз из пятнадцати суточных.
+// когортного слоя на том же хосте. У bitview.space квоты нет, но ряд дневной — чаще незачем.
 const MVRV_FALLBACK_REFETCH = 24*HOUR;
 // Пауза после НЕУДАЧНОЙ попытки. Без неё троттлинг превращался в усилитель: метка
 // ставится только на успехе, значит при отказе нога считалась «давно не обновлённой» и
@@ -846,7 +884,7 @@ const MVRV_FALLBACK_REFETCH = 24*HOUR;
 // запасной путь не ждёт суток, но и не долбит.
 const MVRV_RETRY_AFTER_FAILURE = 1*HOUR;
 async function fetchBlockchainOnchain(){
-  // Троттлится ровно одна нога из четырёх — та, у которой квота. Три остальные идут на
+  // Троттлится ровно одна нога из четырёх — резерв MVRV (ряд дневной). Три остальные идут на
   // blockchain.info, где лимитов нет, и опрашиваются каждый такт, как и раньше: они кормят
   // решающие семьи, и притормаживать их заодно значило бы платить за чужую проблему.
   const prevPacket=previous?.datasets?.blockchain_onchain,prevMvrv=prevPacket?.data?.MVRV;
@@ -857,7 +895,7 @@ async function fetchBlockchainOnchain(){
   const reuseMvrv=Array.isArray(prevMvrv)&&prevMvrv.length>=180
     &&!(dueBySchedule&&retryAllowed);
   const tasks=await Promise.all([
-  reuseMvrv?{ok:true,label:"mvrv",value:prevMvrv}:settled("mvrv",()=>fetchBitcoinDataMvrv()),
+  reuseMvrv?{ok:true,label:"mvrv",value:prevMvrv}:settled("mvrv",()=>fetchBitviewMvrv()),
   settled("addresses",()=>fetchBlockchainChart("n-unique-addresses","5years",{minPoints:500})),
   settled("transactions",()=>fetchBlockchainChart("n-transactions","5years",{minPoints:500})),
   settled("miner revenue",()=>fetchBlockchainChart("miners-revenue","5years",{minPoints:500,expectedUnit:"USD"})),
@@ -866,7 +904,10 @@ async function fetchBlockchainOnchain(){
   // бы отодвинуть следующую попытку на сутки: один 429 стоил бы дня без запасного пути.
   const mvrvFetchedAt=reuseMvrv?prevPacket.mvrv_fetched_at:(tasks[0]?.ok?iso(NOW):prevPacket?.mvrv_fetched_at??null);
   const mvrvTriedAt=reuseMvrv?(prevPacket?.mvrv_tried_at??null):iso(NOW);
-  return{data,observed_at:q.observed_at,mvrv_fetched_at:mvrvFetchedAt,mvrv_tried_at:mvrvTriedAt,source:"Blockchain.com · bitcoin-data.com",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitcoindata],partial:errors.length>0,errors};}
+  // Чей ряд MVRV лежит в пакете: подпись карточки mvrv_cycle берётся отсюда (relabelMvrvFallback).
+  // Переиспользованный старый ряд без метки — от прежнего поставщика.
+  const mvrvSource=data.MVRV.length?(reuseMvrv?(prevPacket?.mvrv_source??"bitcoin-data.com"):"bitview.space"):null;
+  return{data,observed_at:q.observed_at,mvrv_fetched_at:mvrvFetchedAt,mvrv_tried_at:mvrvTriedAt,mvrv_source:mvrvSource,source:"Blockchain.com · bitview.space",source_url:SOURCE_URLS.blockchain,source_urls:[SOURCE_URLS.blockchain,SOURCE_URLS.bitview],partial:errors.length>0,errors};}
 
 function mockWalk(days,start,drift,vol,seed=1){let x=start,s=seed>>>0,out=[];for(let i=days-1;i>=0;i--){s=(1664525*s+1013904223)>>>0;const u=s/4294967296-.5;x=Math.max(.0001,x*(1+drift+u*vol));out.push({t:NOW-i*DAY,v:x});}return out;}
 function makeMock(){
@@ -933,59 +974,33 @@ async function fetchTgaDaily(){
   return{data:rows,observed_at:iso(last(rows).t),source:"Treasury FiscalData",source_url:SOURCE_URLS.fiscaldata,source_urls:[SOURCE_URLS.fiscaldata]};
 }
 
-// Когортный ончейн-слой BGeometrics (провайдер уже служит резервом MVRV): себестоимость
-// краткосрочных держателей и реализованный P&L. Значения приходят СТРОКАМИ — обязателен Number().
-// Запросы СТРОГО последовательные с паузой: три конкурентных запроса теневого слоя съедали
-// free-tier-лимит хоста и валили ГОЛОСУЮЩИЙ MVRV-fallback того же прогона (ревью 2026-07-21).
+// Когортный ончейн-слой: себестоимость краткосрочных держателей и реализованный P&L. Теневой — не
+// голосует (decision_relevant:false). Источник — bitview.space (см. fetchBitviewDaily): у прежнего
+// bitcoin-data.com бесплатные данные с 10–11.09.2026 опаздывают на семь суток, и слой стоял пустым
+// с 15.09. Сверка 17.09.2026 на четырёх годах против прежнего ряда: STH realized price — корреляция
+// 0,9998, медиана +0,27 %, 90 % дней в −1,6…+2,0 %; SOPR 7-дневный — 0,98, 90 % дней в ±0,2 %,
+// сторона от единицы совпала в 98,1 % дней; LTH-SOPR — 0,9986, сторона от единицы в 98,6 %.
+// Отличия методологические: граница STH у BRK — 150 дней против 155, цена — ончейн-оракул (за четыре
+// года в пределах ±1,6 % от биржевой). Истории не сшиваются: все три ряда — от одного поставщика.
+//
+// Запросов нет вовсе, пока в кэше есть вчерашняя точка (dailySeriesIsCurrent); загрузка — четыре
+// лёгких запроса (даты и три ряда). Глубина — четыре года, как у прежнего источника: размер кэша и
+// карточки прежние. Проверка правдоподобия последней точки ловит смену единиц у провайдера (BRK
+// переводил часть рядов с базисных пунктов на ppm) — такой ряд отвергается, а не рисуется.
+const STH_HISTORY_DAYS = 4*365;
 async function fetchSthOnchain(cached){
-  // РАЗВЕДКА ОДНИМ ЗАПРОСОМ вместо трёх. Полный опрос стоит три запроса из пятнадцати
-  // суточных, а суффикс `/last` отдаёт только последнюю точку и стоит один. Ряды дневные:
-  // если день не сменился, качать три истории заново незачем — они побайтово те же.
-  //
-  // Провал самой разведки наверх и уходит, как отказ источника: это те же 429, и честнее
-  // потратить на них один запрос, чем три. Нераспознанный ответ разведки не считается
-  // «нового нет» (см. probeIsOlderOrSame) — иначе смена формата у провайдера заморозила бы
-  // ряд навсегда, ни разу не покраснев.
-  // Ноль запросов, пока ряд актуален по календарю. Квота 15/сутки на IP стала жёстко нашей
-  // после переезда сбора на постоянный адрес, а разведка каждые три часа тратила восемь
-  // запросов в сутки на ряд, который обновляется раз в день. Ходим только тогда, когда
-  // вчерашней точки у нас ещё нет, — то есть один раз за сутки плюс повторы, пока провайдер
-  // её не выложит.
   if(dailySeriesIsCurrent(cached?.observed_at))return UNCHANGED;
-  if(cached?.observed_at){
-    const probe=await request(`https://bitcoin-data.com/v1/sth-realized-price/last`,{tries:1});
-    if(probeIsOlderOrSame(probe?.d??probe?.day??probe?.date,cached.observed_at)){
-      // Ряд-разведчик может отстать у провайдера сам, пока SOPR-конвейер уже обновился:
-      // 28.08–01.09.2026 sth-realized-price застрял на четверо суток при свежих sopr и
-      // lth-sopr — и пакет замер целиком, потому что «нового нет» спрашивали только у
-      // отставшего. Пока разрыв не превышает двух суток, одной разведки достаточно — это
-      // штатный ритм ожидания вчерашней точки. С третьих суток молчание одного ряда уже
-      // не доказательство, и прежде чем уснуть ещё на три часа, спрашиваем второй конвейер.
-      const lagDays=Math.floor(NOW/DAY)-Math.floor(Date.parse(String(cached.observed_at))/DAY);
-      if(lagDays<3)return UNCHANGED;
-      await sleep(900);
-      const probe2=await request(`https://bitcoin-data.com/v1/sopr/last`,{tries:1});
-      if(probeIsOlderOrSame(probe2?.d??probe2?.day??probe2?.date,cached.observed_at))return UNCHANGED;
-    }
-  }
-  const grab=async path=>{
-    // tries:1 — повтор внутри прогона удваивал бы расход квоты на ровном месте: при 429
-    // вторая попытка успешнее не станет, а следующий такт всё равно придёт через три часа.
-    const rows=await request(`https://bitcoin-data.com/v1/${path}`,{tries:1});
-    if(!Array.isArray(rows))throw new Error(`${path}: not an array`);
-    const out=rows.map(r=>{
-      const dateRaw=String(r.d||r.day||r.date||"");
-      const t=Date.parse(dateRaw.includes("T")?dateRaw:dateRaw+"T00:00:00Z");
-      const v=Number(Object.entries(r).find(([k,x])=>!["d","day","date","unixTs","ts","time"].includes(k)&&finite(x))?.[1]);
-      return{t,v};
-    }).filter(r=>finite(r.t)&&finite(r.v)&&r.v>0).sort((a,b)=>a.t-b.t);
-    if(out.length<180)throw new Error(`${path} too short: ${out.length}`);
-    return out;
+  const s=await fetchBitviewDaily(["sth_realized_price","sopr_24h","lth_sopr_24h"],{days:STH_HISTORY_DAYS});
+  const checked=(name,rows,lo,hi)=>{
+    if(rows.length<180)throw new Error(`${name} too short: ${rows.length}`);
+    const v=last(rows).v;
+    if(!(v>=lo&&v<=hi))throw new Error(`${name}: implausible latest value ${v}`);
+    return rows;
   };
-  const sthRp=await grab("sth-realized-price");await sleep(900);
-  const sopr=await grab("sopr");await sleep(900);
-  const lthSopr=await grab("lth-sopr");
-  return{data:{sth_rp:sthRp,sopr,lth_sopr:lthSopr},observed_at:iso(Math.max(last(sthRp).t,last(sopr).t,last(lthSopr).t)),source:"bitcoin-data.com",source_url:SOURCE_URLS.bitcoindata,source_urls:[SOURCE_URLS.bitcoindata]};
+  const sthRp=checked("sth_realized_price",s.sth_realized_price,1e3,1e7);
+  const sopr=checked("sopr_24h",s.sopr_24h,.2,5);
+  const lthSopr=checked("lth_sopr_24h",s.lth_sopr_24h,.05,50);
+  return{data:{sth_rp:sthRp,sopr,lth_sopr:lthSopr},observed_at:iso(Math.max(last(sthRp).t,last(sopr).t,last(lthSopr).t)),source:"bitview.space",source_url:SOURCE_URLS.bitview,source_urls:[SOURCE_URLS.bitview]};
 }
 
 // Ось store-of-value: золото через PAXG-USD на уже используемой Coinbase Exchange (трекинг фьючерса
@@ -1239,8 +1254,8 @@ async function collect(){
     // MVRV/flows/activity/miners and nothing else.
     loadDataset("coinmetrics","coinmetrics",4*DAY,fetchCoinMetrics,x=>CM_METRICS.some(k=>x?.[k]?.length>=180),{maxObservedAge:4*DAY}),
     // Каждый такт, как и раньше: три ноги из четырёх идут на blockchain.info без лимитов и
-    // кормят решающие семьи. Квота есть только у четвёртой — MVRV с bitcoin-data.com, — и
-    // притормаживается именно она, внутри самого загрузчика (MVRV_FALLBACK_REFETCH).
+    // кормят решающие семьи. Раз в сутки качается только четвёртая — резерв MVRV с bitview.space,
+    // — внутри самого загрузчика (MVRV_FALLBACK_REFETCH).
     loadDataset("blockchain_onchain","blockchain",4*DAY,fetchBlockchainOnchain,x=>Object.values(x||{}).some(a=>a?.length>=180),{maxObservedAge:4*DAY}),
     // 7 days: publication lag (1-2d) + a long US-holiday weekend must not zero out the family.
     loadDataset("etf","theblock",7*DAY,fetchEtfFlows,x=>validateEtfSeries(x,7*DAY),{maxObservedAge:7*DAY}),
@@ -1253,15 +1268,10 @@ async function collect(){
     loadDataset("tga_daily","fiscaldata",4*DAY,fetchTgaDaily,x=>x?.length>100,{maxObservedAge:6*DAY,decisionRelevant:false}),
     loadDataset("gold","coinbase",4*DAY,fetchPaxgHistory,x=>x?.length>=200,{maxObservedAge:5*DAY,decisionRelevant:false}),
   ]);
-  // bitcoin-data.com — ПОСЛЕ основного пакета: голосующий MVRV-fallback (blockchain_onchain)
-  // ходит на тот же хост, и теневой слой не имеет права конкурировать с ним за free-tier-лимит.
-  //
-  // Три часа — это нижняя граница между РАЗВЕДКАМИ, а не между загрузками. Разведка стоит
-  // один запрос и почти всегда отвечает «нового нет»; три ряда выкачиваются только в тот
-  // такт, когда у источника сменился день. Суточный расход: 8 разведок + 3 на одну загрузку
-  // + 1 на запасной MVRV = 12 из 15, с запасом на повтор при сбое. Отставание от появления
-  // новой точки — не больше трёх часов (было двенадцать при фиксированном интервале).
-  await loadDataset("sth_onchain","bitcoindata",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:3*HOUR,cacheAware:true});
+  // Теневой когортный слой — ПОСЛЕ основного пакета, как и прежде. Три часа между попытками — нижняя
+  // граница на случай, когда источник не отдаёт вчерашнюю точку: в штатном ритме запросов нет вовсе,
+  // пока вчерашняя точка в кэше, и одна загрузка в сутки после полуночи UTC (+1 ч на закрытие дня).
+  await loadDataset("sth_onchain","bitview",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:3*HOUR,cacheAware:true});
 }
 
 function metric(def){return{
@@ -1275,6 +1285,24 @@ function metric(def){return{
 };}
 function cmSeries(id){return series(data("coinmetrics")?.[id]||[]);}
 function bcSeries(id){return series(data("blockchain_onchain")?.[id]||[]);}
+// Подпись резерва MVRV живёт ВНУТРИ POLICY-LOCK:scoring_and_regimes_v1 (вызов chooseWholeSeries и текст
+// карточки mvrv_cycle), и хэш секции менять нельзя — это правка замороженной policy v1. Резерв же сменил
+// поставщика (bitcoin-data.com → bitview.space, см. fetchBitviewMvrv), и без этой функции карточка
+// называла бы источником того, кто данных больше не отдаёт. Меняется ТОЛЬКО подпись: ряд, перцентиль,
+// балл и голос остаются ровно теми, что посчитала секция. Ряд прежнего поставщика, переиспользованный
+// из кэша, сохраняет прежнюю подпись.
+function relabelMvrvFallback(metrics){
+  const m=metrics.find(x=>x?.id==="mvrv_cycle");
+  if(!m)return metrics;
+  const packet=datasets.blockchain_onchain,legacyLeg=(packet?.data?.MVRV?.length>0)&&packet?.mvrv_source!=="bitview.space";
+  if(legacyLeg)return metrics;
+  if(typeof m.note==="string")m.note=m.note.replace("bitcoin-data.com/BGeometrics — открытый keyless MVRV fallback","bitview.space (Bitcoin Research Kit) — открытый keyless MVRV fallback");
+  if(m.source==="bitcoin-data.com")m.source="bitview.space";
+  const swap=u=>u===SOURCE_URLS.bitcoindata?SOURCE_URLS.bitview:u;
+  if(m.source_url)m.source_url=swap(m.source_url);
+  if(Array.isArray(m.source_urls))m.source_urls=uniqueHttps(m.source_urls.map(swap));
+  return metrics;
+}
 function chooseWholeSeries(cmId,bcId,{fallbackSource="Blockchain.com",fallbackUrls=[SOURCE_URLS.blockchain]}={}){const c=cmSeries(cmId);if(c.length>=180)return{series:c,source:"Coin Metrics",keys:["coinmetrics"],urls:[SOURCE_URLS.coinmetrics]};const b=bcSeries(bcId);return b.length>=180?{series:b,source:fallbackSource,keys:["blockchain_onchain"],urls:fallbackUrls}:{series:[],source:"",keys:["coinmetrics","blockchain_onchain"],urls:[SOURCE_URLS.coinmetrics,...fallbackUrls]};}
 function marketSeries(k){return series(data("market")?.[k]||[]);}
 function netSeries(k){return series(data("network")?.[k]||[]);}
@@ -1705,13 +1733,13 @@ function buildShadowMetrics(){
   const sthRpSeries=series(sthData.sth_rp||[]);
   const sthRpLast=last(sthRpSeries)?.v;
   const sthMvrv=finite(priceLast)&&finite(sthRpLast)&&sthRpLast>0?priceLast/sthRpLast:null;
-  add({id:"sth_pricing",block:"cycle",family:"valuation",name:"Себестоимость STH · STH-MVRV",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:sthMvrv,value:finite(sthMvrv)?sthMvrv.toFixed(2):"—",delta:finite(sthRpLast)?`STH realized price $${Math.round(sthRpLast).toLocaleString("en-US")}`:"",note:"Цена относительно себестоимости краткосрочных держателей — практический водораздел режимов: в восходящем уровень выкупается, в нисходящем служит сопротивлением. Дополняет 4-летний перцентиль агрегатного MVRV более быстрой когортной осью. Из задокументированных exclusions — принят в теневой слой решением владельца.",score:null,source:"bitcoin-data.com",source_url:SOURCE_URLS.bitcoindata,...sourceMeta("sth_onchain"),series:sthRpSeries.slice(-180)});
+  add({id:"sth_pricing",block:"cycle",family:"valuation",name:"Себестоимость STH · STH-MVRV",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:sthMvrv,value:finite(sthMvrv)?sthMvrv.toFixed(2):"—",delta:finite(sthRpLast)?`STH realized price $${Math.round(sthRpLast).toLocaleString("en-US")}`:"",note:"Цена относительно себестоимости краткосрочных держателей — практический водораздел режимов: в восходящем уровень выкупается, в нисходящем служит сопротивлением. Дополняет 4-летний перцентиль агрегатного MVRV более быстрой когортной осью. Из задокументированных exclusions — принят в теневой слой решением владельца.",score:null,source:"bitview.space",source_url:SOURCE_URLS.bitview,...sourceMeta("sth_onchain"),series:sthRpSeries.slice(-180)});
 
   // 5. Реализованный P&L: SOPR и LTH-SOPR.
   const soprSeries=series(sthData.sopr||[]),lthSoprSeries=series(sthData.lth_sopr||[]);
   const sopr7=soprSeries.length>=7?mean(soprSeries.slice(-7).map(x=>x.v)):null;
   const lthLast=last(lthSoprSeries)?.v;
-  add({id:"realized_pnl",block:"cycle",family:"valuation",name:"Реализованный P&L · SOPR",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:sopr7,value:finite(sopr7)?sopr7.toFixed(4):"—",delta:finite(lthLast)?`LTH-SOPR ${lthLast.toFixed(2)}`:"",note:"Продают ли монеты в прибыль или в убыток — прямое измерение того, что детекторы дистрибуции и восстановления проксируют косвенно: устойчивый SOPR<1 — капитуляция в процессе, возврат к 1 снизу — классический маркер её завершения; LTH-SOPR≫1 при высоком MVRV — раздача долгосрочных держателей. 7-дневное среднее.",score:null,source:"bitcoin-data.com",source_url:SOURCE_URLS.bitcoindata,...sourceMeta("sth_onchain"),series:soprSeries.slice(-180)});
+  add({id:"realized_pnl",block:"cycle",family:"valuation",name:"Реализованный P&L · SOPR",horizon:"medium",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:sopr7,value:finite(sopr7)?sopr7.toFixed(4):"—",delta:finite(lthLast)?`LTH-SOPR ${lthLast.toFixed(2)}`:"",note:"Продают ли монеты в прибыль или в убыток — прямое измерение того, что детекторы дистрибуции и восстановления проксируют косвенно: устойчивый SOPR<1 — капитуляция в процессе, возврат к 1 снизу — классический маркер её завершения; LTH-SOPR≫1 при высоком MVRV — раздача долгосрочных держателей. 7-дневное среднее.",score:null,source:"bitview.space",source_url:SOURCE_URLS.bitview,...sourceMeta("sth_onchain"),series:soprSeries.slice(-180)});
 
   // 6. Опционная структура: терм IV + put/call OI.
   const derivData=data("derivatives")||{};
@@ -1781,7 +1809,7 @@ function compute(){
   if(Array.isArray(previous?.history))previous.history=previous.history.filter(h=>plausibleHistoryRecord(h,priceByDay));
   // Теневой слой конкатенируется ПОСЛЕ голосующих карточек: familyStats/детекторы фильтруют по
   // vote, поэтому порядок и состав решающего контура не меняются.
-  const metrics=[...buildMetrics(),...buildShadowMetrics()],blocks={};
+  const metrics=relabelMvrvFallback([...buildMetrics(),...buildShadowMetrics()]),blocks={};
   for(const [k,b] of Object.entries(BLOCKS))blocks[k]={...b,strategic:familyStats(metrics,k,"strategic"),tactical:familyStats(metrics,k,"tactical")};
   const {detectors,hardOverride}=buildDetectors(metrics);
   let strategicRaw=0,sw=0,tacticalRaw=0,tw=0;
@@ -1827,7 +1855,7 @@ function compute(){
     risk_off_confirmed_under_min_interval:previous?.regime?.strategic&&stableS.state===stableS.candidate&&stableS.state!==previous.regime.strategic&&severity(stableS.state)<severity(previous.regime.strategic)&&riskOffConfirmationDeferredV2({previousSnapshotAt:previous?.generated_at,now:NOW})?1:0,
   };
   // Второе окно MVRV для теневого кандидата v2 (двухоконное согласие капитуляционного пола):
-  // ПОЛНАЯ доступная глубина ряда без усечения (CM ~5 лет, резерв bitcoin-data — вся история;
+  // ПОЛНАЯ доступная глубина ряда без усечения (CM ~5 лет, резерв bitview.space обрезан до 4 лет;
   // POLICY.md обещает full-depth — ранние экстремумы MVRV и есть смысл глубокого окна). Гарды:
   // минимум 1200 точек И свежесть последней точки ≤5 дней — протухший «более длинный» ряд другого
   // провайдера иначе накладывал бы вето по доаварийным данным. При любом гарде → null, и пол
@@ -1882,7 +1910,7 @@ function compute(){
   };
 }
 
-export { FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchSthOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchSthOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});

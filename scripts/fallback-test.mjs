@@ -10,9 +10,23 @@ import {execFileSync} from "node:child_process";
 // несуществующие файлы ДО импорта модуля — поэтому импорт динамический.
 process.env.PREVIOUS_STATE=".state/__test_absent__.json";
 process.env.PREVIOUS_PUBLIC=".state/__test_absent__.json";
-const {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives,fetchEtfFlows,fetchSthOnchain}=await import("./fetch-snapshot.mjs");
+const {fetchFredSeries,fetchMarket,fetchNetwork,fetchPegs,fetchBlockchainOnchain,fetchCftc,fetchDerivatives,fetchEtfFlows,fetchSthOnchain,fetchBitviewDaily,relabelMvrvFallback}=await import("./fetch-snapshot.mjs");
 const NOW=Date.now(),DAY=864e5;
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json"}}),text=(body,status=200)=>new Response(body,{status,headers:{"content-type":"text/plain"}});
+// bitview.space: дневная календарная сетка. Индекс — число суток от 2009-01-01, как у настоящего API;
+// ряд заканчивается ПОЗАВЧЕРА, чтобы итог не зависел от времени суток прогона (правило закрытия дня
+// «полночь UTC + 1 ч» проверяется отдельно). Значение ряда — функция индекса.
+const BV_EPOCH=Date.parse("2009-01-01T00:00:00Z"),BV_FLOOR=Math.floor(NOW/DAY)*DAY;
+function bitview(u,{lastDay=BV_FLOOR-2*DAY,values={},override={}}={}){
+  const url=new URL(u),m=/^\/api\/series\/([a-z0-9_]+)\/day1$/.exec(url.pathname);
+  if(!m)return json({error:{code:"unexpected "+u}},404);
+  const name=m[1],lastIdx=Math.round((lastDay-BV_EPOCH)/DAY),len=lastIdx+1;
+  if(name!=="date"&&!values[name])return json({error:{type:"not_found",code:"series_not_found"}},404);
+  const s=Number(url.searchParams.get("start")),e=url.searchParams.has("end")?Number(url.searchParams.get("end")):len;
+  const start=s<0?len+s:s,end=Math.min(e,len),data=[];
+  for(let i=start;i<end;i++){const t=BV_EPOCH+i*DAY;data.push(name==="date"?new Date(t).toISOString().slice(0,10):values[name](i,t));}
+  return json({version:1,index:"day1",type:name==="date"?"Date":"StoredF32",start,end,stamp:new Date(NOW).toISOString(),data,...(override[name]||{})});
+}
 const originalFetch=globalThis.fetch,originalSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
 let mode="";
 const blockchain=(name,n=1500,unit="")=>({status:"ok",name,unit,period:"day",values:Array.from({length:n},(_,i)=>({x:Math.floor((NOW-(n-1-i)*DAY)/1000),y:name==="hash-rate"?600_000_000+i*1000:name==="difficulty"?80e12+i*1e9:name==="mvrv"?1.2+i/10000:name==="n-unique-addresses"?700000+i:name==="n-transactions"?300000+i:name==="miners-revenue"?30e6+i*1000:name==="trade-volume"?5e9+i*1e6:50000+i}))});
@@ -67,7 +81,7 @@ globalThis.fetch=async input=>{const u=String(input);
   if(mode==="network"){if(u.includes("mempool.space/api/v1/mining/hashrate"))return json({},503);if(u.includes("charts/hash-rate"))return json(blockchain("hash-rate",400,"TH/s"));if(u.includes("charts/difficulty"))return json(blockchain("difficulty",100,""));if(u.includes("difficulty-adjustment"))return json({},503);if(u.includes("fees/recommended"))return json({},503);if(u.includes("blockstream.info/api/fee-estimates"))return json({"1":2.5,"3":2,"6":1.5});}
   if(mode==="pegs"){if(u.includes("stablecoins.llama.fi"))return json({peggedAssets:[]});if(u.includes("products/USDT-USD"))return json({price:"0.9998"});if(u.includes("products/USDC-USD"))return json({price:"1.0001"});if(u.includes("pair=USDTUSD"))return json({error:[],result:{USDTUSD:{c:["0.9999"]}}});if(u.includes("pair=USDCUSD"))return json({error:[],result:{USDCUSD:{c:["1.0000"]}}});if(u.includes("pubticker/USDTUSD"))return json({last:"1.0000"});if(u.includes("pubticker/USDCUSD"))return json({last:"1.0001"});}
   if(mode==="pegs_single"){if(u.includes("stablecoins.llama.fi"))return json({peggedAssets:[]});if(u.includes("products/USDT-USD"))return json({price:"0.9998"});if(u.includes("products/USDC-USD"))return json({price:"1.0001"});return json({},503);}
-  if(mode==="onchain"){if(u.includes("bitcoin-data.com/v1/mvrv"))return json(Array.from({length:700},(_,i)=>({unixTs:Math.floor((NOW-(699-i)*DAY)/1000),mvrv:1.2+i/10000})));for(const name of ["n-unique-addresses","n-transactions","miners-revenue"])if(u.includes(`/charts/${name}`))return json(blockchain(name,700,name==="miners-revenue"?"USD":""));}
+  if(mode==="onchain"){if(u.includes("bitview.space/api/series/"))return bitview(u,{values:{mvrv:i=>1.2+(i%700)/10000}});for(const name of ["n-unique-addresses","n-transactions","miners-revenue"])if(u.includes(`/charts/${name}`))return json(blockchain(name,700,name==="miners-revenue"?"USD":""));}
   if(mode==="etf"){if(u.includes("theblock.co"))return json(etfChart(0));if(u.includes("tbstat.com"))return json({},503);}
   // Зеркало свежее основного API ровно на один торговый день — реальная и постоянная ситуация.
   if(mode==="etf_mirror_fresher"){if(u.includes("theblock.co"))return json(etfChart(1));if(u.includes("tbstat.com"))return json(etfChart(0));}
@@ -110,7 +124,7 @@ try{
   mode="network";const n=await fetchNetwork();assert.match(n.source,/Blockchain/);assert.equal(n.data.hashrate.length,400);assert.ok(n.data.hashrate.at(-1).v>6e20);assert.equal(n.data.fees.fastest,2.5);
   mode="pegs";const p=await fetchPegs();assert.ok(Math.abs(p.data.USDT-.9999)<.0002);assert.ok(Math.abs(p.data.USDC-1.0001)<.0002);assert.equal(p.partial,true);
   mode="pegs_single";const p1=await fetchPegs();assert.equal(p1.data.USDT,undefined,"one exchange quote must not establish USDT peg");assert.equal(p1.data.USDC,undefined,"one exchange quote must not establish USDC peg");assert.match(p1.errors.join(";"),/at least 2 independent quotes/);
-  mode="onchain";const o=await fetchBlockchainOnchain();assert.equal(o.data.MVRV.length,700);assert.equal(o.data.AdrActCnt.length,700);assert.equal(o.data.TxCnt.length,700);assert.equal(o.data.MinerRevUSD.length,700);
+  mode="onchain";const o=await fetchBlockchainOnchain();assert.equal(o.data.MVRV.length,4*365,"резерв MVRV обрезается ровно до четырёх лет");assert.equal(o.mvrv_source,"bitview.space");assert.match(o.source,/bitview\.space/);assert.equal(o.data.AdrActCnt.length,700);assert.equal(o.data.TxCnt.length,700);assert.equal(o.data.MinerRevUSD.length,700);
   mode="etf";const e=await fetchEtfFlows();assert.equal(e.source,"The Block");assert.ok(e.data.length>=100,`etf rows ${e.data.length}`);assert.ok(e.data.every(x=>![0,6].includes(new Date(x.t).getUTCDay())),"etf weekend rows leaked");
 
   // ---- Выбор источника ETF: свежайшее ВАЛИДНОЕ зеркало одного провайдера ----
@@ -350,46 +364,75 @@ console.log(JSON.stringify({source:r.source,len:r.data.length,partial:r.partial,
     assert.equal(legNeedsRefetch(lastAttemptAt(packet),t3,probedAt+t3),true,"после — снова разведываем");
   }
   {
-    // ДВУХКОНВЕЙЕРНАЯ РАЗВЕДКА STH. Ряд-разведчик может отстать у провайдера сам по себе
-    // (28.08–01.09.2026: sth-realized-price молчал четверо суток при свежих sopr/lth-sopr),
-    // и опрос одного ряда замораживал весь пакет вместе со свежими соседями. Контракт: до
-    // трёх суток отставания — одна разведка (штатное ожидание вчерашней точки провайдером);
-    // с третьих суток обязан спрашиваться второй конвейер; «есть новое» от любого из двух
-    // запускает полный захват. Экономия и спасение проверяются здесь ОБЕ: лишний запрос в
-    // штатном ритме — регрессия квоты, отсутствие второго — возврат заморозки.
-    const floorDay=Math.floor(NOW/DAY)*DAY;
-    const day=t=>new Date(t).toISOString().slice(0,10);
-    const mkSeries=endT=>Array.from({length:220},(_,i)=>({d:day(endT-(219-i)*DAY),v:60000+i}));
+    // КОГОРТНЫЙ СЛОЙ И РЕЗЕРВ MVRV С BITVIEW.SPACE (смена поставщика 17.09.2026: bitcoin-data.com
+    // закрыл последние семь суток подпиской, и оба слоя стояли пустыми). Контракт:
+    //   • пока в кэше вчерашняя точка — ни одного запроса;
+    //   • загрузка — даты и каждый ряд ПОИМЁННО с общим абсолютным диапазоном, без /bulk;
+    //   • текущие сутки не берутся никогда, вчерашние — только через час после полуночи UTC;
+    //   • разъехавшийся диапазон, 404 переименованного ряда и смена единиц отвергают пакет целиком.
+    const floorDay=BV_FLOOR;
+    const values={sth_realized_price:i=>60000+i%500,sopr_24h:i=>1+((i%7)-3)/1000,lth_sopr_24h:i=>1.1+(i%5)/100,mvrv:i=>1.4};
     let calls=[];
-    const stub=map=>{calls=[];globalThis.fetch=async u=>{const s=String(u);calls.push(s);
-      for(const [frag,resp] of map)if(s.includes(frag))return json(resp);
-      return json({error:"unexpected "+s},404);};};
+    const stub=(opts={})=>{calls=[];globalThis.fetch=async u=>{const s=String(u);calls.push(s);return bitview(s,{values,...opts});};};
     const cacheAt=lag=>({observed_at:new Date(floorDay-lag*DAY).toISOString(),data:{}});
 
-    // 1. Штатное утро: точка позавчерашняя, разведчик говорит «нового нет» — ровно один запрос.
-    stub([["sth-realized-price/last",{d:day(floorDay-2*DAY)}]]);
-    await fetchSthOnchain(cacheAt(2));
-    assert.equal(calls.length,1,"отставание в двое суток — штатный ритм, вторая разведка запрещена");
+    // 1. Вчерашняя точка уже в кэше — источник не трогаем.
+    stub();
+    await fetchSthOnchain(cacheAt(1));
+    assert.equal(calls.length,0,"вчерашняя точка в кэше — запросов быть не должно");
 
-    // 2. Слепое пятно: разведчик молчит четвёртые сутки, а SOPR-конвейер уже свежий — захват обязан случиться.
-    stub([
-      ["sth-realized-price/last",{d:day(floorDay-4*DAY)}],
-      ["sopr/last",{d:day(floorDay-DAY)}],
-      ["sth-realized-price",mkSeries(floorDay-4*DAY)],
-      ["lth-sopr",mkSeries(floorDay-DAY)],
-      ["sopr",mkSeries(floorDay-DAY)],
-    ]);
-    const grabbed=await fetchSthOnchain(cacheAt(4));
-    assert.equal(calls.length,5,"с третьих суток: две разведки и полный захват трёх рядов");
-    assert.equal(day(Date.parse(grabbed.observed_at)),day(floorDay-DAY),"наблюдение обязано дотянуться до свежего конвейера, а не до отставшего разведчика");
+    // 2. Кэш отстал — ровно четыре поимённых запроса, без /bulk, и четыре года глубины.
+    stub();
+    const got=await fetchSthOnchain(cacheAt(4));
+    assert.equal(calls.length,4,"загрузка — даты и три ряда");
+    assert.ok(calls.every(u=>!u.includes("/bulk")),"пакетный /bulk запрещён");
+    assert.match(calls[0],/\/series\/date\/day1\?start=-/,"первым идут даты с относительным стартом");
+    for(const u of calls.slice(1))assert.match(u,/start=\d+&end=\d+/,`ряды значений — только с абсолютным диапазоном дат (${u})`);
+    assert.equal(got.source,"bitview.space");
+    assert.deepEqual(Object.keys(got.data).sort(),["lth_sopr","sopr","sth_rp"],"ключи пакета прежние — карточки читают их без изменений");
+    for(const k of ["sth_rp","sopr","lth_sopr"])assert.equal(got.data[k].length,4*365,`${k}: глубина ровно четыре года`);
+    assert.equal(new Date(Date.parse(got.observed_at)).toISOString().slice(0,10),new Date(floorDay-2*DAY).toISOString().slice(0,10));
+    // Значение пришло именно из своего ряда: STH-RP ~60 тыс., SOPR ~1, LTH-SOPR ~1,1.
+    assert.ok(got.data.sth_rp.at(-1).v>50000&&got.data.sopr.at(-1).v<1.01&&got.data.lth_sopr.at(-1).v>=1.1,"ряды перепутаны местами");
 
-    // 3. Отстали оба конвейера: две разведки — и тишина до следующего интервала, без захвата.
-    stub([
-      ["sth-realized-price/last",{d:day(floorDay-4*DAY)}],
-      ["sopr/last",{d:day(floorDay-4*DAY)}],
-    ]);
-    await fetchSthOnchain(cacheAt(4));
-    assert.equal(calls.length,2,"молчат оба — захват не запускается, расход ограничен двумя разведками");
+    // 3. Без кэша — тоже загрузка.
+    stub();await fetchSthOnchain(null);assert.equal(calls.length,4);
+
+    // 4. Текущие сутки не берутся никогда; вчерашние — только после 01:00 UTC.
+    stub({lastDay:floorDay});
+    const fresh=await fetchBitviewDaily(["sopr_24h"],{days:30});
+    const lastDay=new Date(fresh.sopr_24h.at(-1).t).toISOString().slice(0,10);
+    assert.notEqual(lastDay,new Date(floorDay).toISOString().slice(0,10),"текущие сутки пересчитываются с каждым блоком — брать их нельзя");
+    const sinceMidnight=Date.now()-floorDay;
+    if(Math.abs(sinceMidnight-3600e3)>60e3){
+      const expected=new Date(floorDay-(sinceMidnight>=3600e3?1:2)*DAY).toISOString().slice(0,10);
+      assert.equal(lastDay,expected,"вчерашние сутки закрываются через час после полуночи UTC");
+    }
+
+    // 5. Разъехавшийся диапазон — пакет отвергается целиком.
+    stub({override:{sopr_24h:{start:1}}});
+    await assert.rejects(fetchSthOnchain(cacheAt(4)),/index range mismatch/);
+
+    // 6. Переименованный ряд — 404, пакет отвергается, а не собирается из оставшихся.
+    stub({values:{...values,lth_sopr_24h:undefined}});
+    await assert.rejects(fetchSthOnchain(cacheAt(4)),/HTTP 404/);
+
+    // 7. Смена единиц у провайдера (отношение в ppm) — отвергается, а не рисуется.
+    stub({values:{...values,sopr_24h:()=>1_000_000}});
+    await assert.rejects(fetchSthOnchain(cacheAt(4)),/implausible latest value/);
+
+    // 8. Подпись резерва MVRV: секция под замком пишет прежнего поставщика, наружу уходит новый;
+    //    ряд и балл не трогаются, подпись Coin Metrics — тоже.
+    const lockedCard={id:"mvrv_cycle",source:"bitcoin-data.com",source_url:"https://bitcoin-data.com/bguser/free-features.html",
+      source_urls:["https://bitcoin-data.com/bguser/free-features.html"],score:-1,value_num:83.2,
+      note:"Coin Metrics первым; bitcoin-data.com/BGeometrics — открытый keyless MVRV fallback. Истории разных методологий не сшиваются."};
+    const [card]=relabelMvrvFallback([{...lockedCard}]);
+    assert.equal(card.source,"bitview.space");
+    assert.deepEqual(card.source_urls,["https://bitview.space/api"]);
+    assert.match(card.note,/bitview\.space \(Bitcoin Research Kit\) — открытый keyless MVRV fallback/);
+    assert.equal(card.score,-1);assert.equal(card.value_num,83.2);
+    const [cm]=relabelMvrvFallback([{...lockedCard,source:"Coin Metrics",source_url:"https://docs.coinmetrics.io/api",source_urls:["https://docs.coinmetrics.io/api"]}]);
+    assert.equal(cm.source,"Coin Metrics","подпись основного источника не трогается");
   }
 
   console.log("Fallback contract tests OK");

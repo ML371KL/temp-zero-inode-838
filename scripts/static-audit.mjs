@@ -103,7 +103,7 @@ const requiredDocs=[
   "publicreporting.cftc.gov","docs.deribit.com","bybit-exchange.github.io",
   "okx.com","docs.cdp.coinbase.com","docs.kraken.com",
   "docs.coingecko.com","mempool.space","bitstamp.net","blockchain.com","blockstream","gemini.com",
-  "theblock.co","bitcoin-data.com","hyperliquid","fiscaldata.treasury.gov"
+  "theblock.co","bitview.space","hyperliquid","fiscaldata.treasury.gov"
 ];
 for(const host of requiredDocs)assert.ok(collector.includes(host),`documentation/source host missing: ${host}`);
 
@@ -197,16 +197,26 @@ assert.match(html,/setInterval\(\(\)=>\{if\(SNAP\)render\(\)\}/,"periodic re-ren
     "реестр попыток обязан публиковаться в снимке и переноситься вперёд — иначе метка теряется между прогонами");
 }
 {
-  // ДИАГНОСТИКА НЕ ИМЕЕТ ПРАВА ЖЕЧЬ КВОТУ ДАННЫХ. probe.mjs ходит с того же IP, что и
-  // сборщик, а у bitcoin-data.com 10 запросов в час и 15 в сутки: опрос каждые 15 минут
-  // (да ещё всей историей ряда, а не последней точкой) съедал лимит источника решения.
-  // Пин: только /last и только внутри окна квоты. Инцидент 28.08–01.09.2026.
+  // ДИАГНОСТИКА НЕ КАЧАЕТ ИСТОРИЮ. У bitview.space ограничен «вес» запроса, а проба ходит каждый
+  // такт: только последняя точка (/latest), пакетные и диапазонные запросы в пробе запрещены.
   const probe=readFileSync(new URL("./probe.mjs",import.meta.url),"utf8");
-  for(const m of probe.matchAll(/https:\/\/bitcoin-data\.com\/v1\/[a-z-]+(\/last)?/g))
-    assert.ok(m[0].endsWith("/last"),`probe.mjs: полный ряд bitcoin-data в диагностике запрещён (${m[0]}) — история качается целиком при каждом вызове`);
-  assert.match(probe,/const BITCOIN_DATA_WINDOW=/,
-    "probe.mjs: строки bitcoin-data обязаны ходить в окне квоты, а не каждый такт");
-  const gated=probe.match(/\.\.\.\(BITCOIN_DATA_WINDOW\?/g)||[];
-  assert.equal(gated.length,2,"probe.mjs: обе строки bitcoin-data (MVRV и STH-RP) обязаны стоять за окном квоты");
+  const bitview=[...probe.matchAll(/https:\/\/bitview\.space\/api\/[^"'`\s]+/g)].map(m=>m[0]);
+  assert.equal(bitview.length,2,"probe.mjs: ожидались две строки bitview.space (MVRV и STH-RP)");
+  for(const u of bitview)assert.ok(u.endsWith("/latest"),`probe.mjs: история ряда в диагностике запрещена (${u})`);
+  assert.doesNotMatch(probe,/bitcoin-data\.com\/v1/,"probe.mjs: bitcoin-data.com больше не источник — его строки не нужны");
+}
+{
+  // РЕЗЕРВ MVRV КОРОЧЕ COIN METRICS — ИНВАРИАНТ ГЛУБОКОГО ОКНА v2. mvrvDeepSeries берёт БОЛЕЕ
+  // ДЛИННЫЙ из двух рядов, а у bitview.space история с 2010 года. Резерв длиннее Coin Metrics молча
+  // перевёл бы теневой кандидат v2 на другого поставщика и другое окно при исправном основном.
+  const fallbackDays=/const MVRV_FALLBACK_DAYS = (\d+)\*365;/.exec(collector);
+  const cmYears=/const start=new Date\(NOW-(\d+)\*365\*DAY\)/.exec(collector);
+  assert.ok(fallbackDays&&cmYears,"глубина резерва MVRV или окна Coin Metrics не найдена");
+  assert.ok(Number(fallbackDays[1])<Number(cmYears[1]),`резерв MVRV (${fallbackDays[1]} г.) обязан быть короче Coin Metrics (${cmYears[1]} г.)`);
+  assert.match(collector,/const mvrvDeepSeries=\[cmSeries\("CapMVRVCur"\),bcSeries\("MVRV"\)\]\.sort\(\(a,b\)=>b\.length-a\.length\)/,
+    "выбор глубокого окна изменился — пересмотри инвариант глубины резерва");
+  // Ряды bitview.space — только поимённо с общим абсолютным диапазоном: в ответе нет имени ряда, и
+  // пакетный /bulk при смене порядка молча поменял бы местами sopr_24h и lth_sopr_24h.
+  assert.doesNotMatch(collector,/bitview\.space\/api\/series\/bulk|\$\{BITVIEW_API\}\/series\/bulk/,"пакетный /bulk для bitview.space запрещён");
 }
 console.log(`Static audit OK: ${ids.length} DOM ids, ${lookups.length} DOM lookups, ${snap.metrics.length} metrics, ${Object.keys(snap.sources||{}).length} sources`);

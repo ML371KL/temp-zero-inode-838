@@ -218,6 +218,7 @@ const RELEASE_HUMAN = {
   "cftc · the block (tbstat)": "Отчёт CFTC о позициях во фьючерсах",
   fiscaldata: "Минфин США",
   "bitcoin-data.com": "Ончейн-данные сети биткоина",
+  "bitview.space": "Ончейн-данные сети биткоина",
   coinbase: "Биржевые цены",
   "coinbase exchange": "Биржевые цены",
   "coingecko · blockchain.com · market history": "Рыночные цены биткоина",
@@ -239,7 +240,7 @@ const BLOCK_TITLE = {
 const RELEASE_PATTERNS = [
   [/the block|sosovalue|spot.?etf/i, "Потоки в биткоин-ETF"],
   [/cftc/i, "Отчёт CFTC о позициях во фьючерсах"],
-  [/coinmetrics|coin metrics|bitcoin-data|bgeometrics/i, "Ончейн-данные сети биткоина"],
+  [/coinmetrics|coin metrics|bitcoin-data|bgeometrics|bitview/i, "Ончейн-данные сети биткоина"],
   [/mempool|blockstream|esplora/i, "Сеть биткоина"],
   [/defillama/i, "Стейблкоины"],
   [/fiscaldata|treasury|минфин/i, "Минфин США"],
@@ -604,6 +605,7 @@ const SOURCE_LABEL = {
   fiscaldata: "Treasury FiscalData",
   cftc: "CFTC",
   "bitcoin-data.com": "bitcoin-data.com",
+  "bitview.space": "bitview.space",
 };
 const sourceLabel = (s) => SOURCE_LABEL[String(s || "").trim().toLowerCase()] || String(s || "источник");
 
