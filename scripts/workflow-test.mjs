@@ -15,6 +15,13 @@ assert.match(y,/^\s*if:\s*vars\.COLLECTOR\s*==\s*'github'\s*$/m,"прогон с
 assert.match(notifyY,/^\s*push:\s*$/m,"уведомления обязаны просыпаться на push");
 assert.match(notifyY,/^\s*- "docs\/snapshot\.json"\s*$/m,"уведомления обязаны следить за файлом снимка");
 assert.doesNotMatch(notifyY,/^\s*workflow_run:\s*$/m,"workflow_run сборки больше не наступает: этот триггер молчал бы вечно");
+// Уведомления: состояние переживает упавший прогон, а упавший тест не глушит рассылку (аудит 10.10.2026, 5.6).
+assert.match(notifyY,/uses:\s*actions\/cache\/restore@v5/,"состояние уведомлений восстанавливается отдельным шагом");
+assert.match(notifyY,/if:\s*always\(\)\s*&&\s*hashFiles\('\.notify\/state\.json'\)\s*!=\s*''\s*\n\s*uses:\s*actions\/cache\/save@v5/,"состояние уведомлений сохраняется при любом исходе рассылки");
+assert.doesNotMatch(notifyY,/uses:\s*actions\/cache@v\d/,"единый actions/cache сохраняет файл только при успехе: упавший прогон терял индекс доставленного");
+assert.match(notifyY,/id:\s*selftest\s*\n\s*continue-on-error:\s*true/,"тесты уведомлений не должны блокировать рассылку");
+assert.match(notifyY,/NOTIFY_SELFTEST:\s*\$\{\{\s*steps\.selftest\.outcome\s*\}\}/,"исход тестов обязан доходить до скрипта: по нему включается осторожный режим");
+assert.match(notifyY,/if:\s*always\(\)\s*&&\s*steps\.selftest\.outcome\s*==\s*'failure'[\s\S]*exit 1/,"упавший тест обязан красить прогон");
 assert.match(y,/cron:\s*"23 \* \* \* \*"/,"hourly schedule missing");
 assert.match(y,/actions\/checkout@v6/);
 assert.match(y,/actions\/setup-node@v6/);

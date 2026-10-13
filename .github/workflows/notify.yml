@@ -50,15 +50,29 @@ jobs:
       # Состояние «что уже отправлено» живёт в Actions Cache тем же приёмом, что и .state/cache.json
       # сборщика. Потеря кэша безопасна: скрипт увидит пустое состояние, зафиксирует базу заново
       # и промолчит — худший исход это пропуск уведомления, а не лавина сообщений.
+      #
+      # Восстановление и сохранение РАЗНЕСЕНЫ на два шага. Единый actions/cache сохраняет файл
+      # только при успешном прогоне, а скрипт пишет индекс доставленного после каждой отправки
+      # именно затем, чтобы упавший прогон не повторил уже ушедшее. С единым шагом это не работало:
+      # падение посреди рассылки (ошибка Telegram, тайм-аут) теряло и базу, и индекс, и следующий
+      # прогон слал те же сообщения заново.
       - name: Восстановить состояние уведомлений
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .notify/state.json
-          key: btc21m-notify-${{ github.ref_name }}-${{ github.run_id }}
+          key: btc21m-notify-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             btc21m-notify-${{ github.ref_name }}-
 
+      # Тесты стоят перед рассылкой, но её НЕ блокируют. Раньше красный тест молча выключал
+      # уведомления целиком — включая сообщения о доле, ради которых бот существует. Теперь упавший
+      # тест делает три вещи: красит прогон (последний шаг), переводит рассылку в осторожный режим
+      # (NOTIFY_SELFTEST=failure: идут сообщения о решении, сигналы риска и предупреждения о данных;
+      # публикации и пересмотры, в которых ошибка кода могла бы дать лавину, не рассылаются) и один
+      # раз в сутки сообщает об этом в Telegram.
       - name: Тесты уведомлений
+        id: selftest
+        continue-on-error: true
         run: node scripts/notify-test.mjs
 
       - name: Разослать изменения
@@ -71,7 +85,25 @@ jobs:
           NOTIFY_SNAPSHOT: docs/snapshot.json
           NOTIFY_STATE: .notify/state.json
           NOTIFY_PING: ${{ inputs.ping && '1' || '0' }}
+          NOTIFY_SELFTEST: ${{ steps.selftest.outcome }}
           NEXUS_EVENTS_URL: ${{ vars.NEXUS_EVENTS_URL }}
           NEXUS_SOURCE_ID: "838"
           NEXUS_INGEST_TOKEN: ${{ secrets.NEXUS_INGEST_TOKEN }}
         run: node scripts/notify.mjs
+
+      # Сохраняется при ЛЮБОМ исходе рассылки, включая отмену по тайм-ауту: на диске лежит либо
+      # новая база, либо прежняя база с пополненным индексом доставленного — оба состояния верны.
+      # Номер попытки в ключе нужен, чтобы «Re-run jobs» не упёрся в уже занятый ключ и не остался
+      # без сохранения. Файла нет (кэш пуст, а скрипт упал до первой записи) — сохранять нечего.
+      - name: Сохранить состояние уведомлений
+        if: always() && hashFiles('.notify/state.json') != ''
+        uses: actions/cache/save@v5
+        with:
+          path: .notify/state.json
+          key: btc21m-notify-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Красный прогон при упавших тестах
+        if: always() && steps.selftest.outcome == 'failure'
+        run: |
+          echo "::error::Тесты уведомлений не прошли: рассылка шла в осторожном режиме (без публикаций и пересмотров данных)."
+          exit 1

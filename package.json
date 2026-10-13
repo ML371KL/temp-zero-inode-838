@@ -24,6 +24,7 @@
     "fallback": "node scripts/fallback-test.mjs",
     "notify": "node scripts/notify.mjs",
     "notify-test": "node scripts/notify-test.mjs",
+    "notify-mutation": "node scripts/notify-mutation.mjs",
     "conditional": "node scripts/conditional-test.mjs",
     "function": "node scripts/snapshot-function-test.mjs"
   },
