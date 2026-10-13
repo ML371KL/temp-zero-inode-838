@@ -42,6 +42,35 @@ try{
   expectFail("undeclared ATH provenance",(x,state)=>{state.datasets.market.data.athSource="guess"},/ATH provenance must be declared/i);
   expectFail("optimism without valuation",(x,state)=>{x.scores.valuation_available=false;x.regime.strategic="constructive"},/optimistic verdict issued without valuation/i);
   expectFail("stale optional Coin Metrics series retained",(x,state)=>{const a=state.datasets.coinmetrics.data.CapMVRVCur;a[a.length-1].t=Date.now()-10*864e5},/Coin Metrics optional series retained while stale:CapMVRVCur/i);
+
+  // НЕОБЯЗАТЕЛЬНЫЕ ПОЛЯ (правки аудита 10.10.2026). Для живого кандидата порча поля — отказ: его
+  // писал этот же код и этим же контрактом уже проверил. Для ранее опубликованного снимка —
+  // предупреждение: проверка закоммиченного снимка стоит перед сбором и не имеет права остановить
+  // конвейер из-за справочного поля. Снимок прежней формы (без полей) обязан проходить.
+  {
+    const live=(name,mutate,pattern)=>expectFail(name,(x,state)=>{x.mock=false;mutate(x,state);},pattern,true);
+    live("malformed regime_birth",x=>{x.regime_birth={strategic:{t:"вчера",candidate:"undefined"}};},/optional field invalid: regime_birth/i);
+    live("malformed tick_diff",x=>{x.tick_diff={families:"x",detectors:[]};},/optional field invalid: tick_diff/i);
+    live("malformed valuation_levels",x=>{x.valuation_levels={...x.valuation_levels,levels:[]};},/optional field invalid: valuation_levels/i);
+    live("malformed data_warnings",x=>{x.data_warnings=[{code:"x"}];},/optional field invalid: data_warnings/i);
+    live("malformed diagnostics",x=>{x.diagnostics=[{scope:"x"}];},/optional field invalid: diagnostics/i);
+    live("malformed ETF legs",x=>{x.sources.etf.legs=[{name:"The Block",state:"maybe"}];},/optional field invalid: sources\.etf\.legs/i);
+    live("regime_birth about another candidate",x=>{const now=x.regime_meta.strategic.candidate,other=now==="defensive"?"transition":"defensive";x.regime_birth={strategic:{t:x.generated_at,candidate:other,from_candidate:now,price:1,blocks:{},families:[],detectors:[],note:"coverage"},tactical:null};},/regime_birth\.strategic describes candidate/i);
+    live("data warning about an unknown metric",x=>{x.data_warnings=[{source:"x",code:"y",text:"z",affects:["нет_такой_карточки"]}];},/points at an unknown metric/i);
+    live("valuation level contradicting the MVRV card",x=>{const m=x.metrics.find(y=>y.id==="mvrv_cycle");m.value_num=m.value_num<50?99:1;},/contradicts the MVRV card/i);
+
+    const expectPass=(name,mutate,pattern=null)=>{
+      const x=structuredClone(base),state=structuredClone(stateBase);mutate(x,state);writeFileSync(path,JSON.stringify(x));writeFileSync(statePath,JSON.stringify(state));
+      const r=spawnSync(process.execPath,[fileURLToPath(new URL("./self-test.mjs",import.meta.url))],{encoding:"utf8",env:{...process.env,OUT:path,STATE:statePath}});
+      const text=(r.stdout||"")+(r.stderr||"");
+      if(r.status!==0||(pattern&&!pattern.test(text)))throw new Error(`${name} must pass the published-snapshot check${pattern?" with a warning":""}:\n${text}`);
+    };
+    expectPass("mock snapshot with the new fields",()=>{});
+    expectPass("old-form snapshot without optional fields",x=>{for(const key of ["regime_birth","tick_diff","valuation_levels","data_warnings","diagnostics"])delete x[key];delete x.sources.etf.legs;});
+    expectPass("cold-start snapshot",x=>{x.regime_birth=null;x.tick_diff=null;x.valuation_levels=null;x.data_warnings=[];});
+    expectPass("malformed optional field in a published snapshot",x=>{x.tick_diff="мусор";},/optional field invalid: tick_diff[^\n]*heals on next collection/i);
+    expectPass("failed optional calculation is reported",x=>{x.regime_birth=null;x.diagnostics=[{scope:"regime_birth",error:"TypeError: boom"}];},/optional calculations failed: regime_birth: TypeError: boom/i);
+  }
 } finally {try{unlinkSync(path)}catch{}try{unlinkSync(statePath)}catch{}try{unlinkSync(generatedBasePath)}catch{}try{unlinkSync(generatedStatePath)}catch{}}
 
 // stabilize(): a stale optimistic anchor must never outrank today's candidate. Craft a previous

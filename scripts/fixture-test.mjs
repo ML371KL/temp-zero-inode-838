@@ -5,6 +5,9 @@ const now=Date.now();
 const mon=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
 function expiryName(days){const d=new Date(now+days*864e5);return `${String(d.getUTCDate()).padStart(2,"0")}${mon[d.getUTCMonth()]}${String(d.getUTCFullYear()).slice(-2)}`;}
 const e30=expiryName(30),e35=expiryName(35);
+const KRAKEN_PF_URL="https://futures.kraken.com/derivatives/api/v3/tickers/PF_XBTUSD",KRAKEN_DATED_URL="https://futures.kraken.com/derivatives/api/v3/tickers?contractType=flexible_futures";
+// Символ датированного линейного контракта Kraken с экспирацией через N дней — от текущего момента.
+function krakenDatedSymbol(days){const d=new Date(now+days*864e5),p=n=>String(n).padStart(2,"0");return `FF_XBTUSD_${p(d.getUTCFullYear()%100)}${p(d.getUTCMonth()+1)}${p(d.getUTCDate())}`;}
 
 function json(body,status=200){return new Response(JSON.stringify(body),{status,headers:{"content-type":"application/json"}})}
 const fixtures=new Map([
@@ -18,8 +21,10 @@ const fixtures=new Map([
   ["https://api.hyperliquid.xyz/info",[{universe:[{name:"BTC"}]},[{funding:"0.0000125",openInterest:"30000",markPx:"100000"}]]],
   ["https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP",{data:[{fundingRate:"0.00008",fundingTime:String(now-8*3600e3),nextFundingTime:String(now),ts:String(now-300)}]}],
   ["https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP",{data:[{oiUsd:"3000000000",ts:String(now-250)}]}],
-  ["https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{fundingRate:"2.5e-10",markPrice:"50000",openInterest:"1500000000"}}],
-  ["https://futures.kraken.com/derivatives/api/v3/tickers?contractType=futures_inverse",{result:"success",tickers:[]}],
+  // Линейный PF_XBTUSD: OI в BTC, fundingRate — USD на 1 BTC за час, relativeFundingRate — доля цены за час.
+  // Списка датированных контрактов Kraken в наборе НЕТ намеренно: пока основной basis жив, сборщик
+  // обязан за ним не ходить, и лишний запрос покраснеет здесь как «unexpected URL».
+  [KRAKEN_PF_URL,{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{symbol:"PF_XBTUSD",fundingRate:"1.25",relativeFundingRate:"0.0000125",markPrice:"100000",openInterest:"15000",suspended:false}}],
   ["https://api.exchange.coinbase.com/products/BTC-USD/ticker",{price:"100050",time:new Date(now-200).toISOString()}],
   ["https://api.kraken.com/0/public/Ticker?pair=XBTUSD",{result:{XXBTZUSD:{c:["100000","1"]}}}],
   ["https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",{data:[{last:"100020",ts:String(now-150)}]}],
@@ -63,7 +68,12 @@ try{
   assert.equal(d.data.funding.find(x=>x.venue==="Hyperliquid").rate8h,0.0001,"hourly Hyperliquid funding normalized to 8h");
   assert.equal(d.data.funding.find(x=>x.venue==="Hyperliquid").oiUsd,3_000_000_000,"Hyperliquid OI = openInterest(BTC) × markPx (USD)");
   assert.equal(d.data.funding.find(x=>x.venue==="Deribit").oiUsd,1_200_000_000,"Deribit OI remains USD, no price multiplication");
-  assert.equal(d.data.funding.find(x=>x.venue==="Kraken Futures").rate8h,0.0001,"absolute inverse-contract Kraken funding converted via markPrice and normalized to 8h");
+  const krakenRow=d.data.funding.find(x=>x.venue==="Kraken Futures PF");
+  assert.ok(krakenRow,"Kraken Futures обязан входить в площадки под ключом линейного контракта PF");
+  assert.equal(d.data.funding.some(x=>x.venue==="Kraken Futures"),false,"прежний ключ инверсного контракта не должен появляться: под ним в истории OI лежит другой масштаб");
+  assert.equal(krakenRow.rate8h,0.0001,"часовая относительная ставка PF приводится к 8 часам");
+  assert.equal(krakenRow.oiUsd,1_500_000_000,"OI PF задан в BTC и переводится в USD по markPrice");
+  assert.equal(d.data.components.some(x=>x.name==="kraken dated futures"),false,"пока основной basis жив, за резервным ходить не нужно");
   assert.ok(d.data.basis>20&&d.data.basis<30,"annualized dated-future basis");
   assert.equal(d.data.skew,7,"OTM put-call IV proxy");
   assert.ok(Date.parse(d.observed_at)<=now&&Date.parse(d.observed_at)>=now-1000,"exchange observation time propagated");
@@ -135,6 +145,58 @@ try{
   assert.equal(businessErrorSpot.partial,true,"Kraken business error marks spot packet partial");
   assert.equal(businessErrorSpot.data.kraken,null,"Kraken business error cannot create a quote");
   fixtures.set(krakenUrl,krakenFixture);
+  globalThis.setTimeout=originalSetTimeout;
+
+  // ---- Kraken Futures: линейный PF и резервный basis только с ликвидного контракта (аудит 10.10.2026, 5-Б) ----
+  globalThis.setTimeout=(fn,_ms,...args)=>originalSetTimeout(fn,0,...args);
+  {
+    const pfFixture=fixtures.get(KRAKEN_PF_URL);
+    // Относительной ставки в ответе нет — берётся абсолютная, делённая на цену: 1,25 $ на BTC за час при 100 000 $.
+    fixtures.set(KRAKEN_PF_URL,{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{symbol:"PF_XBTUSD",fundingRate:"1.25",markPrice:"100000",openInterest:"15000"}});
+    assert.equal((await fetchDerivatives()).data.funding.find(x=>x.venue==="Kraken Futures PF").rate8h,0.0001,"абсолютная ставка PF делится на markPrice, а не умножается, как у инверсного контракта");
+    // Приостановленный контракт не голосует ни ставкой, ни OI.
+    fixtures.set(KRAKEN_PF_URL,{result:"success",serverTime:new Date(now-350).toISOString(),ticker:{...pfFixture.ticker,suspended:true}});
+    const suspended=await fetchDerivatives();
+    assert.equal(suspended.data.funding.some(x=>/Kraken/.test(x.venue)),false,"приостановленный контракт не имеет права входить в площадки");
+    assert.equal(suspended.data.funding.length,3);
+    fixtures.set(KRAKEN_PF_URL,pfFixture);
+
+    // Deribit не отдал датированные фьючерсы — включается резерв Kraken. Мёртвый контракт (OI 0,
+    // оборот 0, mark = index) раньше давал basis РОВНО 0,0 % и голос «спокойно»; теперь это null.
+    forcedFailure="kind=future";
+    const dated=(over={})=>({result:"success",tickers:[
+      {symbol:krakenDatedSymbol(45),tag:"month",markPrice:"100000",indexPrice:"100000",openInterest:"0",vol24h:"0",volumeQuote:"0",suspended:false,...over},
+      {symbol:"FI_XBTUSD_991231",tag:"quarter",markPrice:"100000",indexPrice:"100000",openInterest:"0"},
+    ]});
+    fixtures.set(KRAKEN_DATED_URL,dated());
+    const dead=await fetchDerivatives();
+    assert.equal(dead.data.basis,null,"ноль мёртвого контракта не имеет права стать basis: нога обязана остаться без голоса");
+    assert.equal(dead.data.basisSource,null);
+    assert.match(dead.errors.join(" "),/нет ликвидного датированного контракта/,"причина отсутствия basis обязана быть названа");
+    assert.equal(dead.data.components.find(x=>x.name==="kraken dated futures")?.ok,true,"обращение к резерву обязано быть видно в компонентах пакета");
+    assert.equal(dead.data.funding.length,4,"funding и OI площадок от отказа датированных фьючерсов не страдают");
+    // Тонкий контракт (как квартальный FF на 10.10.2026: OI 3,6 млн $, оборот 46 тыс. $) порог не проходит.
+    fixtures.set(KRAKEN_DATED_URL,dated({markPrice:"100800",openInterest:"36",volumeQuote:"46000"}));
+    assert.equal((await fetchDerivatives()).data.basis,null,"неликвидный контракт резервной площадки не голосует");
+    // Ликвидный по OI: 600 BTC × 101 000 $ = 60,6 млн $. Basis = 1 % за 45 дней ≈ 8,1 % годовых.
+    fixtures.set(KRAKEN_DATED_URL,dated({markPrice:"101000",openInterest:"600"}));
+    const live=await fetchDerivatives();
+    assert.equal(live.data.basisSource,"Kraken Futures");
+    assert.ok(live.data.basis>7.9&&live.data.basis<8.4,`резервный basis с ликвидного контракта: ${live.data.basis}`);
+    // Ликвидный по обороту при малом OI.
+    fixtures.set(KRAKEN_DATED_URL,dated({markPrice:"101000",openInterest:"10",volumeQuote:"2500000"}));
+    assert.equal((await fetchDerivatives()).data.basisSource,"Kraken Futures","оборот от 1 млн $ за сутки тоже делает контракт ликвидным");
+    // Отказ самого резерва — basis null и строка диагностики, сбор не падает.
+    fixtures.delete(KRAKEN_DATED_URL);forcedFailure=null;
+    const savedFutures=fixtures.get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=future");
+    fixtures.set("https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=future",{result:[]});
+    forcedFailure="contractType=flexible_futures";
+    const noReserve=await fetchDerivatives();
+    assert.equal(noReserve.data.basis,null);
+    assert.match(noReserve.errors.join(" "),/kraken dated futures: HTTP 503/);
+    fixtures.set("https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=future",savedFutures);
+    forcedFailure=null;
+  }
   globalThis.setTimeout=originalSetTimeout;
 
   // US-runner geo-block: the offshore venue (OKX) disappears. The USDT quote group must survive on the

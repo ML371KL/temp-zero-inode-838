@@ -131,3 +131,174 @@ export function projectedPublicSnapshotBytesV1({ snapshotBytes, snapshot, dailyL
   const historyGrowth = Math.min(addedBytes(history, historyMaxRows), Math.max(0, HISTORY_BYTE_BUDGET - jsonBytesV1(history)));
   return snapshotBytes + dailyGrowth + addedBytes(decisions, decisionLogLimit) + historyGrowth;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Необязательные поля снимка (правки аудита 10.10.2026): regime_birth, tick_diff, valuation_levels,
+// data_warnings, diagnostics и sources.etf.legs.
+//
+// Правило одно для сборщика и для проверки перед публикацией: поля может не быть вовсе (снимок
+// прежней формы, холодный старт, отказ расчёта — null), но если оно есть, оно обязано иметь форму,
+// на которую рассчитывают витрина и уведомления. Сборщик прогоняет каждое поле через эту же функцию
+// ДО записи снимка и негодное заменяет на null со строкой диагностики, поэтому на живом кандидате
+// проверка self-test краснеть не может; она ловит порчу файла и расхождение версий кода.
+//
+// Бюджет размера — на каждое поле отдельно: строки растут по мере эволюции схемы, а жёсткий кап
+// файла однажды уже останавливал публикацию. Обычный снимок несёт во всех этих полях около 1,5 КБ.
+// Худший случай на живых именах карточек (все 20 голосующих семей и все семь детекторов сменились в
+// одном снимке): tick_diff 3,3 КБ, regime_birth 4,8 КБ, два предупреждения 0,5 КБ, ноги 0,3 КБ.
+// Потолки — с запасом в два с половиной раза и больше; их сумма 34 КБ при капе файла в 3 МБ.
+export const OPTIONAL_FIELD_MAX_BYTES = {
+  regime_birth: 12_000,
+  tick_diff: 8_000,
+  valuation_levels: 2_000,
+  data_warnings: 4_000,
+  diagnostics: 6_000,
+  etf_legs: 2_000,
+};
+export const OPTIONAL_SNAPSHOT_FIELDS = ["regime_birth", "tick_diff", "valuation_levels", "data_warnings", "diagnostics"];
+
+const REGIME_LABELS = new Set(["constructive", "unconfirmed_positive", "transition", "deteriorating", "defensive", "insufficient", "emergency",
+  "spot_led", "balanced", "overheated_supported", "fragile", "demand_break", "deleveraging", "short_squeeze"]);
+const DETECTOR_STATES = new Set(["calm", "watch", "fired", "good"]);
+const BLOCK_BANDS = new Set(["supportive", "neutral", "adverse", "unknown"]);
+const isObject = x => !!x && typeof x === "object" && !Array.isArray(x);
+const isText = x => typeof x === "string" && x.length > 0;
+const isIsoTime = x => typeof x === "string" && Number.isFinite(Date.parse(x));
+const isNumber = x => typeof x === "number" && Number.isFinite(x);
+const numberOrNull = x => x === null || isNumber(x);
+
+function familyRowProblems(rows, path) {
+  if (!Array.isArray(rows)) return [`${path}: ожидался массив`];
+  const out = [];
+  rows.forEach((row, i) => {
+    if (!isObject(row) || ![row.block, row.family, row.id, row.name].every(isText)) out.push(`${path}[${i}]: нужны block, family, id и name`);
+    else if (!numberOrNull(row.from) || !numberOrNull(row.to) || row.from === row.to) out.push(`${path}[${i}] (${row.id}): from и to — разные баллы либо null`);
+  });
+  return out;
+}
+function detectorRowProblems(rows, path) {
+  if (!Array.isArray(rows)) return [`${path}: ожидался массив`];
+  const out = [];
+  rows.forEach((row, i) => {
+    if (!isObject(row) || !isText(row.id) || !DETECTOR_STATES.has(row.from) || !DETECTOR_STATES.has(row.to) || row.from === row.to) out.push(`${path}[${i}]: нужны id и два разных состояния детектора`);
+  });
+  return out;
+}
+function regimeBirthProblems(value) {
+  if (!isObject(value)) return ["regime_birth: ожидался объект"];
+  const out = [];
+  for (const horizon of ["strategic", "tactical"]) {
+    const record = value[horizon], path = `regime_birth.${horizon}`;
+    if (record === null || record === undefined) continue;
+    if (!isObject(record)) { out.push(`${path}: ожидался объект или null`); continue; }
+    if (!isIsoTime(record.t)) out.push(`${path}.t: нужна метка времени`);
+    if (!REGIME_LABELS.has(record.candidate) || !REGIME_LABELS.has(record.from_candidate) || record.candidate === record.from_candidate) out.push(`${path}: candidate и from_candidate — две разные известные метки режима`);
+    if (!numberOrNull(record.price ?? null)) out.push(`${path}.price: число или null`);
+    if (!(record.note === null || record.note === undefined || record.note === "coverage")) out.push(`${path}.note: null или "coverage"`);
+    out.push(...familyRowProblems(record.families, `${path}.families`), ...detectorRowProblems(record.detectors, `${path}.detectors`));
+    if (horizon === "strategic") {
+      if (!isObject(record.blocks)) out.push(`${path}.blocks: ожидался объект`);
+      else for (const [key, change] of Object.entries(record.blocks)) {
+        if (!["macro", "demand", "cycle"].includes(key) || !isObject(change) || !numberOrNull(change.from) || !numberOrNull(change.to) || !BLOCK_BANDS.has(change.band_from) || !BLOCK_BANDS.has(change.band_to)) out.push(`${path}.blocks.${key}: нужны from, to, band_from и band_to`);
+      }
+    }
+  }
+  return out;
+}
+function tickDiffProblems(value) {
+  if (!isObject(value)) return ["tick_diff: ожидался объект"];
+  const out = [...familyRowProblems(value.families, "tick_diff.families"), ...detectorRowProblems(value.detectors, "tick_diff.detectors")];
+  if (value.mvrv_percentile !== undefined) {
+    const m = value.mvrv_percentile;
+    if (!isObject(m) || !numberOrNull(m.from) || !numberOrNull(m.to) || m.from === m.to) out.push("tick_diff.mvrv_percentile: from и to — разные числа либо null");
+  }
+  return out;
+}
+function valuationLevelsProblems(value) {
+  if (!isObject(value)) return ["valuation_levels: ожидался объект"];
+  const out = [];
+  if (!isIsoTime(value.as_of)) out.push("valuation_levels.as_of: нужна метка времени");
+  if (!isNumber(value.mvrv) || value.mvrv <= 0) out.push("valuation_levels.mvrv: положительное число");
+  if (!(value.realized_price_usd === null || (isNumber(value.realized_price_usd) && value.realized_price_usd > 0))) out.push("valuation_levels.realized_price_usd: положительное число или null");
+  if (!Number.isInteger(value.window_days) || value.window_days <= 0) out.push("valuation_levels.window_days: целое число дней");
+  if (!Array.isArray(value.levels) || !value.levels.length) return [...out, "valuation_levels.levels: ожидался непустой массив"];
+  let previousPercentile = -Infinity, previousMvrv = -Infinity;
+  const keys = new Set();
+  value.levels.forEach((level, i) => {
+    const path = `valuation_levels.levels[${i}]`;
+    if (!isObject(level) || !isText(level.key) || keys.has(level.key)) { out.push(`${path}: нужен уникальный key`); return; }
+    keys.add(level.key);
+    if (!isNumber(level.percentile) || level.percentile <= previousPercentile || level.percentile <= 0 || level.percentile >= 100) out.push(`${path}.percentile: перцентили обязаны возрастать внутри 0…100`);
+    else previousPercentile = level.percentile;
+    if (!numberOrNull(level.mvrv) || (isNumber(level.mvrv) && level.mvrv <= 0)) out.push(`${path}.mvrv: положительное число или null`);
+    else if (isNumber(level.mvrv)) {
+      // Уровень на большем перцентиле не может быть ниже уровня на меньшем.
+      if (level.mvrv < previousMvrv) out.push(`${path}.mvrv: уровни обязаны не убывать с перцентилем`);
+      previousMvrv = level.mvrv;
+    }
+    if (!numberOrNull(level.price_usd) || (isNumber(level.price_usd) && level.price_usd <= 0)) out.push(`${path}.price_usd: положительное число или null`);
+    // Цена уровня — уровень MVRV, умноженный на реализованную цену; допуск — на округление обоих чисел.
+    else if (isNumber(level.price_usd) && isNumber(level.mvrv) && isNumber(value.realized_price_usd) && Math.abs(level.price_usd / (level.mvrv * value.realized_price_usd) - 1) > 0.002) out.push(`${path}.price_usd: не равна уровню MVRV × реализованная цена`);
+  });
+  return out;
+}
+function dataWarningsProblems(value) {
+  if (!Array.isArray(value)) return ["data_warnings: ожидался массив"];
+  const out = [];
+  value.forEach((w, i) => {
+    const path = `data_warnings[${i}]`;
+    if (!isObject(w) || ![w.source, w.code, w.text].every(isText)) { out.push(`${path}: нужны source, code и text`); return; }
+    if (!Array.isArray(w.affects) || !w.affects.every(isText)) out.push(`${path}.affects: список id карточек`);
+    for (const key of ["value", "threshold", "alive", "total"]) if (w[key] !== undefined && !isNumber(w[key])) out.push(`${path}.${key}: число`);
+  });
+  return out;
+}
+function diagnosticsProblems(value) {
+  if (!Array.isArray(value)) return ["diagnostics: ожидался массив"];
+  return value.flatMap((d, i) => isObject(d) && isText(d.scope) && isText(d.error) ? [] : [`diagnostics[${i}]: нужны scope и error`]);
+}
+function etfLegsProblems(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 8) return ["sources.etf.legs: ожидался список ног источника"];
+  const out = [], names = new Set();
+  value.forEach((leg, i) => {
+    const path = `sources.etf.legs[${i}]`;
+    if (!isObject(leg) || !isText(leg.name) || names.has(leg.name)) { out.push(`${path}: нужно уникальное name`); return; }
+    names.add(leg.name);
+    if (leg.state === "ok") { if (leg.error !== undefined && leg.error !== null) out.push(`${path}: у живой ноги не бывает error`); }
+    else if (leg.state === "fail") { if (!isText(leg.error)) out.push(`${path}: у отказавшей ноги обязана быть причина`); }
+    else out.push(`${path}.state: ok или fail`);
+  });
+  return out;
+}
+const OPTIONAL_FIELD_CHECKS = {
+  regime_birth: regimeBirthProblems,
+  tick_diff: tickDiffProblems,
+  valuation_levels: valuationLevelsProblems,
+  data_warnings: dataWarningsProblems,
+  diagnostics: diagnosticsProblems,
+  etf_legs: etfLegsProblems,
+};
+// Претензии к одному необязательному полю. Отсутствующее поле (null/undefined) и поле без контракта
+// претензий не имеют: первое — законное «нет данных», второе — не публикуется.
+export function optionalFieldProblemsV1(name, value) {
+  if (value === null || value === undefined) return [];
+  const check = OPTIONAL_FIELD_CHECKS[name];
+  if (!check) return [];
+  const out = check(value), limit = OPTIONAL_FIELD_MAX_BYTES[name], bytes = jsonBytesV1(value);
+  if (limit && bytes > limit) out.push(`${name}: ${bytes} байт при бюджете ${limit}`);
+  return out;
+}
+// Претензии ко всем необязательным полям снимка разом — для проверки перед публикацией.
+export function optionalSnapshotProblemsV1(snapshot) {
+  const out = [];
+  for (const name of OPTIONAL_SNAPSHOT_FIELDS) out.push(...optionalFieldProblemsV1(name, snapshot?.[name]));
+  out.push(...optionalFieldProblemsV1("etf_legs", snapshot?.sources?.etf?.legs));
+  return out;
+}
+// Сколько байт необязательные поля занимают в публичном снимке — вместе с ключами и запятыми.
+export function optionalSnapshotBytesV1(snapshot) {
+  const sizes = {};
+  for (const name of OPTIONAL_SNAPSHOT_FIELDS) if (snapshot?.[name] !== undefined) sizes[name] = jsonBytesV1(snapshot[name]) + name.length + 4;
+  if (snapshot?.sources?.etf?.legs !== undefined) sizes.etf_legs = jsonBytesV1(snapshot.sources.etf.legs) + 8;
+  return { ...sizes, total: Object.values(sizes).reduce((a, b) => a + b, 0) };
+}

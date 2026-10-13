@@ -16,5 +16,9 @@ try{
   // freeze the site; REQUIRE_COMPLETE stays an opt-in capability exercised by negative-test.mjs.
   r=run("./self-test.mjs",{REQUIRE_LIVE:"1"});if(r.status!==0)throw new Error(`live-like verification failed:\n${r.stdout}${r.stderr}`);
   r=spawnSync(process.execPath,[fileURLToPath(new URL("./negative-test.mjs",import.meta.url))],{encoding:"utf8",env:{...process.env}});if(r.status!==0)throw new Error(`negative suite depends on live files:\n${r.stdout}${r.stderr}`);
+  // Сквозные сценарии сборщика (правки аудита 10.10.2026): несколько тактов подряд на синтетике с
+  // подставленным прошлым состоянием. Живут в своём файле, запускаются отсюда — состав npm run check
+  // при этом не меняется.
+  r=spawnSync(process.execPath,[fileURLToPath(new URL("./collector-e2e-test.mjs",import.meta.url))],{encoding:"utf8",env:{...process.env}});if(r.status!==0)throw new Error(`collector end-to-end scenarios failed:\n${r.stdout}${r.stderr}`);
   console.log("Live workflow regression OK");
 }finally{rmSync(dir,{recursive:true,force:true});}

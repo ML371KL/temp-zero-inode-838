@@ -27,7 +27,7 @@ import { riskOffConfirmationDeferredV2 } from "../docs/policy-v2-candidate.mjs";
 // по started_at). Отсутствие файла — штатный режим без графта.
 let MONITOR_GRAFT_V1=null;
 try{MONITOR_GRAFT_V1=JSON.parse(readFileSync(new URL("../docs/monitor-graft-v1.json",import.meta.url),"utf8"));}catch{}
-import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
+import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, optionalFieldProblemsV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
 const VERSION = "2.13.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
@@ -364,6 +364,7 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
     datasets[key]=packet;
     const u=packet.source_url||SOURCE_URLS[source],urls=uniqueHttps(packet.source_urls?.length?packet.source_urls:[u]);
     sourceStates[key]={state:"ok",source:packet.source||source,url:u,urls,observed_at:packet.observed_at,fetched_at:packet.fetched_at,error:null};
+    if(Array.isArray(packet.legs))sourceStates[key].legs=packet.legs;
     if(!decisionRelevant)sourceStates[key].decision_relevant=false;
   };
   // Нижняя граница между попытками. Источник с квотой на IP не обязан опрашиваться каждый
@@ -429,10 +430,14 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
     datasets[key]={...packet,fetched_at:iso(NOW),source:sourceId,source_url:sourceUrl,source_urls:sourceUrls};
     const state=packet.partial?"partial":"ok";
     sourceStates[key]={state,source:sourceId,url:sourceUrl,urls:sourceUrls,observed_at:packet.observed_at,fetched_at:iso(NOW),error:packet.errors?.join("; ")||null};
+    // Состав источника по ногам (кто из резервов жив) публикуется рядом с общим состоянием.
+    if(Array.isArray(packet.legs))sourceStates[key].legs=packet.legs;
   }catch(e){
     const old=oldDataset(key,ttl,maxObservedAge);
     if(old){const u=old.source_url||SOURCE_URLS[source],urls=uniqueHttps(old.source_urls?.length?old.source_urls:[u]);datasets[key]=old;sourceStates[key]={state:"stale",source:old.source||source,url:u,urls,observed_at:old.observed_at,fetched_at:old.fetched_at,error:String(e.message||e)};}
     else {const u=SOURCE_URLS[source];sourceStates[key]={state:"fail",source,url:u,urls:uniqueHttps([u]),observed_at:null,fetched_at:null,error:String(e.message||e)};}
+    // Ноги — ТЕКУЩИЕ, из самого отказа: кэш отвечает за данные, а не за то, кто жив сейчас.
+    if(Array.isArray(e?.legs))sourceStates[key].legs=e.legs;
   }
   // Теневые источники (vote:false-слой) наблюдаемы в диагностике, но их отказ не имеет права
   // деградировать quality РЕШЕНИЯ: решающее правило их не читает (см. buildDecisionRecordV1).
@@ -489,8 +494,17 @@ function validateEtfSeries(rows,maxAge=7*DAY){
 // The Block publishes the aggregate US spot-BTC-ETF net flow as a keyless JSON chart series. Two
 // mirrors carry an identical payload: the chart API wraps it under .chart.jsonFile, the tbstat file
 // serves the raw jsonFile. Series "Total Net Flow" holds one {Timestamp(sec), Result(USD)} per day.
+//
+// КОНВЕРТ CHART-API МЕНЯЛСЯ. 09.10.2026 прежний путь /api/charts/chart/… начал отвечать HTTP 410
+// («This endpoint was retired»), а тот же график переехал на /api/tbco/charts/chart/… с другой
+// обёрткой: {ok,status,message,data:{chart:{…,jsonFile}},error}. Сам jsonFile прежний — на 688
+// общих днях с tbstat расхождений ноль (сверено 10.10.2026). Разбор принимает все три формы:
+// новую обёртку, прежнюю и «сырой» jsonFile зеркала. Отказ, упакованный в HTTP 200 ({ok:false}),
+// — это отказ, а не пустой ряд.
 function parseEtfFlowJson(text){
-  const j=JSON.parse(text),jf=j?.chart?.jsonFile||j,data=jf?.Series?.["Total Net Flow"]?.Data;
+  const j=JSON.parse(text);
+  if(j&&j.ok===false)throw new Error(`The Block API: ${String(j.error||j.message||"отказ без объяснения").slice(0,80)}`);
+  const jf=j?.data?.chart?.jsonFile||j?.chart?.jsonFile||j,data=jf?.Series?.["Total Net Flow"]?.Data;
   if(!Array.isArray(data))throw new Error("ETF net-flow series not found in payload");
   const rows=data.map(d=>({t:Number(d.Timestamp)*1000,v:Number(d.Result)})).filter(x=>finite(x.t)&&finite(x.v)&&![0,6].includes(new Date(x.t).getUTCDay()));
   return [...new Map(rows.map(x=>[x.t,x])).values()].sort((a,b)=>a.t-b.t);
@@ -526,6 +540,13 @@ function parseEtfFlowJson(text){
 // Слой полностью необязателен: любой сбой, расхождение с каноном или слишком большое опережение
 // означает отказ от сшивки и возврат к чистому ряду The Block. Сшивка не имеет права ухудшить
 // картину — только добавить недостающие дни.
+//
+// СОСТОЯНИЕ НА 10.10.2026: хост api.sosovalue.xyz отвечает HTTP 404 «接口不存在» на любом пути —
+// API с этого адреса снят. Новый адрес (openapi.sosovalue.com/openapi/v1, GET
+// /etfs/summary-history?symbol=BTC&country_code=US, не больше 300 строк) без ключа отвечает HTTP 401:
+// ключ там обязателен и выдаётся по заявке. Слой оставлен на прежнем адресе до решения владельца о
+// ключе: перевести его на новый API можно только с ключом на руках — код без исполнения проверить
+// нельзя. Пока слой мёртв, это видно в sources.etf.legs, а не только в тексте ошибки.
 const SOSO_ETF_URL = "https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart";
 const SOSO_MAX_SPLICE_DAYS = 3;   // длинные выходные + праздник; больше — это уже подмена источника
 const SOSO_DRIFT_TOLERANCE = 0.03; // 3% валового потока на пересечении (наблюдаемое расхождение ~0.1%)
@@ -562,18 +583,22 @@ async function fetchSosoEtfDaily(){
   if(rows.length<100)throw new Error(`история слишком коротка: ${rows.length}`);
   return rows;
 }
-// Возвращает {series, source, spliced, note, probe} — сшитый ряд либо исходный канон без изменений.
-// `seen` — наблюдения ПРОШЛОГО прогона (день -> значение); `probe` — наблюдения этого прогона,
-// которые вызывающий обязан сохранить в состоянии, иначе подтверждать будет нечем.
-function spliceFreshEtfDays(canon,fresh,canonName,{seen=null}={}){
+// Возвращает {series, source, spliced, note, reason, probe} — сшитый ряд либо исходный канон без
+// изменений. `seen` — наблюдения ПРОШЛОГО прогона (день -> значение); `probe` — наблюдения этого
+// прогона, которые вызывающий обязан сохранить в состоянии, иначе подтверждать будет нечем.
+// `reason` — машинная причина отказа (ahead_limit | unconfirmed | overlap | drift | not_due |
+// contract): по ней нога источника помечается здоровой или нет, без разбора текста.
+// `maxAhead` — сколько дней слой вправе добавить: предел в три дня общий для ВСЕГО хвоста за краем
+// живого канона, и дни, уже удержанные из реестра канона (carryCanonDays), его расходуют.
+function spliceFreshEtfDays(canon,fresh,canonName,{seen=null,maxAhead=SOSO_MAX_SPLICE_DAYS}={}){
   const canonLast=Number(last(canon).t);
   const ahead=fresh.filter(x=>x.t>canonLast);
   const probe=Object.fromEntries(ahead.map(x=>[dayKey(x.t),x.v]));
-  if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:null,probe};
+  if(!ahead.length)return{series:canon,source:canonName,spliced:0,note:null,reason:null,probe};
   // Предел опережения проверяется по СЫРОМУ опережению, до любого отсева: три дня — это граница,
   // за которой сшивка перестаёт быть дополнением и становится подменой источника. Считать предел
   // по уже урезанному списку значило бы пропускать мёртвый канон, урезав его до разрешённых трёх.
-  if(ahead.length>SOSO_MAX_SPLICE_DAYS)return{series:canon,source:canonName,spliced:0,note:`опережение ${ahead.length} дн больше допустимых ${SOSO_MAX_SPLICE_DAYS} — сшивка отменена`,probe};
+  if(ahead.length>maxAhead)return{series:canon,source:canonName,spliced:0,note:`опережение ${ahead.length} дн больше допустимых ${maxAhead} — сшивка отменена`,reason:"ahead_limit",probe};
   // ПОДТВЕРЖДЕНИЕ ВТОРЫМ НАБЛЮДЕНИЕМ. Полноту дня у провайдера спросить нельзя: все фонды всегда
   // несут одну дату публикации, а неотчитавшийся фонд выглядит ровным нулём, а не отставшей датой.
   // Зато неполный день ДОРАСТАЕТ по мере отчёта фондов, поэтому между двумя часовыми прогонами его
@@ -586,7 +611,7 @@ function spliceFreshEtfDays(canon,fresh,canonName,{seen=null}={}){
     if(finite(before)&&Math.abs(before-x.v)<=Math.max(1,Math.abs(x.v)*1e-9))confirmed.push(x);
     else{held.push(dayKey(x.t));break;} // только непрерывный отрезок от канона: разрыв в ряду недопустим
   }
-  if(!confirmed.length)return{series:canon,source:canonName,spliced:0,note:`день ${held[0]} ещё не подтверждён повторным наблюдением — сшивка отложена`,probe};
+  if(!confirmed.length)return{series:canon,source:canonName,spliced:0,note:`день ${held[0]} ещё не подтверждён повторным наблюдением — сшивка отложена`,reason:"unconfirmed",probe};
   const heldNote=held.length?`день ${held[0]} придержан до подтверждения`:null;
   return spliceConfirmed(canon,confirmed,fresh,canonName,heldNote,probe);
 }
@@ -597,11 +622,11 @@ function spliceConfirmed(canon,ahead,fresh,canonName,extraNote,probe){
   // единицы измерения сдвинет именно сумму.
   const byDay=new Map(canon.map(x=>[dayKey(x.t),x.v]));
   const overlap=fresh.filter(x=>byDay.has(dayKey(x.t))).slice(-20);
-  if(overlap.length<SOSO_MIN_OVERLAP)return{series:canon,source:canonName,spliced:0,note:`общих дней для сверки ${overlap.length} < ${SOSO_MIN_OVERLAP} — сшивка отменена`,probe};
+  if(overlap.length<SOSO_MIN_OVERLAP)return{series:canon,source:canonName,spliced:0,note:`общих дней для сверки ${overlap.length} < ${SOSO_MIN_OVERLAP} — сшивка отменена`,reason:"overlap",probe};
   const delta=overlap.reduce((acc,x)=>acc+(x.v-byDay.get(dayKey(x.t))),0);
   const gross=overlap.reduce((acc,x)=>acc+Math.abs(byDay.get(dayKey(x.t))),0);
   const drift=gross>0?Math.abs(delta)/gross:1;
-  if(drift>SOSO_DRIFT_TOLERANCE)return{series:canon,source:canonName,spliced:0,note:`расхождение с каноном ${(drift*100).toFixed(2)}% > ${(SOSO_DRIFT_TOLERANCE*100).toFixed(0)}% — сшивка отменена`,probe};
+  if(drift>SOSO_DRIFT_TOLERANCE)return{series:canon,source:canonName,spliced:0,note:`расхождение с каноном ${(drift*100).toFixed(2)}% > ${(SOSO_DRIFT_TOLERANCE*100).toFixed(0)}% — сшивка отменена`,reason:"drift",probe};
   // Провайдеры используют разные соглашения о метке времени (канон — полдень UTC, дополняющий
   // слой — полночь). Без выравнивания шаг между последними точками становится 12 ч вместо 24, а
   // возраст наблюдения прыгает на полсуток без единого нового факта.
@@ -610,10 +635,10 @@ function spliceConfirmed(canon,ahead,fresh,canonName,extraNote,probe){
   // на точку из будущего, и делало бы возраст наблюдения функцией времени прогона, а не данных.
   const offset=canonLast%DAY;
   const aligned=ahead.map(x=>({t:x.t-(x.t%DAY)+offset,v:x.v})).filter(x=>x.t>canonLast&&x.t<=NOW);
-  if(!aligned.length)return{series:canon,source:canonName,spliced:0,note:"канонический момент свежего дня ещё не наступил — сшивка отложена",probe};
+  if(!aligned.length)return{series:canon,source:canonName,spliced:0,note:"канонический момент свежего дня ещё не наступил — сшивка отложена",reason:"not_due",probe};
   const merged=[...canon,...aligned];
-  if(!validateEtfSeries(merged))return{series:canon,source:canonName,spliced:0,note:"сшитый ряд не прошёл ETF-контракт — сшивка отменена",probe};
-  return{series:merged,source:`${canonName} + SosoValue`,spliced:aligned.length,note:extraNote,probe};
+  if(!validateEtfSeries(merged))return{series:canon,source:canonName,spliced:0,note:"сшитый ряд не прошёл ETF-контракт — сшивка отменена",reason:"contract",probe};
+  return{series:merged,source:`${canonName} + SosoValue`,spliced:aligned.length,note:extraNote,reason:null,probe};
 }
 // Сколько живёт подтверждённый сшитый день без переподтверждения. Сутки — это запас на разовые
 // сбои и короткие отказы провайдера, но не на молчаливое хранение устаревшего значения: канон
@@ -622,7 +647,7 @@ const SOSO_CACHE_TTL = 24 * HOUR;
 // Возвращает ряд с оживлёнными из кэша днями либо null. Кэш — не лазейка мимо проверок: день
 // обязан быть впереди канона (иначе канон его уже вытеснил), уложиться в тот же предел опережения
 // и пройти тот же ETF-контракт, что и живые данные.
-function reviveSplicedDays(canon,cache){
+function reviveSplicedDays(canon,cache,{maxDays=SOSO_MAX_SPLICE_DAYS}={}){
   if(!cache||!Array.isArray(cache.days)||!cache.days.length||!canon?.length)return null;
   const at=Date.parse(cache.at||"");
   if(!finite(at)||NOW-at>SOSO_CACHE_TTL||NOW<at)return null;
@@ -630,7 +655,7 @@ function reviveSplicedDays(canon,cache){
   const days=cache.days
     .filter(x=>finite(x?.t)&&finite(x?.v)&&x.t>canonLast&&x.t<=NOW&&![0,6].includes(new Date(x.t).getUTCDay()))
     .sort((a,b)=>a.t-b.t);
-  if(!days.length||days.length>SOSO_MAX_SPLICE_DAYS)return null;
+  if(!days.length||days.length>maxDays)return null;
   const merged=[...canon,...days];
   if(!validateEtfSeries(merged))return null;
   return{series:merged,days:days.length,ageH:Math.round((NOW-at)/HOUR)};
@@ -673,23 +698,169 @@ function etfDegradation(prevRows,series){
   if(truncated)notes.push(`история ETF усечена: было ${prevRows.length} дней, стало ${series.length}`);
   return{degraded:rolledBack||truncated,notes};
 }
+// ===== РЯД КАНОНА НЕ УКОРАЧИВАЕТСЯ: реестр принятых дней и их удержание (аудит 10.10.2026) =====
+//
+// 20–21.09.2026 зеркало tbstat пять раз за 18 часов не ответило. Сборщик брал второе зеркало — тот же
+// ряд, но на день короче, — и считал балл по укороченному ряду: семья ETF уходила с 0 на −0,5, блок
+// спроса с −18,75 на −25, кандидат режима мигал, и каждый раз обнулялся 48-часовой отсчёт повышения.
+// Повышение 20 → 45 % состоялось на 60 часов позже и стоило 1,5 п.п. NAV. Откат сборщик видел
+// (etfDegradation ставил partial), но считал по нему всё равно, а на втором подряд укороченном
+// снимке пометка исчезала: сравнивать было уже не с чем.
+//
+// Правило: день, однажды принятый от КАНОНА, остаётся в ряду, пока живой канон его не догонит.
+// Для этого в состоянии ведётся реестр хвоста канона — день, значение, момент ПЕРВОГО принятия и
+// зеркало, от которого он пришёл. Если живой канон в этом прогоне короче реестра, недостающие дни
+// дописываются из реестра. Ограничения — те же, что у сшитых дней SosoValue, и по той же причине:
+// удержание обязано остаться удержанием, а не тихой подменой источника.
+//   • Срок — 120 часов от первого принятия дня, и продлить его нельзя: метка принятия пишется один
+//     раз, а реестр пополняется только из ЖИВОГО канона. Почему 120, а не 72: зеркало, отстающее на
+//     торговый день, получает пятницу тогда же, когда канон получает понедельник, — через 72 часа, а
+//     после праздничного понедельника — через 96. Срок в 72 часа истекал бы ровно в тот момент, ради
+//     которого удержание существует. 120 = 96 + сутки на задержку публикации (обычная 4–6 часов,
+//     худшая за историю 49,6) и меньше недели, уже принятой для кэша самого канона.
+//   • Не больше трёх дней за краем живого канона — вместе со сшитыми днями SosoValue. Отстал
+//     сильнее — это уже не «зеркало моргнуло», и ряд честно возвращается к живому канону.
+//   • Только непрерывный отрезок от края канона: день с истёкшим сроком обрывает перенос, дыр нет.
+//   • Тот же ETF-контракт, что у живых данных.
+//   • Канон, догнавший день, вытесняет его целиком — вместе со значением, если оно другое:
+//     дописываются только дни СТРОГО за краем живого канона.
+//   • Удержанный день не «отмывается» в канон: canon_last остаётся краем живого канона, и кэш
+//     канона (cachedEtfCanon) удержанный хвост отрезает.
+// Сшитые дни SosoValue в реестр не попадают никогда — у них свой кэш подтверждения (spliced_cache).
+const ETF_CANON_HOLD_TTL = 120 * HOUR;
+const ETF_CANON_HOLD_MAX_DAYS = SOSO_MAX_SPLICE_DAYS;
+// Сколько последних дней живого канона записывается в реестр: предел удержания плюс запас.
+const ETF_CANON_REGISTRY_TAIL = 5;
+// Сколько реестр помнит день, которого в живом каноне нет. Дольше срока удержания намеренно: после
+// его истечения ряд становится короче принятого, и пакет обязан оставаться помеченным, а не
+// «выздороветь» на втором снимке. Неделя — тот же горизонт, на котором протухает сам канон.
+const ETF_CANON_REGISTRY_TTL = 7 * DAY;
+const canonRegistryEntry=x=>!!x&&finite(x.t)&&finite(x.v)&&finite(Date.parse(x.at||""));
+// Новый реестр по прошлому и по живому канону этого прогона. `liveCanon=null` — зеркала не ответили:
+// реестр только стареет. Метка первого принятия (`at`) переносится как есть и не освежается ничем.
+function updateCanonRegistry(prevRegistry,liveCanon,canonName){
+  const prev=new Map((Array.isArray(prevRegistry)?prevRegistry:[]).filter(canonRegistryEntry).map(x=>[dayKey(x.t),x]));
+  const out=new Map(),edge=liveCanon?.length?Number(last(liveCanon).t):-Infinity;
+  for(const row of (liveCanon||[]).slice(-ETF_CANON_REGISTRY_TAIL)){
+    const key=dayKey(row.t),old=prev.get(key),oldAt=Date.parse(old?.at||"");
+    out.set(key,{t:Number(row.t),v:Number(row.v),at:finite(oldAt)&&oldAt<=NOW?old.at:iso(NOW),from:old?.from||canonName});
+  }
+  for(const [key,x] of prev)if(Number(x.t)>edge&&!out.has(key))out.set(key,{t:Number(x.t),v:Number(x.v),at:x.at,from:x.from||null});
+  return [...out.values()].filter(x=>{
+    if(Number(x.t)<=edge)return true;
+    const age=NOW-Date.parse(x.at);
+    return age>=0&&age<=ETF_CANON_REGISTRY_TTL;
+  }).sort((a,b)=>a.t-b.t);
+}
+// Возвращает {series, days, note}: канон с дописанными из реестра днями либо канон как есть.
+function carryCanonDays(canon,registry,{maxDays=ETF_CANON_HOLD_MAX_DAYS}={}){
+  const none=(note=null)=>({series:canon,days:[],note});
+  if(!canon?.length||!Array.isArray(registry))return none();
+  const edge=Number(last(canon).t);
+  const beyond=registry.filter(x=>canonRegistryEntry(x)&&Number(x.t)>edge).sort((a,b)=>a.t-b.t);
+  if(!beyond.length)return none();
+  // Предел — по СЫРОМУ отставанию, до отсева по сроку: иначе канон, отставший на неделю, прошёл бы,
+  // урезанный сроком до разрешённых трёх дней.
+  if(beyond.length>maxDays)return none(`живой канон отстал от принятого на ${beyond.length} дн — больше допустимых ${maxDays}, удержание отменено`);
+  const days=[];let stop=null;
+  for(const x of beyond){
+    const age=NOW-Date.parse(x.at),day=dayKey(x.t);
+    if(age<0){stop=`день ${day}: метка принятия из будущего, удержание невозможно`;break;}
+    if(age>ETF_CANON_HOLD_TTL){stop=`день ${day}: срок удержания истёк (принят ${Math.round(age/HOUR)} ч назад, предел ${ETF_CANON_HOLD_TTL/HOUR} ч)`;break;}
+    days.push({t:Number(x.t),v:Number(x.v),at:x.at,from:x.from||null});
+  }
+  if(!days.length)return none(stop);
+  const merged=[...canon,...days.map(({t,v})=>({t,v}))];
+  if(!validateEtfSeries(merged))return none(`ряд с удержанными днями (${days.map(x=>dayKey(x.t)).join(", ")}) не прошёл ETF-контракт, удержание отменено`);
+  return{series:merged,days,note:stop};
+}
+// Канонический chart-API The Block с 09.10.2026 живёт по новому пути (/api/tbco/…): прежний отвечает
+// HTTP 410. Разбор обёртки — в parseEtfFlowJson.
 const ETF_BLOCK_MIRRORS = [
-  { name: "The Block", url: "https://www.theblock.co/api/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow" },
+  { name: "The Block", url: "https://www.theblock.co/api/tbco/charts/chart/etfs/bitcoin/spot-bitcoin-etf-total-net-flow" },
   { name: "The Block (tbstat)", url: "https://data.tbstat.com/dashboard/markets_structuredproducts_btcspotetftotalnetflows_daily_other.json" },
 ];
+// Ноги источника потоков ETF в порядке публикации. Состояние каждой уходит в sources.etf.legs: раньше
+// два мёртвых эндпоинта из трёх выглядели как state:"ok" с текстом в поле error.
+const ETF_LEG_NAMES = [...ETF_BLOCK_MIRRORS.map(m=>m.name),"SosoValue"];
 async function fetchEtfFlows(){
-  const errors=[];
+  const errors=[],prevEtf=previous?.datasets?.etf||null;
+  const legs=ETF_LEG_NAMES.map(name=>({name,state:"fail",error:"не опрашивался"}));
+  // Нога здорова, если в этом прогоне отдала ряд, прошедший её проверки; иначе — причина одной строкой.
+  const leg=(name,error=null)=>{
+    const x=legs.find(l=>l.name===name);if(!x)return;
+    if(error){x.state="fail";x.error=String(error).slice(0,160);}else{x.state="ok";delete x.error;}
+  };
+  // Сборка ряда поверх основы канона — живой (live) или взятой из кэша прошлого прогона. Порядок
+  // слоёв: удержанные дни канона, затем дополняющий слой SosoValue поверх них, затем проверки.
+  const assemble=async({canon,canonName,live})=>{
+    const edge=Number(last(canon).t);
+    const carry=carryCanonDays(canon,prevEtf?.canon_days);
+    if(carry.note)errors.push(`удержание канона: ${carry.note}`);
+    for(const d of carry.days)errors.push(`день ${dayKey(d.t)} удержан: принят от канона${d.from?` (${d.from})`:""} ${Math.round((NOW-Date.parse(d.at))/HOUR)} ч назад, ${live?`живое зеркало ${canonName}`:"кэш канона"} отдаёт ряд по ${dayKey(edge)} — ряд не укорочен`);
+    // Предел в три дня — общий для всего хвоста за краем живого канона.
+    const base=carry.series,room=Math.max(0,SOSO_MAX_SPLICE_DAYS-carry.days.length);
+    // Дополняющий слой свежих дат. Любая проблема = тихий возврат к основе: диагностика
+    // записывается, но картина не ухудшается.
+    let series=base,source=canonName,spliced=0;
+    // Наблюдения прошлого прогона — топливо подтверждения. Если их нет (первый запуск, потеря
+    // кэша), сшивка просто не состоится и восстановится сама на следующем прогоне.
+    let probe=prevEtf?.fresh_probe||{},cache=prevEtf?.spliced_cache||null;
+    try{
+      const rows=await fetchSosoEtfDaily();
+      const r=spliceFreshEtfDays(base,rows,canonName,{seen:prevEtf?.fresh_probe,maxAhead:room});
+      series=r.series;source=r.source;spliced=r.spliced;probe=r.probe||{};
+      // Успешно сшитые дни запоминаются вместе с моментом ПОДТВЕРЖДЕНИЯ: он и задаёт срок годности.
+      cache=r.spliced?{days:r.series.slice(-r.spliced),at:iso(NOW)}:null;
+      if(r.note)errors.push(`SosoValue: ${r.note}`);
+      leg("SosoValue",r.reason==="drift"?r.note:(validateEtfSeries(rows)?null:"ряд не прошёл ETF-контракт"));
+    }catch(e){
+      const message=String(e?.message||e);
+      errors.push(`SosoValue (дополняющий слой недоступен): ${message}`);leg("SosoValue",message);
+      // Разовый сетевой сбой не должен выбрасывать из ряда уже подтверждённый день. Такой выброс —
+      // источник ОДИНОЧНОГО встречного снимка, а тот обнуляет 48-часовой отсчёт гистерезиса; на
+      // исторической реконструкции пропажа свежего дня переворачивает кандидат среднесрочного
+      // режима на 4.2% дней. Поэтому день переживает сбой — и на живом каноне, и на кэше канона.
+      // Срок годности отсчитывается от ПОДТВЕРЖДЕНИЯ, а не от оживления: иначе длительный отказ
+      // провайдера продлевал бы жизнь неподтверждённого дня бесконечно.
+      const rev=reviveSplicedDays(base,cache,{maxDays:room});
+      if(rev){
+        series=rev.series;spliced=rev.days;source=`${canonName} + SosoValue`;
+        errors.push(`сшитый день сохранён из кэша подтверждения (${rev.ageH} ч назад), ряд не укорочен`);
+      }else if(cache)errors.push("кэш подтверждённого дня непригоден — ряд возвращается к канону");
+    }
+    // Реестр пополняется ТОЛЬКО живым каноном: ни удержанный, ни сшитый, ни кэшированный день
+    // метку принятия получить или освежить не может.
+    const registry=updateCanonRegistry(prevEtf?.canon_days,live?canon:null,canonName);
+    // Ряд может стать ХУЖЕ прошлого двумя способами, и оба обязаны быть видны: откат последнего
+    // дня двигает возраст наблюдения назад, усечение истории меняет перцентили. Третий случай —
+    // ряд короче принятого от канона (удержание истекло или отменено): пометка держится, пока
+    // реестр помнит день, а не один снимок.
+    const lastT=Number(last(series).t),degraded=etfDegradation(prevEtf?.data,series);
+    errors.push(...degraded.notes);
+    const missing=registry.filter(x=>Number(x.t)>lastT);
+    if(missing.length)errors.push(`ряд короче принятого от канона: ${missing.map(x=>dayKey(x.t)).join(", ")} в ряд не вошли`);
+    if(!live)errors.push(`зеркала The Block недоступны, история взята из кэша прошлого прогона (${canon.length} дн)`);
+    return{data:series,observed_at:iso(lastT),source,source_url:SOURCE_URLS.theblock,
+      source_urls:spliced?[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue]:[SOURCE_URLS.theblock],
+      errors,spliced,held:carry.days.length||undefined,fresh_probe:probe,spliced_cache:cache||undefined,
+      canon_last:iso(edge),canon_days:registry,legs,partial:(!live||degraded.degraded||missing.length>0)||undefined};
+  };
   // Зеркала опрашиваются параллельно: последовательный обход удвоил бы задержку ради данных,
   // которые нужны одновременно для сравнения свежести.
-  const candidates=(await Promise.all(ETF_BLOCK_MIRRORS.map(async m=>{
+  const mirrors=await Promise.all(ETF_BLOCK_MIRRORS.map(async m=>{
     try{
       const series=parseEtfFlowJson(await request(m.url,{text:true,tries:2}));
       // Кандидат обязан пройти тот же контракт, что и опубликованный ряд, ДО сравнения свежести:
       // иначе битое, но «более свежее» зеркало вытеснило бы исправную копию.
       if(!validateEtfSeries(series))throw new Error(`ряд не прошёл ETF-контракт (${series.length} строк)`);
       return {name:m.name,series,latest:Number(last(series).t)};
-    }catch(e){errors.push(`${m.name}: ${String(e?.message||e)}`);return null;}
-  }))).filter(Boolean);
+    }catch(e){return {name:m.name,error:String(e?.message||e)};}
+  }));
+  // Диагностика пишется в порядке списка зеркал, а не в порядке завершения запросов: текст ошибки
+  // не должен зависеть от того, какое зеркало ответило отказом раньше.
+  for(const m of mirrors){if(m.error){errors.push(`${m.name}: ${m.error}`);leg(m.name,m.error);}else leg(m.name);}
+  const candidates=mirrors.filter(m=>!m.error);
   if(candidates.length){
     // Строгое «>» оставляет при равной свежести канонический chart-API (первый в списке): пока
     // зеркало не опережает, источник не скачет туда-обратно без причины.
@@ -706,46 +877,10 @@ async function fetchEtfFlows(){
       if(clash){
         errors.push(`зеркала The Block разошлись на ${dayKey(clash.t)}: ${Math.round(clash.v/1e6)} против ${Math.round(byDay.get(dayKey(clash.t))/1e6)} млн — выбран канонический chart-API`);
         best=primary;
+        leg(mirror.name,`разошлось с каноническим chart-API на ${dayKey(clash.t)}`);
       }
     }
-    // Дополняющий слой свежих дат. Любая проблема = тихий возврат к чистому канону: диагностика
-    // записывается, но картина не ухудшается.
-    let series=best.series,source=best.name,spliced=0,urls=[SOURCE_URLS.theblock];
-    // Наблюдения прошлого прогона — топливо подтверждения. Если их нет (первый запуск, потеря
-    // кэша), сшивка просто не состоится и восстановится сама на следующем часе.
-    let probe=previous?.datasets?.etf?.fresh_probe||{};
-    let cache=previous?.datasets?.etf?.spliced_cache||null;
-    try{
-      const rows=await fetchSosoEtfDaily();
-      const r=spliceFreshEtfDays(best.series,rows,best.name,{seen:previous?.datasets?.etf?.fresh_probe});
-      series=r.series;source=r.source;spliced=r.spliced;probe=r.probe||{};
-      // Успешно сшитые дни запоминаются вместе с моментом ПОДТВЕРЖДЕНИЯ: он и задаёт срок годности.
-      cache=r.spliced?{days:r.series.slice(-r.spliced),at:iso(NOW)}:null;
-      if(r.note)errors.push(`SosoValue: ${r.note}`);
-      if(spliced)urls=[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue];
-    }catch(e){
-      errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);
-      // Разовый сетевой сбой не должен выбрасывать из ряда уже подтверждённый день. Такой выброс —
-      // единственный подтверждённый в системе источник ОДИНОЧНОГО встречного снимка, а тот обнуляет
-      // 48-часовой отсчёт гистерезиса; на исторической реконструкции пропажа свежего дня
-      // переворачивает кандидат среднесрочного режима на 4.2% дней. Поэтому день переживает сбой.
-      const rev=reviveSplicedDays(best.series,cache);
-      if(rev){
-        series=rev.series;spliced=rev.days;source=`${best.name} + SosoValue`;urls=[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue];
-        errors.push(`сшитый день сохранён из кэша подтверждения (${rev.ageH} ч назад), ряд не укорочен`);
-      }else if(cache)errors.push("кэш подтверждённого дня непригоден — ряд возвращается к канону");
-      // Срок годности отсчитывается от ПОДТВЕРЖДЕНИЯ, а не от оживления: иначе длительный отказ
-      // провайдера продлевал бы жизнь неподтверждённого дня бесконечно.
-    }
-    // Дополняющий слой может пропасть между часовыми прогонами — тогда ряд станет КОРОЧЕ прошлого,
-    // а возраст наблюдения уедет назад. Молчать об этом нельзя: балл семьи ETF стоит у самой
-    // границы детектора слома спроса, и такое «мигание» двигало бы тактический вердикт без единого
-    // нового факта. Ловим ОБА вида укорачивания — и откат последнего дня, и усечение истории:
-    // потеря глубины меняет перцентили, а через них балл семьи, ничем себя не выдавая.
-    const nowLast=Number(last(series).t);
-    const degraded=etfDegradation(previous?.datasets?.etf?.data,series);
-    errors.push(...degraded.notes);
-    return{data:series,observed_at:iso(nowLast),source,source_url:SOURCE_URLS.theblock,source_urls:urls,errors,spliced,fresh_probe:probe,spliced_cache:cache||undefined,canon_last:iso(Number(last(best.series).t)),partial:degraded.degraded||undefined};
+    return assemble({canon:best.series,canonName:best.name,live:true});
   }
   // РЕЗЕРВ ПЕРВОЙ СТУПЕНИ: зеркала канона недоступны, но САМА ИСТОРИЯ The Block никуда не делась —
   // она лежит в состоянии с прошлого прогона. Отказ эндпоинта не повод терять половину глубины:
@@ -754,32 +889,10 @@ async function fetchEtfFlows(){
   // Поэтому каноном становится кэш, а SosoValue работает поверх него ровно как обычно: тем же
   // подтверждением, той же сверкой на пересечении, тем же пределом опережения. Когда зеркала
   // оживут, свежий канон заменит ряд целиком и вытеснит сшитые дни — как и в штатном режиме.
-  const cachedRows=cachedEtfCanon(previous?.datasets?.etf);
-  if(cachedRows){
-    let series=cachedRows,source="The Block (кэш)",probe=previous?.datasets?.etf?.fresh_probe||{};
-    let cache2=previous?.datasets?.etf?.spliced_cache||null;
-    try{
-      const rows=await fetchSosoEtfDaily();
-      const r=spliceFreshEtfDays(cachedRows,rows,"The Block (кэш)",{seen:previous?.datasets?.etf?.fresh_probe});
-      series=r.series;source=r.source;probe=r.probe||{};
-      cache2=r.spliced?{days:r.series.slice(-r.spliced),at:iso(NOW)}:null;
-      if(r.note)errors.push(`SosoValue: ${r.note}`);
-    }catch(e){
-      errors.push(`SosoValue (дополняющий слой недоступен): ${String(e?.message||e)}`);
-      // Тот же кэш подтверждённого дня, что и на основном пути: одновременный отказ зеркал И
-      // слоя не должен выбрасывать из ряда уже подтверждённый день. Раньше эта ветка про кэш
-      // не знала — дыра была закрыта на одном маршруте и открыта на соседнем.
-      const rev=reviveSplicedDays(cachedRows,cache2);
-      if(rev){
-        series=rev.series;source=`The Block (кэш) + SosoValue`;
-        errors.push(`сшитый день сохранён из кэша подтверждения (${rev.ageH} ч назад)`);
-      }
-    }
-    errors.push(`зеркала The Block недоступны, история взята из кэша прошлого прогона (${cachedRows.length} дн)`);
-    return{data:series,observed_at:iso(last(series).t),source,source_url:SOURCE_URLS.theblock,
-      source_urls:uniqueHttps(series.length>cachedRows.length?[SOURCE_URLS.theblock,SOURCE_URLS.sosovalue]:[SOURCE_URLS.theblock]),
-      errors,spliced:series.length-cachedRows.length,fresh_probe:probe,spliced_cache:cache2||undefined,canon_last:iso(Number(last(cachedRows).t)),partial:true};
-  }
+  // Удержанные дни и кэш подтверждённого дня работают здесь так же, как на живом каноне: дыра,
+  // закрытая на одном маршруте и открытая на соседнем, уже случалась.
+  const cachedRows=cachedEtfCanon(prevEtf);
+  if(cachedRows)return assemble({canon:cachedRows,canonName:"The Block (кэш)",live:false});
   // РЕЗЕРВ ВТОРОЙ СТУПЕНИ: канона нет вообще (первый запуск, потеря кэша, кэш старше недели). Тогда
   // ряд берётся у SosoValue целиком — это уже подмена источника с более короткой историей, поэтому
   // пакет помечается неполным и смещение перцентилей называется прямо.
@@ -788,10 +901,16 @@ async function fetchEtfFlows(){
   try{
     const series=await fetchSosoEtfDaily();
     if(!validateEtfSeries(series))throw new Error(`ряд не прошёл ETF-контракт (${series.length} строк)`);
+    leg("SosoValue");
     errors.push(`ни канона, ни его кэша: ряд взят у SosoValue целиком, история ${series.length} дн вместо ~630, перцентили потоков смещены`);
-    return{data:series,observed_at:iso(last(series).t),source:"SosoValue",source_url:SOURCE_URLS.sosovalue,source_urls:[SOURCE_URLS.sosovalue],errors,partial:true};
-  }catch(e){errors.push(`SosoValue (резервный источник): ${String(e?.message||e)}`);}
-  throw new Error(`ETF flows unavailable: ${errors.join("; ")}`);
+    return{data:series,observed_at:iso(last(series).t),source:"SosoValue",source_url:SOURCE_URLS.sosovalue,source_urls:[SOURCE_URLS.sosovalue],errors,
+      canon_days:updateCanonRegistry(prevEtf?.canon_days,null,null),legs,partial:true};
+  }catch(e){const message=String(e?.message||e);errors.push(`SosoValue (резервный источник): ${message}`);leg("SosoValue",message);}
+  // Состояние ног уезжает вместе с отказом: loadDataset публикует его и тогда, когда ряд взят из
+  // кэша прошлого прогона (state "stale") или его нет вовсе.
+  const failure=new Error(`ETF flows unavailable: ${errors.join("; ")}`);
+  failure.legs=legs;
+  throw failure;
 }
 function parseCsv(text){const lines=String(text).trim().split(/\r?\n/);if(lines.length<2)return[];const h=lines[0].split(",");return lines.slice(1).map(line=>{const c=line.split(","),o={};h.forEach((k,i)=>o[k]=c[i]);return o;});}
 function normalizeCoinMetricsRows(rows){const by={};CM_METRICS.forEach(k=>by[k]=[]);for(const r of rows){const t=Date.parse(String(r.time).slice(0,10)+"T00:00:00Z");if(!finite(t))continue;for(const k of CM_METRICS)if(finite(r[k]))by[k].push({t,v:Number(r[k])});}for(const k of CM_METRICS)by[k].sort((a,b)=>a.t-b.t);return by;}
@@ -815,8 +934,14 @@ function validateCoinMetricsData(by,maxAge=4*DAY){
   return {observed_at:latest.length?iso(Math.min(...latest)):iso(NOW),partial:errors.length>0,errors};
 }
 function normalizeStableHistory(j){const arr=Array.isArray(j)?j:j?.data||[];return arr.map(r=>{const raw=r.date??r.timestamp??r.time,n=Number(raw),t=Number.isFinite(n)?(n<1e12?n*1000:n):Date.parse(raw);const v=r.totalCirculating?.peggedUSD??r.totalCirculatingUSD?.peggedUSD??r.totalCirculatingUSD??r.totalCirculating??r.total;return{t,v:Number(v)};}).filter(x=>finite(x.t)&&finite(x.v)&&x.v>1e9).sort((a,b)=>a.t-b.t);}
+// Socrata отдаёт дату отчёта БЕЗ часового пояса («2026-10-06T00:00:00.000»), а Date.parse читает
+// такую строку как местное время. На сервере в UTC это полночь UTC, на машине в UTC+8 — 16:00
+// предыдущих суток: observed_at карточки уезжал на день назад, а вместе с ним менялся хэш винтажа
+// (аудит 10.10.2026, находка 0.3). День отчёта — календарная дата, поэтому берётся она сама и
+// ставится на полночь UTC, как у FRED и Coin Metrics. На сервере в UTC результат прежний бит в бит.
+const cftcReportDay=value=>Date.parse(String(value??"").slice(0,10)+"T00:00:00Z");
 function parseCftc(rows){return (rows||[]).map(r=>({
-  t:Date.parse(r.report_date_as_yyyy_mm_dd),
+  t:cftcReportDay(r.report_date_as_yyyy_mm_dd),
   oi:num(r.open_interest_all),
   assetLong:num(r.asset_mgr_positions_long??r.asset_mgr_positions_long_all),
   assetShort:num(r.asset_mgr_positions_short??r.asset_mgr_positions_short_all),
@@ -1034,6 +1159,9 @@ async function fetchCoinbaseHistory(days=1825){
 }
 function parseBitstampOhlc(j){return (j?.data?.ohlc||[]).map(r=>({t:Number(r?.timestamp)*1000,v:Number(r?.close),volume:Number(r?.volume)})).filter(x=>finite(x.t)&&sanePrice(x.v)).map(x=>({t:Date.parse(dayKey(x.t)+"T00:00:00Z"),v:x.v,volume:finite(x.volume)?x.volume:null})).filter(x=>finite(x.t));}
 async function fetchBitstampHistory(days=1825){const byDay=new Map(),chunk=900*DAY;for(let a=NOW-days*DAY;a<NOW;a+=chunk){const b=Math.min(NOW,a+chunk),u=`https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=86400&limit=1000&start=${Math.floor(a/1000)}&end=${Math.floor(b/1000)}`;for(const row of parseBitstampOhlc(await request(u,{tries:2})))byDay.set(row.t,row);await sleep(200);}return[...byDay.values()].sort((a,b)=>a.t-b.t);}
+// Дневные строки, чьи сутки UTC уже закрылись. Граница — полночь UTC текущего дня: строка с меткой
+// ровно на ней принадлежит открытым суткам и отбрасывается.
+function closedDaysOnly(rows,now=NOW){const open=Math.floor(now/DAY)*DAY;return (rows||[]).filter(x=>Number(x?.t)<open);}
 function validateMarket(d){
   return Array.isArray(d?.price)&&d.price.length>=1200&&finite(last(d.price)?.v)&&NOW-last(d.price).t<=4*DAY;
 }
@@ -1051,7 +1179,13 @@ async function fetchMarket(){
     settled("Blockchain trade volume",()=>fetchBlockchainChart("trade-volume","5years",{minPoints:1200,expectedUnit:"USD"})),
   ]);const volumeMap=new Map((volumeFallback.ok?volumeFallback.value:[]).map(x=>[dayKey(x.t),x.v]));candles=priceFallback.map(x=>({t:x.t,v:x.v,quoteVolume:volumeMap.get(dayKey(x.t))??null}));if(!volumeFallback.ok)errors.push(`Blockchain trade volume: ${volumeFallback.error}`);historySource="blockchain";historyUrl=SOURCE_URLS.blockchain;}
   const price=normalizeToContract("price",candles.map(x=>({t:x.t,v:x.v}))).rows;
-  const rawVolume=candles.map(x=>({t:x.t,v:finite(x.quoteVolume)?x.quoteVolume:(finite(x.volume)?x.volume*x.v:null)})).filter(x=>finite(x.v));
+  // РЯД ОБЪЁМА — ТОЛЬКО ЗАКРЫТЫЕ СУТКИ (аудит 10.10.2026, находка 5-А). Последняя дневная свеча —
+  // сутки, идущие сейчас: в 09:53 UTC в ней 13 % обычного дня. Она входила в 30-дневное среднее
+  // объёма, и показатель «объём 30д к предыдущим 30д» пилил внутри каждых суток: −3,7 п.п. сразу
+  // после полуночи UTC и ноль к их концу (балл семьи менялся 25 раз за 77 суток, 14 — с возвратом
+  // в тот же день) при порогах +10 и +15 %. Ценовой ряд НЕ трогается: его последняя точка — живая
+  // цена, от неё внутри замороженной секции считаются тренд, MA и реализованная волатильность.
+  const rawVolume=closedDaysOnly(candles.map(x=>({t:x.t,v:finite(x.quoteVolume)?x.quoteVolume:(finite(x.volume)?x.volume*x.v:null)})).filter(x=>finite(x.v)));
   const volume=safeContract("volume",rawVolume,errors);
   const marketCap=normalizeToContract("marketCap",price.map(p=>({t:p.t,v:p.v*estimatedSupply(p.t)}))).rows;
   let ath=null,athSource="window";const cg=await settled("coingecko markets",()=>request("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin&sparkline=false",{tries:1}));
@@ -1094,6 +1228,46 @@ async function fetchNetwork(){
 const CM_HOSTS = CM_KEY
   ? [{ root: "https://api.coinmetrics.io/v4", useKey: true }, { root: "https://community-api.coinmetrics.io/v4", useKey: false }]
   : [{ root: "https://community-api.coinmetrics.io/v4", useKey: false }];
+// СВЕРКА ПОТОКОВ И ОСТАТКА БИРЖ (аудит 10.10.2026, находка 3.3-А). Остаток бирж SplyExNtv и потоки
+// FlowInExNtv/FlowOutExNtv — один и тот же учёт размеченных биржевых адресов, и до апреля 2026 года
+// тождество ΔSplyExNtv = FlowIn − FlowOut выполнялось по дням (за 4,5 года два дня с расхождением
+// больше 100 BTC). С 05.05.2026 оно нарушено каждый день в одну сторону: за 30 дней по 09.10.2026
+// потоки показывают отток 95,1 тыс. BTC при убыли остатка на 33,4 тыс. — разрыв 61,7 тыс. BTC, за
+// 90 дней у двух ног одной семьи разный знак. Какой из рядов верен, по бесплатным данным не узнать;
+// установлено, что они перестали быть согласованы, и это обязано быть видно рядом с карточкой.
+//
+// Здесь только ИЗМЕРЕНИЕ: разрыв = Σ(FlowIn − FlowOut) − ΔSplyExNtv за последние 30 суток, в которых
+// есть все три ряда. Баллы семьи, состояние источника и partial не меняются: постоянный жёлтый
+// статус приучает не читать диагностику. Разрыв больше допуска уходит в data_warnings снимка.
+const CM_FLOW_SUPPLY_WINDOW_DAYS = 30, CM_FLOW_SUPPLY_TOLERANCE_BTC = 5000;
+function exchangeFlowSupplyCheck(by,{days=CM_FLOW_SUPPLY_WINDOW_DAYS}={}){
+  const byDay=id=>new Map((by?.[id]||[]).filter(x=>finite(x?.t)&&finite(x?.v)).map(x=>[dayKey(x.t),Number(x.v)]));
+  const flowIn=byDay("FlowInExNtv"),flowOut=byDay("FlowOutExNtv"),supply=byDay("SplyExNtv");
+  // Край окна — последний день, за который есть все три ряда: метрики публикуются не одновременно.
+  const end=[...supply.keys()].filter(d=>flowIn.has(d)&&flowOut.has(d)).sort().at(-1);
+  if(!end)return null;
+  const endT=Date.parse(end+"T00:00:00Z");
+  let netflow=0;
+  // Окно без пропусков: пропущенный день потока превратил бы дыру в данных в «расхождение».
+  for(let i=0;i<days;i++){
+    const d=dayKey(endT-i*DAY);
+    if(!flowIn.has(d)||!flowOut.has(d))return null;
+    netflow+=flowIn.get(d)-flowOut.get(d);
+  }
+  // Остаток дня — на его конец, поток — за день: база остатка — день ПЕРЕД первым днём окна.
+  const base=supply.get(dayKey(endT-days*DAY));
+  if(!finite(base))return null;
+  const supplyChange=supply.get(end)-base;
+  return{days,as_of:iso(endT),netflow_btc:netflow,supply_change_btc:supplyChange,gap_btc:netflow-supplyChange};
+}
+// «61,7 тыс.» — число в тысячах с запятой, как пишут по-русски.
+const ruThousands=value=>`${(Math.abs(Number(value))/1000).toFixed(1).replace(".",",")} тыс.`;
+function exchangeFlowSupplyWarning(check){
+  if(!check||!finite(check.gap_btc)||!(Math.abs(check.gap_btc)>CM_FLOW_SUPPLY_TOLERANCE_BTC))return null;
+  // Округление — по модулю: разрыв −5 000,5 BTC обязан стать −5 001, а не «ровно на допуске».
+  return{source:"coinmetrics",code:"exchange_flow_supply_mismatch",value:Math.sign(check.gap_btc)*Math.round(Math.abs(check.gap_btc)),threshold:CM_FLOW_SUPPLY_TOLERANCE_BTC,unit:`BTC за ${check.days} дней`,
+    text:`Потоки бирж расходятся с остатком на ${ruThousands(check.gap_btc)} BTC за ${check.days} дней`,affects:["exchange_supply","exchange_netflow_30d"]};
+}
 async function fetchCoinMetrics(){
   const start=new Date(NOW-5*365*DAY).toISOString().slice(0,10),errors=[];
   for(const {root,useKey} of CM_HOSTS){
@@ -1106,10 +1280,57 @@ async function fetchCoinMetrics(){
       for(const [metric,contract] of Object.entries(contractMap))if(by[metric]?.length)by[metric]=safeContract(contract,by[metric],contractErrors);
       if(!CM_METRICS.some(k=>by[k]?.length))throw new Error("no usable series returned");
       const allErrors=[...quality.errors,...contractErrors];
+      // Сверка — измерение, а не проверка пакета: её отказ или её результат не трогают ни errors, ни partial.
+      let flowSupplyCheck=null;
+      try{flowSupplyCheck=exchangeFlowSupplyCheck(by);}catch{}
       return {data:by,observed_at:quality.observed_at,source:"coinmetrics",source_url:SOURCE_URLS.coinmetrics,
-        source_urls:[SOURCE_URLS.coinmetrics],partial:allErrors.length>0,errors:allErrors};
+        source_urls:[SOURCE_URLS.coinmetrics],partial:allErrors.length>0,errors:allErrors,flow_supply_check:flowSupplyCheck};
     }catch(e){
       // The key is never echoed: only the hostname and the transport error are recorded.
+      errors.push(`${new URL(root).host}: ${String(e?.message||e)}`);
+    }
+  }
+  throw new Error(errors.join("; "));
+}
+
+// ВСЯ ИСТОРИЯ MVRV (набор mvrv_deep) — для теневого кандидата v3. Основной пакет Coin Metrics несёт
+// пять лет: четырёхлетнее окно карточки сейчас теряет медвежий рынок 2022 года, и пороги «дешёвой»
+// оценки ползут вверх по календарю (аудит 10.10.2026, находка 4.1-А). Кандидат v3 требует согласия
+// четырёхлетнего окна с окном всей истории; здесь эта история и берётся: CapMVRVCur с 18.07.2010,
+// тот же бесплатный эндпоинт, ОДИН запрос (5 928 дней на 10.10.2026 — в одну страницу из 10 000).
+//
+// Решающий контур v1 этот набор не читает (decision_relevant:false): его отказ виден в источниках,
+// но качество решения не понижает. Глубокое окно тени v2 (mvrvDeepSeries в compute) тоже не
+// трогается — у него свой заранее объявленный ряд.
+//
+// Расход — один запрос в сутки. Два отсева до сети:
+//   • в кэше уже есть вчерашняя точка — ряд дневной, новому взяться неоткуда (dailySeriesIsCurrent);
+//   • у ОСНОВНОГО пакета Coin Metrics, который качается каждый такт, нет дня новее кэша — значит и
+//     у глубокого запроса его не будет. Это убирает холостые запросы в первые часы суток, пока
+//     провайдер ещё не выложил вчерашний день, и заодно не даёт стучаться, когда он лежит.
+// Интервал между попытками и метка попытки, переживающая отказ, — в loadDataset (реестр attempts).
+const MVRV_DEEP_START = "2010-07-18";
+const MVRV_DEEP_MIN_POINTS = 2000;
+async function fetchMvrvDeep(cached){
+  if(dailySeriesIsCurrent(cached?.observed_at))return UNCHANGED;
+  const mainLast=Number(last(datasets.coinmetrics?.data?.CapMVRVCur||[])?.t),cachedAt=Date.parse(cached?.observed_at||"");
+  if(finite(cachedAt)&&finite(mainLast)&&mainLast<=cachedAt)return UNCHANGED;
+  const errors=[];
+  for(const {root,useKey} of CM_HOSTS){
+    const q=new URLSearchParams({assets:"btc",metrics:"CapMVRVCur",frequency:"1d",start_time:MVRV_DEEP_START,page_size:"10000"});
+    if(useKey&&CM_KEY)q.set("api_key",CM_KEY);
+    try{
+      const j=await request(`${root}/timeseries/asset-metrics?${q}`);
+      // Вторая страница означала бы, что ряд молча обрезан: окно «вся история» потеряло бы свежий хвост.
+      if(j?.next_page_token)throw new Error("history does not fit one page");
+      const raw=(j?.data||[]).map(r=>({t:Date.parse(String(r?.time).slice(0,10)+"T00:00:00Z"),v:Number(r?.CapMVRVCur)})).filter(x=>finite(x.t)&&finite(x.v)&&x.v>0);
+      // Тот же контракт единиц, что у основного ряда: отношение, а не проценты. Первые дни июля 2010
+      // (MVRV 146, 63, 45 при ничтожной реализованной капитализации) он отбрасывает как нефизичные.
+      const rows=normalizeToContract("mvrv",raw).rows;
+      if(rows.length<MVRV_DEEP_MIN_POINTS)throw new Error(`history too short: ${rows.length}`);
+      return{data:rows,observed_at:iso(last(rows).t),source:"coinmetrics",source_url:SOURCE_URLS.coinmetrics,source_urls:[SOURCE_URLS.coinmetrics]};
+    }catch(e){
+      // Ключ не печатается: только хост и ошибка транспорта.
       errors.push(`${new URL(root).host}: ${String(e?.message||e)}`);
     }
   }
@@ -1148,6 +1369,30 @@ async function fetchCftc(){
 }
 
 function expiryFromName(name){const m=String(name).match(/BTC-(\d{1,2})([A-Z]{3})(\d{2})/);if(!m)return null;const mo={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};return Date.UTC(2000+Number(m[3]),mo[m[2]],Number(m[1]));}
+// Порог ликвидности датированного фьючерса для basis: OI от 50 млн $ ИЛИ оборот от 1 млн $ за сутки.
+const BASIS_LIQUID_OI_USD = 50e6, BASIS_LIQUID_VOLUME_USD = 1e6;
+// РЕЗЕРВНЫЙ BASIS С KRAKEN FUTURES — линейные датированные FF_XBTUSD_ГГММДД, и только ЛИКВИДНЫЕ.
+// Прежний резерв брал инверсные FI_XBTUSD_*: у них OI 0 и mark = index, то есть при отказе Deribit
+// basis получался ровно 0,0 %, и нога carry молча голосовала «спокойно» числом мёртвого контракта
+// (аудит 10.10.2026, находка 5-Б). Основной площадке разрешено опуститься до неликвидного контракта —
+// её книга глубже на порядки; резервной — нет: контракт обязан пройти тот же порог ликвидности.
+// На 10.10.2026 его не проходит ни один (квартальный FF: OI 3,6 млн $, оборот 46 тыс. $ в сутки),
+// и резерв честно отдаёт null. Оживёт сам, когда на Kraken появится ликвидный датированный контракт.
+function krakenDatedBasis(tickers,now=NOW){
+  const rows=(tickers||[]).map(x=>{
+    const m=String(x?.symbol||"").match(/^FF_XBTUSD_(\d{2})(\d{2})(\d{2})$/i);
+    if(!m)return null;
+    const mark=num(x.markPrice),index=num(x.indexPrice);
+    return{symbol:String(x.symbol),expiry:Date.UTC(2000+Number(m[1]),Number(m[2])-1,Number(m[3])),mark,index,suspended:x.suspended===true,
+      oiUsd:finite(x.openInterest)&&finite(mark)?Number(x.openInterest)*mark:null,
+      volumeUsd:finite(x.volumeQuote)?Number(x.volumeQuote):(finite(x.vol24h)&&finite(mark)?Number(x.vol24h)*mark:null)};
+  }).filter(Boolean)
+    .filter(x=>!x.suspended&&x.expiry>now+20*DAY&&x.expiry<now+100*DAY&&finite(x.mark)&&finite(x.index)&&x.index>0)
+    .filter(x=>(x.oiUsd||0)>=BASIS_LIQUID_OI_USD||(x.volumeUsd||0)>=BASIS_LIQUID_VOLUME_USD)
+    .sort((a,b)=>a.expiry-b.expiry);
+  const q=rows[0];
+  return q?{basis:(q.mark/q.index-1)*365/((q.expiry-now)/DAY)*100,symbol:q.symbol}:null;
+}
 async function fetchDerivatives(){
   const start=NOW-730*DAY;
   const tasks=await Promise.all([
@@ -1158,30 +1403,47 @@ async function fetchDerivatives(){
     settled("hyperliquid",()=>hyperliquidRequest({type:"metaAndAssetCtxs"})),
     settled("okx funding",()=>okxRequest("https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP")),
     settled("okx oi",()=>okxRequest("https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP")),
-    settled("kraken futures",()=>request("https://futures.kraken.com/derivatives/api/v3/tickers/PI_XBTUSD",{tries:2})),
-    settled("kraken dated futures",()=>request("https://futures.kraken.com/derivatives/api/v3/tickers?contractType=futures_inverse",{tries:2})),
+    settled("kraken futures",()=>request("https://futures.kraken.com/derivatives/api/v3/tickers/PF_XBTUSD",{tries:2})),
   ]);
   const byLabel=Object.fromEntries(tasks.filter(x=>x.ok).map(x=>[x.label,x.value])),errors=tasks.filter(x=>!x.ok).map(x=>`${x.label}: ${x.error}`);
   const futures=byLabel["deribit futures"]?.result||[],options=byLabel["deribit options"]?.result||[],der=byLabel["deribit perpetual"]?.result||{};
   const hl=byLabel["hyperliquid"]||[],hlUni=hl?.[0]?.universe||[],hlIdx=hlUni.findIndex(u=>u?.name==="BTC"),hlCtx=hlIdx>=0?(hl?.[1]?.[hlIdx]||{}):{},okf=byLabel["okx funding"]?.data?.[0]||{},oko=byLabel["okx oi"]?.data?.[0]||{},kf=byLabel["kraken futures"]||{};
   if(byLabel["kraken futures"]&&kf.result!=="success")errors.push(`kraken futures: ${kf.error||kf.result||"business error"}`);
   const okHours=finite(okf.fundingTime)&&finite(okf.nextFundingTime)&&Number(okf.nextFundingTime)>Number(okf.fundingTime)?(Number(okf.nextFundingTime)-Number(okf.fundingTime))/HOUR:8;
+  const kfTicker=kf.result==="success"&&kf.ticker&&kf.ticker.suspended!==true?kf.ticker:null,kfMark=num(kfTicker?.markPrice);
+  const kfRate=!kfTicker?null:finite(kfTicker.relativeFundingRate)?Number(kfTicker.relativeFundingRate):(finite(kfTicker.fundingRate)&&finite(kfMark)&&kfMark>0?Number(kfTicker.fundingRate)/kfMark:null);
   const funding=[
     {venue:"Deribit",rate8h:num(der.funding_8h),oiUsd:num(der.open_interest),intervalHours:8},
     {venue:"Hyperliquid",rate8h:finite(hlCtx.funding)?Number(hlCtx.funding)*8:null,oiUsd:finite(hlCtx.openInterest)&&finite(hlCtx.markPx)?Number(hlCtx.openInterest)*Number(hlCtx.markPx):null,intervalHours:1},
     {venue:"OKX",rate8h:finite(okf.fundingRate)?Number(okf.fundingRate)*8/okHours:null,oiUsd:num(oko.oiUsd),intervalHours:okHours},
-    // Kraken PI_XBTUSD fundingRate is the ABSOLUTE hourly rate of the inverse contract (BTC per
-    // 1 USD notional); the relative hourly rate is fundingRate * markPrice (verified live:
-    // -5.8e-11 * 64682 = -3.8e-6/h ~= -0.003%/8h). The inverse contract is quoted in $1 contracts,
-    // therefore openInterest is directly comparable to USD notional from the other venues.
-    {venue:"Kraken Futures",rate8h:kf.result==="success"&&finite(kf.ticker?.fundingRate)&&finite(kf.ticker?.markPrice)?Number(kf.ticker.fundingRate)*Number(kf.ticker.markPrice)*8:null,oiUsd:kf.result==="success"?num(kf.ticker?.openInterest):null,intervalHours:1},
+    // Kraken Futures — ЛИНЕЙНЫЙ бессрочный PF_XBTUSD. Прежний инверсный PI_XBTUSD умер: на 10.10.2026
+    // OI 2,3 млн $ (0,04 % суммы площадок), оборот 60–80 тыс. $ в сутки; у PF в тот же час OI 189 млн $
+    // (2 287 BTC) и оборот 297 млн $ (аудит 10.10.2026, находка 5-Б; проверено живым запросом).
+    // Единицы PF: openInterest — в BTC (переводится в USD по markPrice), fundingRate — абсолютная
+    // ставка за час в USD на 1 BTC, relativeFundingRate — она же относительно цены (сверено:
+    // 0,4496 / 82 824 = 5,43e-6 в час). Берётся относительная; абсолютная — запасной путь.
+    // КЛЮЧ ПЛОЩАДКИ НОВЫЙ НАМЕРЕННО. Под прежним ключом «Kraken Futures» в накопленной истории OI
+    // лежат 2,3 млн $ инверсного контракта; подставь туда 189 млн $ — и «изменение OI за 7 дней»
+    // получило бы +2,9 п.п. из воздуха на неделю при пороге семьи в 3 %. Сравнение OI идёт только по
+    // площадкам, общим с базой (percentChangeCommonVenues), поэтому новая площадка входит в него сама
+    // через семь дней, когда у неё появится собственная база.
+    {venue:"Kraken Futures PF",rate8h:finite(kfRate)?kfRate*8:null,oiUsd:kfTicker&&finite(kfTicker.openInterest)&&finite(kfMark)?Number(kfTicker.openInterest)*kfMark:null,intervalHours:1},
   ].filter(x=>finite(x.rate8h)&&Math.abs(Number(x.rate8h))<.05&&(!finite(x.oiUsd)||(Number(x.oiUsd)>1e6&&Number(x.oiUsd)<1e12)));
   const dated=futures.map(x=>({...x,expiry:expiryFromName(x.instrument_name),oiUsd:num(x.open_interest),volumeUsd:num(x.volume_usd)})).filter(x=>x.expiry>NOW+20*DAY&&x.expiry<NOW+100*DAY&&finite(x.mark_price)).sort((a,b)=>a.expiry-b.expiry);
-  const liquid=dated.filter(x=>(x.oiUsd||0)>=50e6||(x.volumeUsd||0)>=1e6),q=(liquid.length?liquid:dated)[0];
+  const liquid=dated.filter(x=>(x.oiUsd||0)>=BASIS_LIQUID_OI_USD||(x.volumeUsd||0)>=BASIS_LIQUID_VOLUME_USD),q=(liquid.length?liquid:dated)[0];
   const ref=num(q?.estimated_delivery_price)||num(der.index_price);let basis=q&&ref?(Number(q.mark_price)/ref-1)*365/((q.expiry-NOW)/DAY)*100:null,basisSource=finite(basis)?"Deribit":null;
+  // Резервный basis запрашивается ТОЛЬКО когда основной не получился: список датированных
+  // контрактов Kraken — 129 КБ, и качать его каждый такт ради значения, которое не используется,
+  // незачем. Отсутствие ликвидного контракта — честный null: нога basis тогда не голосует вовсе.
+  let krakenDated=null;
   if(!finite(basis)){
-    const kt=byLabel["kraken dated futures"]?.tickers||[],candidates=kt.map(x=>{const m=String(x.symbol||"").match(/^FI_XBTUSD_(\d{2})(\d{2})(\d{2})$/i),expiry=m?Date.UTC(2000+Number(m[1]),Number(m[2])-1,Number(m[3])):null;return{...x,expiry};}).filter(x=>x.expiry>NOW+20*DAY&&x.expiry<NOW+100*DAY&&finite(x.markPrice)&&finite(x.indexPrice)).sort((a,b)=>a.expiry-b.expiry),kq=candidates[0];
-    if(kq){basis=(Number(kq.markPrice)/Number(kq.indexPrice)-1)*365/((kq.expiry-NOW)/DAY)*100;basisSource="Kraken Futures";}
+    krakenDated=await settled("kraken dated futures",()=>request("https://futures.kraken.com/derivatives/api/v3/tickers?contractType=flexible_futures",{tries:2}));
+    if(!krakenDated.ok)errors.push(`kraken dated futures: ${krakenDated.error}`);
+    else{
+      const kb=krakenDatedBasis(krakenDated.value?.tickers);
+      if(kb){basis=kb.basis;basisSource="Kraken Futures";}
+      else errors.push("kraken dated futures: нет ликвидного датированного контракта — basis не определён");
+    }
   }
   const dvolSeries=(byLabel["deribit dvol"]?.result?.data||[]).map(r=>({t:Number(r[0]),v:Number(r[4])})).filter(x=>finite(x.t)&&finite(x.v));
   const opt=options.map(x=>{const p=String(x.instrument_name||"").split("-");return{...x,expiry:expiryFromName("BTC-"+p[1]),strike:Number(p[2]),type:p[3]};}).filter(x=>x.expiry>NOW+14*DAY&&x.expiry<NOW+75*DAY&&finite(x.mark_iv)&&finite(x.underlying_price)&&(num(x.open_interest)||0)>=5);
@@ -1199,7 +1461,7 @@ async function fetchDerivatives(){
   const putOi=optAll.filter(x=>x.type==="P").reduce((a,x)=>a+x.oi,0),callOi=optAll.filter(x=>x.type==="C").reduce((a,x)=>a+x.oi,0);
   const times=[der.timestamp,okf.ts,oko.ts,Date.parse(kf.serverTime||"")].map(Number).filter(t=>Number.isFinite(t)&&t>Date.UTC(2020,0,1)&&t<NOW+HOUR);
   const observedAt=times.length?iso(Math.min(...times)):iso(NOW);
-  return {data:{funding,basis,basisSource,dvol:last(dvolSeries)?.v??null,dvolSeries,skew:finite(pIv)&&finite(cIv)?pIv-cIv:null,optionExpiry:ex?iso(ex):null,iv_term:{near:ivNear,far:ivFar,spread:finite(ivNear)&&finite(ivFar)?ivNear-ivFar:null},putcall_oi:callOi>0?putOi/callOi:null,components:tasks.map(x=>({name:x.label,ok:x.ok}))},observed_at:observedAt,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,partial:errors.length>0,errors};
+  return {data:{funding,basis,basisSource,dvol:last(dvolSeries)?.v??null,dvolSeries,skew:finite(pIv)&&finite(cIv)?pIv-cIv:null,optionExpiry:ex?iso(ex):null,iv_term:{near:ivNear,far:ivFar,spread:finite(ivNear)&&finite(ivFar)?ivNear-ivFar:null},putcall_oi:callOi>0?putOi/callOi:null,components:[...tasks,...(krakenDated?[krakenDated]:[])].map(x=>({name:x.label,ok:x.ok}))},observed_at:observedAt,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,source_urls:SOURCE_URL_GROUPS.derivatives,partial:errors.length>0,errors};
 }
 async function fetchSpot(){
   const tasks=await Promise.all([
@@ -1272,6 +1534,10 @@ async function collect(){
   // граница на случай, когда источник не отдаёт вчерашнюю точку: в штатном ритме запросов нет вовсе,
   // пока вчерашняя точка в кэше, и одна загрузка в сутки после полуночи UTC (+1 ч на закрытие дня).
   await loadDataset("sth_onchain","bitview",4*DAY,fetchSthOnchain,x=>x?.sopr?.length>=180&&x?.sth_rp?.length>=180,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:3*HOUR,cacheAware:true});
+  // Вся история MVRV для теневого кандидата v3 — ПОСЛЕ основного пакета Coin Metrics: загрузчик
+  // сверяется с его последним днём. Час между попытками: до сети дело доходит раз в сутки (см.
+  // fetchMvrvDeep), а чаще часа загрузчик не вызывается вовсе — и после отказа тоже.
+  await loadDataset("mvrv_deep","coinmetrics",4*DAY,fetchMvrvDeep,x=>x?.length>=MVRV_DEEP_MIN_POINTS,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:1*HOUR,cacheAware:true});
 }
 
 function metric(def){return{
@@ -1692,6 +1958,30 @@ function stabilizeCore(candidate,prevState,prevMetaIn,now,{hard=false,fresh=fals
 }
 // POLICY-LOCK:hysteresis_v1:END
 
+// СУТОЧНОЕ ОКНО ТЕНЕВОЙ КАРТОЧКИ oi_purge_24h (аудит 10.10.2026, находка 5-В). Раньше «24ч» в ней
+// были два разных окна: база OI — самый свежий снимок старше 22 часов (то есть 22 часа назад), а цена
+// сравнивалась с закрытием прошлых суток, то есть с полуночью UTC: в 09:53 это изменение за 9,9 часа
+// под подписью «24ч». Теперь у цены и OI одна база — запись истории, ближайшая к «ровно сутки назад»,
+// и подпись окна считается от её фактического возраста: «24ч» в штатном ритме, «26ч» после паузы
+// публикации. Дальше ±3 часов от суток базы нет — карточка честно пуста, а не меряет другое окно.
+const OI_PURGE_TARGET_H = 24, OI_PURGE_TOLERANCE_H = 3;
+function oiPurgeWindow(history,{oiNowByVenue={},priceNow=null,now=NOW}={}){
+  const target=now-OI_PURGE_TARGET_H*HOUR;let base=null,baseT=null;
+  for(const h of history||[]){
+    const t=Date.parse(h?.t);
+    if(!finite(t)||!h?.raw?.oi_by_venue||!finite(h.price)||!(Number(h.price)>0))continue;
+    if(Math.abs(t-target)>OI_PURGE_TOLERANCE_H*HOUR)continue;
+    if(base===null||Math.abs(t-target)<Math.abs(baseT-target)){base=h;baseT=t;}
+  }
+  if(!base)return{oiPct:null,pricePct:null,hours:null,label:`${OI_PURGE_TARGET_H}ч`,base_t:null};
+  const hours=(now-baseT)/HOUR;
+  return{
+    oiPct:Object.keys(oiNowByVenue||{}).length?percentChangeCommonVenues(oiNowByVenue,base.raw.oi_by_venue):null,
+    pricePct:finite(priceNow)?pct(priceNow,base.price):null,
+    hours,label:`${Math.round(hours)}ч`,base_t:iso(baseT),
+  };
+}
+
 // ===== ТЕНЕВОЙ СЛОЙ: 8 карточек без голоса (аудит 2026-07-21) =====
 // Живёт ВНЕ POLICY-LOCK:scoring_and_regimes_v1 сознательно: слой не голосует, не входит в детекторы
 // и не может менять решающее правило — его правки не требуют policy v2. Копит форвард-доказательства
@@ -1746,13 +2036,12 @@ function buildShadowMetrics(){
   const ivTerm=derivData.iv_term||{};
   add({id:"options_structure",block:"leverage",family:"volatility",name:"Опционная структура · терм IV",horizon:"short",role:"context",method:"mechanical",strategic:false,tactical:false,vote:false,value_num:finite(ivTerm.spread)?ivTerm.spread:null,value:finite(ivTerm.spread)?`${ivTerm.spread>=0?"+":""}${ivTerm.spread.toFixed(1)} п.п.`:"—",delta:finite(derivData.putcall_oi)?`put/call OI ${derivData.putcall_oi.toFixed(2)}`:"",note:"Ближняя ATM-IV минус дальняя из того же опционного ответа Deribit (ноль новых запросов). Бэквордация (плюс) — стресс «здесь и сейчас», контанго — обычный режим; отличает событийную дороговизну волы от хронической, которую уже меряет DVOL-перцентиль. Голоса не имеет из-за корреляции с DVOL.",score:null,source:"Deribit",source_url:SOURCE_URLS.deribit,...sourceMeta("derivatives"),series:[]});
 
-  // 7. Суточный сброс OI из собственной истории снимков.
-  const oiHistory=(previous?.history||[]).filter(h=>h?.raw?.oi_by_venue&&finite(Date.parse(h.t)));
+  // 7. Суточный сброс OI из собственной истории снимков. Цена и OI меряются от ОДНОЙ записи
+  //    истории (см. oiPurgeWindow), подпись окна — по её фактическому возрасту.
   const oiNowByVenue=Object.fromEntries((derivData.funding||[]).filter(x=>finite(x.oiUsd)).map(x=>[x.venue,Number(x.oiUsd)]));
-  const oiDayAgo=oiHistory.filter(h=>{const t=Date.parse(h.t);return t<=NOW-22*HOUR&&t>=NOW-30*HOUR;}).at(-1);
-  const oi24=Object.keys(oiNowByVenue).length&&oiDayAgo?percentChangeCommonVenues(oiNowByVenue,oiDayAgo.raw.oi_by_venue):null;
-  const priceDay=finite(priceLast)?pct(priceLast,priorByDays(price,1)?.v):null;
-  add({id:"oi_purge_24h",block:"leverage",family:"oi",name:"OI · суточный сброс",horizon:"short",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:oi24,value:finite(oi24)?`${oi24>=0?"+":""}${oi24.toFixed(1)}% / 24ч`:"—",delta:finite(priceDay)?`цена ${priceDay>=0?"+":""}${priceDay.toFixed(1)}% / 24ч`:"",note:"Прокси каскада ликвидаций из собственной почасовой истории OI (агрегированные ликвидации бесплатно из CI недоступны). Резкое падение суммарного OI при падающей цене означает, что каскад СОСТОЯЛСЯ и плечо вымыто; голосующая семья смотрит 7-дневное окно и однодневный каскад размазывает.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,...sourceMeta("derivatives"),series:[]});
+  const purge=oiPurgeWindow(previous?.history,{oiNowByVenue,priceNow:priceLast});
+  const oi24=purge.oiPct,priceDay=purge.pricePct;
+  add({id:"oi_purge_24h",block:"leverage",family:"oi",name:"OI · суточный сброс",horizon:"short",role:"context",method:"dynamic",strategic:false,tactical:false,vote:false,value_num:oi24,value:finite(oi24)?`${oi24>=0?"+":""}${oi24.toFixed(1)}% / ${purge.label}`:"—",delta:finite(priceDay)?`цена ${priceDay>=0?"+":""}${priceDay.toFixed(1)}% / ${purge.label}`:"",note:"Прокси каскада ликвидаций из собственной истории снимков (агрегированные ликвидации бесплатно из CI недоступны): суммарный OI и цена сравниваются с одним и тем же снимком сутки назад. Резкое падение суммарного OI при падающей цене означает, что каскад СОСТОЯЛСЯ и плечо вымыто; голосующая семья смотрит 7-дневное окно и однодневный каскад размазывает.",score:null,source:"Deribit · Kraken Futures · OKX · Hyperliquid",source_url:SOURCE_URLS.deribit,...sourceMeta("derivatives"),series:[]});
 
   // 8. Hash ribbons: восстановительный крест SMA30/60 хешрейта.
   const hrSeries=series(data("network")?.hashrate||[]);
@@ -1798,6 +2087,153 @@ function plausibleHistoryRecord(h,priceByDay){
   if(finite(ref)&&ref>0&&Math.abs(h.price/ref-1)>0.25)return false;
   return true;
 }
+// ===== НОВЫЕ ПУБЛИКУЕМЫЕ ПОЛЯ И ВХОДЫ ТЕНЕВЫХ ЛИНИЙ (аудит 10.10.2026) =====
+// Всё в этом разделе — чистые функции от явных аргументов: они ничего не решают и на живую цель не
+// влияют. compute() зовёт каждую через `optional` — отказ даёт null и строку в diagnostics.
+
+// Детекторы, от которых зависит кандидат каждого горизонта (candidateRegimes): в причины рождения
+// кандидата попадают только они.
+const STRATEGIC_DETECTORS = ["integrity","macro_shock","distribution","recovery"];
+const TACTICAL_DETECTORS = ["integrity","leverage","demand_break","short_squeeze"];
+// Изменившиеся баллы голосующих семей. В политике v1 у семьи одна голосующая карточка на горизонт,
+// поэтому балл карточки и есть балл семьи; имена берутся из самой карточки.
+function familyChanges(prevMetrics,metrics,horizon=null){
+  const prev=new Map((prevMetrics||[]).filter(x=>x&&x.id).map(x=>[x.id,x])),out=[];
+  for(const m of metrics||[]){
+    if(!m.vote||(horizon==="strategic"&&!m.strategic)||(horizon==="tactical"&&!m.tactical))continue;
+    const from=num(prev.get(m.id)?.score),to=num(m.score);
+    if(from!==to)out.push({block:m.block,family:m.family,id:m.id,name:m.name,from,to});
+  }
+  return out;
+}
+function detectorChanges(prevDetectors,detectors,ids=null){
+  const prev=new Map((prevDetectors||[]).filter(x=>x&&x.id).map(x=>[x.id,x.state]));
+  return (detectors||[]).filter(d=>(!ids||ids.includes(d.id))&&prev.has(d.id)&&prev.get(d.id)!==d.state).map(d=>({id:d.id,from:prev.get(d.id),to:d.state}));
+}
+// Прошлый снимок годится для сравнения, если в нём есть карточки и он той же природы (синтетика
+// против боя не сравнивается). Иначе это холодный старт.
+const comparablePrevious=(prev,mock)=>!!prev&&Array.isArray(prev.metrics)&&prev.metrics.length>0&&(!prev.mock||mock);
+
+// РОЖДЕНИЕ ТЕКУЩЕГО КАНДИДАТА. Причина смены цели возникает не в том снимке, где цель сменилась, а в
+// том, где родился кандидат: повышение публикуется через 48 часов после него, и сравнение двух
+// соседних снимков в момент публикации причины не видит (9 сообщений о смене доли из 9 пришли без
+// причины — аудит 10.10.2026). Запись делается один раз, на снимке смены кандидата, и переносится
+// из прошлого снимка, пока кандидат тот же. Холодный старт и состояние прежней версии — null.
+function buildRegimeBirthV1({previous:prev,now,price,regimeMeta,metrics,blocks,detectors,mock=false}){
+  if(!comparablePrevious(prev,mock)||!prev.regime_meta)return null;
+  const out={};
+  for(const horizon of ["strategic","tactical"]){
+    const candidate=regimeMeta?.[horizon]?.candidate??null,before=prev.regime_meta?.[horizon]?.candidate??null;
+    if(!candidate||!before){out[horizon]=null;continue;}
+    if(candidate===before){
+      const carried=prev.regime_birth?.[horizon];
+      out[horizon]=carried&&typeof carried==="object"&&carried.candidate===candidate?carried:null;
+      continue;
+    }
+    const record={t:iso(now),candidate,from_candidate:before,price:num(price)};
+    if(horizon==="strategic"){
+      record.blocks={};
+      for(const key of ["macro","demand","cycle"]){
+        const from=num(prev.blocks?.[key]?.strategic?.score),to=num(blocks?.[key]?.strategic?.score);
+        if(from!==to)record.blocks[key]={from,to,band_from:band(from),band_to:band(to)};
+      }
+    }
+    record.families=familyChanges(prev.metrics,metrics,horizon);
+    record.detectors=detectorChanges(prev.detectors,detectors,horizon==="strategic"?STRATEGIC_DETECTORS:TACTICAL_DETECTORS);
+    // Кандидат сменился, а баллы и детекторы — нет: значит, дело в покрытии или в аварийном режиме.
+    record.note=!record.families.length&&!record.detectors.length&&!Object.keys(record.blocks||{}).length?"coverage":null;
+    out[horizon]=record;
+  }
+  return out;
+}
+// ЧТО ИЗМЕНИЛОСЬ В ЭТОМ СНИМКЕ относительно прошлого — для причин смены оверлея (пол восстановления
+// включается и снимается детектором и перцентилем MVRV, без смены кандидата).
+function buildTickDiffV1({previous:prev,metrics,detectors,mock=false}){
+  if(!comparablePrevious(prev,mock))return null;
+  const out={families:familyChanges(prev.metrics,metrics),detectors:detectorChanges(prev.detectors,detectors)};
+  const from=num(prev.metrics.find(x=>x?.id==="mvrv_cycle")?.value_num),to=num((metrics||[]).find(x=>x.id==="mvrv_cycle")?.value_num);
+  if(from!==to)out.mvrv_percentile={from,to};
+  return out;
+}
+
+// ПОРОГИ ПРАВИЛ v1 ПО MVRV В ЦЕНАХ. Перцентили — те, на которых стоят правила: ≤10 — пол капитуляции
+// и балл +1 (POLICY_V1), <25 — якорь детектора восстановления, ≥82 — гейт оценки и балл −1, ≥95 —
+// потолок эйфории и балл −2 (25 и 82 зашиты в замороженной секции и вместе с ней не меняются).
+// `rule` — как правило сравнивает перцентиль с порогом: от этого зависит, какая порядковая
+// статистика окна служит границей.
+const VALUATION_LEVELS = [
+  {key:"capitulation_floor",percentile:POLICY_V1.allocation_overlays.capitulation_max_mvrv_percentile,rule:"lte"},
+  {key:"recovery_anchor",percentile:25,rule:"lt"},
+  {key:"valuation_gate",percentile:82,rule:"gte"},
+  {key:"euphoria",percentile:POLICY_V1.allocation_overlays.euphoria_min_mvrv_percentile,rule:"gte"},
+];
+// Уровень MVRV, на котором перцентиль ТЕКУЩЕЙ точки пересекает порог. Перцентиль карточки — средний
+// ранг текущего значения в окне, куда оно само входит (percentileRank): при значении L между k-й и
+// (k+1)-й из остальных n−1 точек он равен (k+0,5)/n·100. Отсюда граница — порядковая статистика
+// остальных точек с номером ⌊p·n/100+0,5⌋ для «≤ p» и ⌈p·n/100−0,5⌉ для «< p» и «≥ p»: ниже неё
+// правило нижней стороны выполняется, выше — правило верхней.
+function mvrvLevelAt(windowValues,percentile,rule){
+  const n=windowValues.length;
+  if(n<30)return null;
+  const others=windowValues.slice(0,-1).map(Number).sort((a,b)=>a-b),x=percentile*n/100-.5;
+  const rank=rule==="lte"?Math.floor(x)+1:Math.ceil(x);
+  return rank>=1&&rank<=others.length?others[rank-1]:null;
+}
+// Окно — то же, что у карточки mvrv_cycle: sliceDays(ряд, 4 года). Цена уровня — через реализованную
+// цену: MVRV = цена / реализованная цена, поэтому реализованная = закрытие дня наблюдения MVRV / MVRV.
+function buildValuationLevelsV1({mvrvSeries,priceSeries,windowDays=4*365}){
+  const window=sliceDays(mvrvSeries||[],windowDays),point=last(window),mvrv=num(point?.v);
+  if(window.length<30||!finite(mvrv)||!(mvrv>0))return null;
+  const close=num((priceSeries||[]).find(x=>dayKey(x.t)===dayKey(point.t))?.v);
+  const realized=finite(close)&&close>0?close/mvrv:null,values=window.map(x=>x.v),round4=v=>Math.round(v*1e4)/1e4;
+  return{as_of:iso(point.t),mvrv:round4(mvrv),realized_price_usd:finite(realized)?Math.round(realized):null,window_days:windowDays,
+    levels:VALUATION_LEVELS.map(({key,percentile,rule})=>{
+      const level=mvrvLevelAt(values,percentile,rule);
+      return{key,percentile,mvrv:finite(level)?round4(level):null,price_usd:finite(level)&&finite(realized)?Math.round(level*realized):null};
+    })};
+}
+
+// ПРЕДУПРЕЖДЕНИЯ О ДАННЫХ: несогласованность рядов и потеря резервов. На decision.quality не влияют.
+const ruGenitive=n=>({2:"двух",3:"трёх",4:"четырёх",5:"пяти"})[n]||String(n);
+function buildDataWarningsV1({etfLegs=null,flowSupplyCheck=null}={}){
+  const out=[],mismatch=exchangeFlowSupplyWarning(flowSupplyCheck);
+  if(mismatch)out.push(mismatch);
+  if(Array.isArray(etfLegs)&&etfLegs.length){
+    const alive=etfLegs.filter(x=>x?.state==="ok").length,total=etfLegs.length;
+    // Резерв — это вторая живая нога. Одна живая из трёх выглядела как state:"ok".
+    if(alive<2)out.push({source:"etf",code:"redundancy_lost",alive,total,
+      text:alive?`Потоки ETF идут с одного источника из ${ruGenitive(total)}`:`Ни один из ${ruGenitive(total)} источников потоков ETF не ответил`,affects:["etf_regime"]});
+  }
+  return out;
+}
+
+// ВХОДЫ ДВИЖКА ТЕНЕВЫХ ВАРИАНТОВ (docs/policy-v3-candidate.mjs, evaluateShadowVariantsV1). Баллы семей —
+// те, что посчитала политика v1; ряды — из наборов данных, как они лежат в состоянии ({t — мс, v}).
+// critical_ok — покрытие СРЕДНЕСРОЧНОГО контура: именно оно в v1 переводит режим в «insufficient».
+function buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,decision,metrics,blocks,detectors,series:rows={},observedAt={}}){
+  const state=id=>(detectors||[]).find(x=>x.id===id)?.state||"calm",mvrv=(metrics||[]).find(x=>x.id==="mvrv_cycle");
+  const families={};
+  for(const block of ["macro","demand","cycle"]){
+    const s=blocks?.[block]?.strategic||{};
+    // null — семья ожидалась, но балла нет.
+    families[block]=Object.fromEntries((s.expected||Object.keys(s.families||{})).map(f=>[f,num(s.families?.[f])]));
+  }
+  const rowsOrNull=a=>Array.isArray(a)&&a.length?a:null;
+  return{
+    price:num(price),hard_override:!!hardOverride,
+    v1:{state:regime?.strategic??null,candidate:regimeMeta?.strategic?.candidate??null,critical_ok:!!candidates?.criticalStrategic,target_pct:num(decision?.target_pct),
+      recovery_state:state("recovery"),macro_shock_state:state("macro_shock"),distribution_state:state("distribution"),
+      mvrv_percentile:num(mvrv?.value_num),valuation_score:num(mvrv?.score)},
+    families,
+    series:{hashrate:rows.hashrate||[],difficulty:rows.difficulty||[],exchange_supply:rows.exchange_supply||[],price_daily:rows.price_daily||[],mvrv:rows.mvrv||[],mvrv_deep:rowsOrNull(rows.mvrv_deep)},
+    observed_at:{mvrv:observedAt.mvrv??null,coinmetrics:observedAt.coinmetrics??null,etf:observedAt.etf??null,network:observedAt.network??null,market:observedAt.market??null,mvrv_deep:observedAt.mvrv_deep??null},
+  };
+}
+// Аргумент последнего вызова монитора — тот самый объект, что ушёл в updateForwardMonitorV1. Нужен
+// проверке проводки: имена параметров на границе потоков (SPEC 1.3) должны совпадать буква в букву.
+let lastMonitorCall=null;
+const monitorCallArguments=()=>lastMonitorCall;
+
 function compute(){
   // САНАЦИЯ ПЕРЕНОСИМОЙ ИСТОРИИ — один раз и ДО первого потребителя. previous.history читают оба:
   // buildMetrics (oi_quality ищет исторический базис OI) и постройка публикуемой истории; обоим
@@ -1809,7 +2245,8 @@ function compute(){
   if(Array.isArray(previous?.history))previous.history=previous.history.filter(h=>plausibleHistoryRecord(h,priceByDay));
   // Теневой слой конкатенируется ПОСЛЕ голосующих карточек: familyStats/детекторы фильтруют по
   // vote, поэтому порядок и состав решающего контура не меняются.
-  const metrics=relabelMvrvFallback([...buildMetrics(),...buildShadowMetrics()]),blocks={};
+  const votingMetrics=buildMetrics(),shadowMetrics=buildShadowMetrics();
+  const metrics=relabelMvrvFallback([...votingMetrics,...shadowMetrics]),blocks={};
   for(const [k,b] of Object.entries(BLOCKS))blocks[k]={...b,strategic:familyStats(metrics,k,"strategic"),tactical:familyStats(metrics,k,"tactical")};
   const {detectors,hardOverride}=buildDetectors(metrics);
   let strategicRaw=0,sw=0,tacticalRaw=0,tw=0;
@@ -1863,7 +2300,46 @@ function compute(){
   const mvrvDeepSeries=[cmSeries("CapMVRVCur"),bcSeries("MVRV")].sort((a,b)=>b.length-a.length)[0]||[];
   const mvrvDeepFresh=mvrvDeepSeries.length&&NOW-last(mvrvDeepSeries).t<=5*DAY;
   const mvrvDeepPct=mvrvDeepSeries.length>=1200&&mvrvDeepFresh?percentileRank(mvrvDeepSeries.map(x=>x.v),last(mvrvDeepSeries).v):null;
-  const monitoring=updateForwardMonitorV1({previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta:{strategic:stableS,tactical:stableT},shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}});
+  // НОВЫЕ НЕОБЯЗАТЕЛЬНЫЕ РАСЧЁТЫ (аудит 10.10.2026). Ни один из них не читается решающим правилом v1:
+  // решение уже собрано выше. Поэтому отказ любого — исключение или результат, не прошедший контракт
+  // публичного снимка, — даёт null, строку в diagnostics и запись в stderr; сбор не падает, качество
+  // решения не понижается. Контракт один и тот же здесь и в self-test (optionalFieldProblemsV1): то,
+  // что не прошло бы проверку перед публикацией, до публикации не доходит.
+  const diagnostics=[];
+  const note=(scope,error)=>{const message=String(error?.message||error).slice(0,200);if(diagnostics.length<20)diagnostics.push({scope,error:message});console.error(`optional calculation failed: ${scope}: ${message}`);};
+  const optional=(scope,build)=>{
+    try{
+      const value=build(),problems=optionalFieldProblemsV1(scope,value);
+      if(problems.length)throw new Error(`не прошло контракт снимка — ${problems[0]}`);
+      return value;
+    }catch(error){note(scope,error);return null;}
+  };
+  const regimeMeta={strategic:stableS,tactical:stableT};
+  const regimeBirth=optional("regime_birth",()=>buildRegimeBirthV1({previous,now:NOW,price,regimeMeta,metrics,blocks,detectors,mock:MOCK}));
+  const tickDiff=optional("tick_diff",()=>buildTickDiffV1({previous,metrics,detectors,mock:MOCK}));
+  // Ряд MVRV — тем же выбором, что в карточке mvrv_cycle (Coin Metrics, иначе резерв целиком).
+  const mvrvV1=optional("mvrv_series",()=>chooseWholeSeries("CapMVRVCur","MVRV",{fallbackSource:"bitcoin-data.com",fallbackUrls:[SOURCE_URLS.bitcoindata]}).series)||[];
+  const valuationLevels=optional("valuation_levels",()=>buildValuationLevelsV1({mvrvSeries:mvrvV1,priceSeries:marketSeries("price")}));
+  // Состав источника ETF по ногам уже лежит в sources.etf.legs; негодный — снимается оттуда же.
+  if(sourceStates.etf?.legs!==undefined&&optional("etf_legs",()=>sourceStates.etf.legs)===null)delete sourceStates.etf.legs;
+  const dataWarnings=optional("data_warnings",()=>buildDataWarningsV1({etfLegs:sourceStates.etf?.legs,flowSupplyCheck:datasets.coinmetrics?.flow_supply_check??exchangeFlowSupplyCheck(data("coinmetrics"))}));
+  const variantInputs=optional("variant_inputs",()=>buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,decision,metrics,blocks,detectors,
+    series:{hashrate:netSeries("hashrate"),difficulty:netSeries("difficulty"),exchange_supply:cmSeries("SplyExNtv"),price_daily:marketSeries("price"),mvrv:mvrvV1,mvrv_deep:series(data("mvrv_deep")||[])},
+    observedAt:{mvrv:mvrvV1.length?iso(last(mvrvV1).t):null,coinmetrics:obs("coinmetrics"),etf:obs("etf"),network:obs("network"),market:obs("market"),mvrv_deep:obs("mvrv_deep")}}));
+  const shadowValues=optional("shadow_values",()=>Object.fromEntries(shadowMetrics.map(x=>[x.id,num(x.value_num)])));
+  const monitorArgs={previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta,shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}};
+  // Монитор получает входы теневых линий, значения теневых карточек, рождение кандидата и разницу
+  // снимков (SPEC 1.3). Если он упал НА НИХ, повторяется прежний вызов без них: живая линия v1 и
+  // журнал решений не имеют права встать из-за теневого слоя. Монитор входное состояние не мутирует
+  // (работает с его копией), поэтому повтор безопасен; настоящая ошибка прежнего пути упадёт и на нём.
+  const monitorCall={...monitorArgs,variantInputs,shadowValues,regimeBirth,tickDiff};
+  lastMonitorCall=monitorCall;
+  let monitoring;
+  try{monitoring=updateForwardMonitorV1(monitorCall);}
+  catch(error){
+    note("monitor_extras",error);
+    monitoring=updateForwardMonitorV1({...monitorArgs,variantInputs:null,shadowValues:null,regimeBirth:null,tickDiff:null});
+  }
   // History retention: hourly resolution for the last 14 days (tactical OI baselines), one entry
   // per UTC day beyond that, nothing past 730 days, hard cap far below self-test's 5000 guard.
   // Without downsampling, hourly appends hit that guard after ~207 days and publication deadlocks.
@@ -1884,6 +2360,9 @@ function compute(){
     schema:3,version:VERSION,policy:policyMetadataV1(),policy_suite:policySuiteMetadataV1(),policy_components:{allocation:policyMetadataV1(),model:modelPolicyMetadataV1(),execution:executionPolicyMetadataV1()},generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
     regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
+    // Необязательные поля (SPEC 1.1): потребитель обязан работать и без них. null — холодный старт
+    // либо отказ расчёта (тогда причина — в diagnostics).
+    regime_birth:regimeBirth,tick_diff:tickDiff,valuation_levels:valuationLevels,data_warnings:dataWarnings,diagnostics,
     sources:sourceStates,source_vintages:sourceVintages,source_revision_alerts:revisionAlerts,monitoring,history:boundedHistory.history,datasets,
     // Метки попыток переносятся вперёд целиком: источник, не опрошенный в этом прогоне из-за
     // интервала, обязан помнить, когда к нему ходили в последний раз. Реестр остаётся и в
@@ -1910,7 +2389,16 @@ function compute(){
   };
 }
 
-export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchSthOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity };
+export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS, spliceFreshEtfDays, fetchSosoEtfDaily, etfDegradation, cachedEtfCanon, reviveSplicedDays, plausibleHistoryRecord, stabilizeCore, severity, componentScore, request, quoteDispersion, quoteGroupPrices, referencePriceUsesSpot, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, parseBlockchainChart, validateBlockchainOnchainData, fetchBlockchainChart, fetchBlockchainOnchain, probeIsOlderOrSame, legNeedsRefetch, lastAttemptAt, dailySeriesIsCurrent, fetchSthOnchain, fetchFredSeries, fetchMarket, fetchNetwork, parseFred, parseFarside, parseEtfFlowJson, fetchEtfFlows, parseFlowNumber, validateEtfSeries, retryAfterMs, priorByDays, rollingMean, percentileRank, normalizeCoinMetricsRows, validateCoinMetricsData, normalizeStableHistory, observationAge, validObservationAge, percentChangeCommonVenues, referencePrice, fetchCftc, fetchDerivatives, fetchSpot, fetchPegs, classifyIntegrity,
+  // Правки аудита 10.10.2026 (поток «сборщик»): чистые функции слоя данных и новых публикуемых полей.
+  parseCftc, closedDaysOnly, changeOfAverage, krakenDatedBasis, oiPurgeWindow,
+  updateCanonRegistry, carryCanonDays, ETF_CANON_HOLD_TTL, ETF_CANON_HOLD_MAX_DAYS, ETF_CANON_REGISTRY_TTL, ETF_LEG_NAMES,
+  // Для воспроизведения эпизодов на настоящем счёте: тест подставляет наборы данных и зовёт ту самую
+  // buildMetrics, что стоит под замком, а не её копию (scripts/collector-etf-episode.mjs).
+  buildMetrics, datasets as collectorDatasets,
+  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS,
+  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, buildVariantInputsV1, VALUATION_LEVELS,
+  collect, compute, monitorCallArguments, fetchCoinMetrics };
 
 function atomicJson(path,value){
   mkdirSync(path.split("/").slice(0,-1).join("/")||".",{recursive:true});

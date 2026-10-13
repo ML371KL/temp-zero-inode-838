@@ -2,7 +2,7 @@ import { readFileSync, statSync, existsSync } from "node:fs";
 import { allocationDecisionV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
 import { policySuiteMetadataV1, POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
-import { PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
+import { PUBLIC_SNAPSHOT_MAX_BYTES, optionalSnapshotProblemsV1, optionalSnapshotBytesV1 } from "./public-snapshot-contract.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
 const statePath=process.env.STATE||".state/cache.json";
@@ -46,6 +46,8 @@ const sourceMaxAgeH={
   // Теневой слой (vote:false): свежесть проверяется так же строго, но отказ не деградирует решение.
   fred_ECBASSETSW:24*14,fred_JPNASSETS:24*70,fred_DEXUSEU:24*14,fred_DEXJPUS:24*14,
   tga_daily:24*6,sth_onchain:24*5,gold:24*5,
+  // Вся история MVRV для теневого кандидата v3: ряд дневной, обновляется раз в сутки.
+  mvrv_deep:24*5,
 };
 
 if(s.schema!==3)fail.push("schema must be 3");
@@ -171,6 +173,34 @@ for(const [k,state] of Object.entries(s.sources||{})){
 }
 
 
+// НЕОБЯЗАТЕЛЬНЫЕ ПОЛЯ (правки аудита 10.10.2026): regime_birth, tick_diff, valuation_levels,
+// data_warnings, diagnostics, sources.etf.legs. Их может не быть вовсе — снимок прежней формы обязан
+// проходить, — но если поле есть, оно обязано иметь форму контракта (optionalFieldProblemsV1).
+// Жёсткий отказ — только для живого кандидата: его писал этот же код и этим же контрактом уже
+// проверил каждое поле перед записью. Для ранее опубликованного снимка это предупреждение: его мог
+// писать код другой версии, а проверка закоммиченного снимка стоит ПЕРЕД сбором и не имеет права
+// остановить конвейер из-за справочного поля (та же логика, что у свежести источников выше).
+{
+  const strict=process.env.REQUIRE_LIVE==="1",report=text=>strict?fail.push(text):warn.push(`${text} (heals on next collection)`);
+  for(const problem of optionalSnapshotProblemsV1(s))report(`optional field invalid: ${problem}`);
+  // Согласованность с остальным снимком.
+  for(const horizon of ["strategic","tactical"]){
+    const birth=s.regime_birth?.[horizon];
+    if(!birth||typeof birth!=="object")continue;
+    if(birth.candidate!==s.regime_meta?.[horizon]?.candidate)report(`regime_birth.${horizon} describes candidate ${birth.candidate}, current candidate is ${s.regime_meta?.[horizon]?.candidate}`);
+    if(Date.parse(birth.t)>Date.parse(s.generated_at))report(`regime_birth.${horizon} is dated after the snapshot`);
+  }
+  for(const warning of Array.isArray(s.data_warnings)?s.data_warnings:[])for(const id of Array.isArray(warning?.affects)?warning.affects:[])if(!ids.has(id))report(`data warning ${warning.code} points at an unknown metric:${id}`);
+  // Уровни MVRV и карточка считаются по одному окну: текущее значение лежит по ту сторону уровня,
+  // по какую перцентиль карточки лежит от порога. Допуск — на округление уровня до 0,0001.
+  const levels=s.valuation_levels,percentile=(s.metrics||[]).find(x=>x.id==="mvrv_cycle")?.value_num;
+  if(levels&&Array.isArray(levels.levels)&&strictFinite(percentile)&&strictFinite(levels.mvrv))for(const level of levels.levels){
+    if(!strictFinite(level?.mvrv)||!strictFinite(level?.percentile))continue;
+    if((levels.mvrv<level.mvrv-2e-4&&percentile>level.percentile)||(levels.mvrv>level.mvrv+2e-4&&percentile<level.percentile))report(`valuation level ${level.key} contradicts the MVRV card: MVRV ${levels.mvrv} vs level ${level.mvrv}, percentile ${percentile} vs ${level.percentile}`);
+  }
+  if(Array.isArray(s.diagnostics)&&s.diagnostics.length)warn.push(`optional calculations failed: ${s.diagnostics.map(x=>`${x?.scope}: ${x?.error}`).join("; ").slice(0,400)}`);
+}
+
 if((s.sources?.derivatives?.urls||[]).length<3)fail.push("derivatives source state must expose three documentation links");
 if((s.sources?.spot?.urls||[]).length<5)fail.push("spot source state must expose five documentation links");
 
@@ -280,5 +310,6 @@ const bytes=statSync(path).size;
 if(bytes>PUBLIC_SNAPSHOT_MAX_BYTES)warn.push(`snapshot is large: ${(bytes/1e6).toFixed(2)} MB`);
 
 if(fail.length){console.error("Snapshot validation failed:\n- "+fail.join("\n- "));process.exit(1);}
-console.log(`Snapshot OK: ${s.metrics.length} metrics, ${families.size} voting families, ${s.detectors.length} detectors, ${Object.keys(s.sources||{}).length} source states, ${(bytes/1e6).toFixed(2)} MB`);
+const optionalBytes=optionalSnapshotBytesV1(s).total;
+console.log(`Snapshot OK: ${s.metrics.length} metrics, ${families.size} voting families, ${s.detectors.length} detectors, ${Object.keys(s.sources||{}).length} source states, ${(bytes/1e6).toFixed(2)} MB${optionalBytes?`, optional fields ${(optionalBytes/1e3).toFixed(1)} KB`:""}`);
 if(warn.length)console.warn("Warnings:\n- "+warn.join("\n- "));
