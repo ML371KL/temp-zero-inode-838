@@ -12,7 +12,7 @@
 // Запускается из live-regression-test (входит в npm run check); можно и отдельно:
 //   node scripts/collector-e2e-test.mjs
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, cpSync, renameSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -340,8 +340,11 @@ console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_met
   // решение, хэши и NAV сравниваются дословно.
   {
     const here=fileURLToPath(new URL(".",import.meta.url)),tree=join(dir,"tree"),modules=src=>["",".mjs"].includes(extname(src));   // каталоги и модули
-    cpSync(here,join(tree,"scripts"),{recursive:true,filter:modules});
-    cpSync(join(here,"..","docs"),join(tree,"docs"),{recursive:true,filter:src=>modules(src)||/monitor-graft-v1\.json$/.test(src)});
+    // Копия — содержимым файлов, без переноса прав каталога: рабочий каталог на сервере несёт setgid, а боевой
+    // юнит запрещает его выставлять (cpSync падал на chmod и останавливал сбор — первый такт выкладки 13.10.2026).
+    const copyFiles=(from,to,keep)=>{mkdirSync(to,{recursive:true});for(const entry of readdirSync(from,{withFileTypes:true}))if(entry.isFile()&&keep(entry.name))writeFileSync(join(to,entry.name),readFileSync(join(from,entry.name)));};
+    copyFiles(here,join(tree,"scripts"),name=>extname(name)===".mjs");
+    copyFiles(join(here,"..","docs"),join(tree,"docs"),name=>extname(name)===".mjs"||name==="monitor-graft-v1.json");
     renameSync(join(tree,"scripts","forward-monitor-v1.mjs"),join(tree,"scripts","forward-monitor-v1.real.mjs"));
     writeFileSync(join(tree,"scripts","forward-monitor-v1.mjs"),`export * from "./forward-monitor-v1.real.mjs";
 import { updateForwardMonitorV1 as realMonitor } from "./forward-monitor-v1.real.mjs";
