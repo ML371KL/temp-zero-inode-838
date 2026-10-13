@@ -12,7 +12,8 @@ const REGIME={emergency:"аварийный",defensive:"защитный",deteri
 const BLOCK={macro:"Макро",demand:"Спрос",cycle:"Цикл",leverage:"Плечо",market:"Качество цены"};
 const DETECTOR={recovery:"Восстановление",macro_shock:"Макрошок",distribution:"Дистрибуция",integrity:"Целостность рынка",leverage:"Плечо",demand_break:"Слом спроса",short_squeeze:"Short squeeze"};
 const DETECTOR_STATE={calm:"спокойно",watch:"наблюдение",good:"подтверждён",fired:"сработал"};
-const OVERLAY={recovery_floor:"пол recovery",capitulation_floor:"пол капитуляции",euphoria_safety_cap:"потолок эйфории",emergency_override:"аварийный режим"};
+// Имена оверлеев — те же, что в уведомлениях и на витрине: одно решение не должно называться двумя именами.
+const OVERLAY={recovery_floor:"пол восстановления",capitulation_floor:"пол капитуляции",euphoria_safety_cap:"потолок эйфории",emergency_override:"аварийный режим"};
 // Детекторы с правом на вердикт и семьи-подтверждения recovery: только они могут быть причиной.
 const VERDICT_DETECTORS=["recovery","macro_shock","distribution","integrity"];
 const RECOVERY_LEGS=["trend_regime","etf_regime","exchange_supply"];

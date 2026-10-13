@@ -383,10 +383,10 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
   m=tick(m,T0+3*HOUR,61_000,{strategic:"transition",mvrv:20,recovery:"good"},{regimeBirth:birth,tickDiff:{families:[{block:"demand",family:"exchange_supply",id:"exchange_supply",name:"Биржевое предложение BTC",from:-0.5,to:0},{block:"macro",family:"stress",id:"system_stress",name:"Кредит и системный стресс",from:0,to:-0.5}],detectors:[{id:"recovery",from:"watch",to:"good"}]}});
   const floor=m.target_change_log.at(-1);
   assert.deepEqual([floor.kind,floor.from_pct,floor.to_pct,floor.overlays_from,floor.overlays_to],["overlay",45,80,[],["recovery_floor"]]);
-  assert.equal(floor.cause.text,"пол recovery включён: биржевое предложение BTC −0,5 → 0");assert.equal(floor.cause.candidate_since,null);
+  assert.equal(floor.cause.text,"пол восстановления включён: биржевое предложение BTC −0,5 → 0");assert.equal(floor.cause.candidate_since,null);
   assert.deepEqual(floor.cause.detectors,[{id:"recovery",from:"watch",to:"good"}]);
   m=tick(m,T0+4*HOUR,61_000,{strategic:"transition",mvrv:27.2,recovery:"calm"},{tickDiff:{families:[],detectors:[{id:"recovery",from:"good",to:"calm"}],mvrv_percentile:{from:19.54,to:27.21}}});
-  assert.equal(m.target_change_log.at(-1).cause.text,"пол recovery снят: перцентиль MVRV 19,5 → 27,2");
+  assert.equal(m.target_change_log.at(-1).cause.text,"пол восстановления снят: перцентиль MVRV 19,5 → 27,2");
   // Пол капитуляции включает перцентиль MVRV: совпавшая по времени смена балла посторонней карточки причиной не называется.
   {
     let cap=tick(null,T0,60_000,{strategic:"defensive",mvrv:12});
@@ -406,7 +406,7 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
   m=tick(m,T0+5*HOUR,61_000,{strategic:"defensive",mvrv:20,recovery:"good"},{regimeBirth:birth,tickDiff:{families:[{block:"cycle",family:"trend",id:"trend_regime",name:"Старший ценовой тренд",from:-1,to:2}],detectors:[{id:"recovery",from:"calm",to:"good"}]}});
   const both=m.target_change_log.at(-1);
   assert.equal(both.kind,"both");
-  assert.equal(both.cause.text,"пол recovery включён: старший ценовой тренд −1 → 2; режим «переходный» → «защитный»","рождение кандидата transition не объясняет режим defensive");
+  assert.equal(both.cause.text,"пол восстановления включён: старший ценовой тренд −1 → 2; режим «переходный» → «защитный»","рождение кандидата transition не объясняет режим defensive");
   // Пауза между сменами базу сравнения не стирает: 80 → нет данных → 5 записывается как 80 → 5.
   m=tick(m,T0+6*HOUR,61_000,{strategic:"insufficient"});
   assert.deepEqual(m.target_change_log.at(-1),both,"исчезновение цели — не смена");
@@ -415,7 +415,7 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
   // Без данных сборщика причина оверлея выводится из собственных входов монитора (по идентификаторам).
   let own=tick(null,T0,60_000,{strategic:"defensive",mvrv:20,recovery:"watch",scores:{exchange_supply:-0.5}});
   own=tick(own,T0+HOUR,60_000,{strategic:"defensive",mvrv:20,recovery:"good",scores:{exchange_supply:0}});
-  assert.equal(own.target_change_log.at(-1).cause.text,"пол recovery включён: exchange_supply −0,5 → 0");
+  assert.equal(own.target_change_log.at(-1).cause.text,"пол восстановления включён: exchange_supply −0,5 → 0");
   // Журнал ограничен.
   let many=tick(null,T0,60_000,{strategic:"transition"});
   for(let i=1;i<=70;i++)many=tick(many,T0+i*HOUR,60_000,{strategic:i%2?"deteriorating":"transition"});
