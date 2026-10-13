@@ -1,21 +1,27 @@
-// Тесты правок форвард-монитора по аудиту 2026-10-10 (M1–M9). Запускаются из forward-monitor-test.mjs
+// Тесты правок форвард-монитора по аудиту 2026-10-10 (M1–M9) и по независимому ревью 13.10.2026
+// (Н2–Н8, в конце файла). Запускаются из forward-monitor-test.mjs
 // (он в `npm run check`) и отдельно: node scripts/monitor-audit-test.mjs. Сети нет, время задано явно.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
 import { POLICY_V3_CANDIDATE } from "../docs/policy-v3-candidate.mjs";
 import { SHADOW_CARD_IDS_V1, SHADOW_HYPOTHESES_V1, shadowConditionStateV1 } from "../docs/shadow-hypotheses-v1.mjs";
 import { excessSharpeV2 } from "../docs/policy-v2-candidate.mjs";
-import { buildDecisionRecordV1, buildSourceVintagesV1, decisionGateV1, graftForwardMonitorV1, sha256, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
+import { buildDecisionRecordV1, buildSourceVintagesV1, decisionGateV1, graftForwardMonitorV1, monitorRetentionLimitsV1, sha256, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
 import { MONITOR_BACKFILL_V1, STRATEGY_REGISTRY_V1, applyMonitorBackfillV1, decisionEventsCompleteV1 } from "./monitor-backfill-v1.mjs";
 import { TARGET_CHANGE_LOG_LIMIT, targetChangeCauseV1, targetChangeRecordV1 } from "./monitor-changes-v1.mjs";
 import { shadowEvidenceV1, shadowRowValuesV1, tacticalForwardV1 } from "./monitor-evidence-v1.mjs";
 import { MONITOR_FIXTURE_V2130 } from "./monitor-fixture-v2130.mjs";
-import { TRANCHE_CONVENTION_V1, VARIANTS_STATE_MAX_BYTES, divergenceEpisodesV3, evaluateAcceptanceV3, runShadowVariantsV1, updateTrancheStateV1 } from "./monitor-lines-v1.mjs";
+import { TRANCHE_CONVENTION_V1, VARIANTS_STATE_MAX_BYTES, acceptLineTargetV1, divergenceEpisodesV3, evaluateAcceptanceV3, runShadowVariantsV1, updateTrancheStateV1 } from "./monitor-lines-v1.mjs";
+import { lineTimingV1 } from "./monitor-timing-v1.mjs";
 import { releaseWindowAssetIssuesV1, validateSnapshotV1 } from "./monitor-live.mjs";
-import { DAILY_INPUT_SUMMARY_DAYS, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
+import { DAILY_INPUT_SUMMARY_DAYS, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, publicSnapshotAtLimitsV1, publicSnapshotAtLimitsWarningV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const DAY=86_400_000,HOUR=3_600_000,MIN=60_000,COST=MODEL_POLICY_V1.forward_monitoring.transaction_cost_bps_per_full_turnover/10_000;
 const near=(a,b,eps=1e-9)=>Math.abs(a-b)<=eps;
@@ -293,7 +299,7 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
   const huge=runShadowVariantsV1({engine:()=>({state:{blob:"x".repeat(VARIANTS_STATE_MAX_BYTES)},variants:{policy_v3_shadow:{target_pct:50}}}),now:T0,inputs:{},state:{a:1}});
   assert.ok(huge.error.startsWith("engine_state_too_large")&&huge.targets.policy_v3_shadow===null,"раздутое состояние не принимается, цель этого прогона — тоже");
   assert.deepEqual(huge.state,{a:1});
-  assert.equal(runShadowVariantsV1({engine:()=>({state:{},variants:{policy_v3_shadow:{target_pct:250}}}),now:T0,inputs:{},state:{}}).targets.policy_v3_shadow,100,"цель ограничена 0…100");
+  assert.equal(runShadowVariantsV1({engine:()=>({state:{},variants:{policy_v3_shadow:{target_pct:250}}}),now:T0,inputs:{},state:{}}).targets.policy_v3_shadow,null,"цель вне 0…100 не исполняется и не обрезается до края");
   assert.equal(runShadowVariantsV1({engine:()=>{throw new Error("не должен вызываться");},now:T0,inputs:null,state:{}}).ran,false,"без входов движок не вызывается");
   // Гейт закрыт — линии v3 тоже держат долю.
   const gated=tick(m,T0+4*HOUR,63_000,{strategic:"transition",tactical:"insufficient",coverage:false},{variantInputs:variantInputs(45),variantEngine:()=>({state:{},variants:{policy_v3_shadow:{target_pct:80}}})});
@@ -639,6 +645,9 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
     assert.equal(back.strategy_meta[name].started_at,iso(T0+3*DAY),`${name}: линия рождена заново`);assert.ok(near(back.strategies[name].nav,1-0.45*COST,1e-12));
     assert.ok(back.daily.slice(0,-1).every(row=>row.nav[name]===undefined&&row.targets[name]===undefined),`${name}: прежняя жизнь линии из дневных строк убрана`);
   }
+  // Путь прежней жизни кандидата уходит из строк вместе с её NAV: иначе через год он стал бы началом окна.
+  assert.ok(live.daily.every(row=>Array.isArray(row.path?.policy_v3_shadow)),"фикстура: до разрыва путь кандидата в строках был");
+  assert.deepEqual(back.daily.map(row=>Array.isArray(row.path?.policy_v3_shadow)),[false,false,false,true],"после перезапуска путь кандидата есть только в строке новой жизни");
   assert.ok(near(back.strategies.policy_v1.exposure_pct_days,20+45+45,1e-9),"путь политики пересчитан из событий и включает пропущенный интервал");
   assert.ok(near(back.strategies.policy_v1.gross_nav*(1-0.2*COST)*(1-0.25*COST),back.strategies.policy_v1.nav,1e-12));
   assert.ok(back.daily.every(row=>Array.isArray(row.path?.policy_v1)));
@@ -668,7 +677,413 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
     assert.ok(rowBytes-jsonBytesV1(monitoring.daily.at(-1).input_summary)<1_800,`дневная строка без входов: ${rowBytes-jsonBytesV1(monitoring.daily.at(-1).input_summary)} байт`);
     assert.ok(recordBytes<1_700,`запись журнала: ${recordBytes} байт`);
     assert.ok(PUBLIC_SNAPSHOT_MAX_BYTES-projected>150_000,`проекция стационара с новыми полями ${(projected/1e6).toFixed(3)} МБ: запас до капа меньше 150 КБ`);
+    // Все пределы разом (ревью 13.10.2026, Н8): тысяча событий решения, остальные списки монитора на
+    // пределе, состояние движка и блоки линий на потолках, история на своём бюджете — первый снимок
+    // новой формы обязан помещаться в кап с запасом стража, иначе предупреждение горело бы с первого дня.
+    const atLimits=publicSnapshotAtLimitsV1({snapshot:next,snapshotBytes:jsonBytesV1(next),...monitorRetentionLimitsV1()});
+    if(process.env.MONITOR_SIZE_REPORT)console.log(JSON.stringify(atLimits));
+    assert.ok(atLimits.parts.find(x=>x.name==="monitoring.decision_events").growth>300_000,"события решения на пределе — самая большая часть после дневных строк");
+    assert.equal(publicSnapshotAtLimitsWarningV1(atLimits),null,`все пределы разом: ${(atLimits.total/1e6).toFixed(3)} МБ, запас ${(atLimits.margin/1e3).toFixed(0)} КБ — меньше запаса стража`);
   }
 }
 
-console.log("Monitor audit fixes OK: display gate, honest timing null, v2 acceptance windows, closed-day Sharpe, risk-off counter, graft peak, v3 lines, tranched execution, target change log, shadow evidence, performance numbers, 2.13.0 migration, size budget");
+// ================= Правки по независимому ревью 13.10.2026 =================
+// ---------- Н3. Линия старше срока хранения дневных строк ----------
+{
+  // Монитор живёт 435 суток; линии движка рождаются на пятые сутки в 06:30 и живут 430. Закрывающий
+  // прогон — каждые сутки в 23:00, в каждые пятые сутки есть ещё прогон в 06:30: цели меняются и
+  // внутри дня, поэтому доля по времени не равна доле по целям закрытия. Рядом ведётся независимый
+  // учёт: NAV, валовой NAV и накопленная доля каждой линии по прогонам и ПОЛНАЯ дневная сетка, из
+  // которой ничего не уходит. Монитор обязан совпадать с пересчётом по ней: пока рождение линии в
+  // его дневных строках — на окне с рождения, после — на скользящем окне 365 суток, с пометкой.
+  const BIRTH=4,LAST=BIRTH+430,D0=Math.floor(T0/DAY)*DAY,LINES=["policy_v3_shadow","v1_daily_close","v1_floor_handoff","v1_no_cftc"];
+  const REGIMES=["transition","deteriorating","defensive","transition","constructive","deteriorating"];
+  let seed=20261013;const rnd=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
+  const cashStep=dt=>(1+((1/(1-4/100*91/360))**(365.25/91)-1))**(dt/(365.25*DAY))-1;
+  const acc={},closes=[],born={},v1Targets=[];
+  let m=null,price=60_000,cash=1,lastT=null,lastPrice=null,run=0;
+  // Независимый учёт: доходность интервала получает ПРЕЖНЯЯ цель, издержки — модуль смены цели.
+  function account(t){
+    const c=lastT===null?0:cashStep(t-lastT),r=lastT===null?0:price/lastPrice-1;
+    cash*=1+c;
+    for(const [name,strategy] of Object.entries(m.strategies)){
+      const target=strategy.current_target_pct,a=acc[name];
+      if(!a){acc[name]={nav:1-Math.abs(target)/100*COST,gross:1,w:0,target};born[name]={t,price,cash,lines:null};continue;}
+      const g=a.target/100*r+(1-a.target/100)*c;
+      a.nav*=(1+g)*(1-Math.abs(target-a.target)/100*COST);a.gross*=1+g;a.w+=a.target*(t-lastT)/DAY;a.target=target;
+    }
+    lastT=t;lastPrice=price;
+    for(const b of Object.values(born))if(b.lines===null)b.lines=structuredClone(acc);
+    const row={date:iso(t).slice(0,10),t,price,cash,lines:structuredClone(acc)};
+    if(closes.length&&closes.at(-1).date===row.date)closes[closes.length-1]=row;else closes.push(row);
+  }
+  // Точка начала окна: линия открывается в ней и платит вход со своей доли. В точке собственного
+  // рождения NAV линии уже за вычетом входа, поэтому отношение даёт опубликованный NAV.
+  const point=(row,name)=>{const s=row.lines[name];return{t:row.t,price:row.price,cash:row.cash,nav:s.nav,entry:1-Math.abs(s.target)/100*COST,gross:s.gross,w:s.w};};
+  // Линия на окне [start, сейчас]: доля по времени, честный ноль по полной дневной сетке, тайминг.
+  function onWindow(name,start){
+    const end=closes.at(-1),a=end.lines[name],days=(end.t-start.t)/DAY,share=(a.w-start.w)/days/100;
+    let g=1,p=start.price,c=start.cash;
+    for(const row of closes){if(row.t<=start.t)continue;g*=1+share*(row.price/p-1)+(1-share)*(row.cash/c-1);p=row.price;c=row.cash;}
+    const net=a.nav/start.nav*start.entry;
+    return{days,share:share*100,net:(net-1)*100,timing:(a.gross/start.gross-g)*100,vsNull:(net-g*(1-Math.abs(share)*COST))*100};
+  }
+  const rowsFrom=fromT=>closes.filter(row=>row.t>=fromT);
+  const sharpeGap=(name,fromT,today)=>{const rows=rowsFrom(fromT).filter(row=>row.date<today&&row.lines[name]&&row.lines.policy_v1),of=key=>excessSharpeV2(rows.map(row=>({t:row.t,nav:row.lines[key].nav,cash:row.cash}))).sharpe_excess,own=of(name),policy=of("policy_v1");return{gap:own===null||policy===null?null:own-policy,closed:rows.length-1};};
+  const drawdown=(rows,name,startNav=null)=>{let peak=startNav,worst=0;for(const row of rows){const nav=row.lines[name]?.nav;if(nav===undefined)continue;peak=peak===null?nav:Math.max(peak,nav);worst=Math.min(worst,(nav/peak-1)*100);}return worst;};
+  const episodes=(rows,a,b)=>{let n=0,days=0,open=false;for(const row of rows){const x=row.lines[a]?.target,y=row.lines[b]?.target;if(x===undefined||y===undefined)continue;const differs=Math.abs(x-y)>1e-9;if(differs){days++;if(!open)n++;}open=differs;}return{episodes:n,days};};
+  const stored=now=>closes.filter(row=>now-row.t<=370*DAY);
+  const rollingStart=(name,now,today)=>closes.filter(row=>row.date<today&&row.t<=now-365*DAY&&row.lines[name]).at(-1);
+
+  // Сверка блока сравнения линии и чисел приёмки кандидата с пересчётом. basis — ожидаемое окно.
+  function verifyLine(name,basis,now,label){
+    const today=iso(now).slice(0,10),c=m.comparisons[name],start=basis==="birth"?born[name]:rollingStart(name,now,today),rows=rowsFrom(start.t);
+    const own=onWindow(name,point(start,name)),pol=onWindow("policy_v1",point(start,"policy_v1")),sharpe=sharpeGap(name,start.t,today);
+    assert.deepEqual([c.basis,c.from,c.vs],[basis,iso(start.t),"policy_v1"],`${label}: окно сравнения ${name}`);
+    assert.ok(near(c.days,own.days,0.006),`${label}: длина окна ${name}: ${c.days} / ${own.days}`);
+    assert.deepEqual([c.since_birth,c.window_days],basis==="rolling"?[null,365]:[undefined,undefined],`${label}: закрытое окно с рождения помечено, открытое — нет`);
+    assert.ok(near(c.net_return_gap_pp,own.net-pol.net,1e-4),`${label}: разница доходностей ${name} на окне: ${c.net_return_gap_pp} / ${own.net-pol.net}`);
+    assert.ok((sharpe.gap===null?c.sharpe_gap===null:c.sharpe_gap!==null&&near(c.sharpe_gap,sharpe.gap,1e-4))&&c.closed_days===sharpe.closed,`${label}: разрыв Sharpe ${name} по закрытым суткам окна: ${c.sharpe_gap} / ${sharpe.gap}`);
+    assert.deepEqual(c.divergence,name==="buy_and_hold"?undefined:episodes(rows,name,"policy_v1"),`${label}: эпизоды расхождения ${name} с policy_v1 — на том же окне`);
+    return{c,start,rows,own,pol};
+  }
+  function verifyTiming(name,basis,now,label){
+    const{c,own,pol}=verifyLine(name,basis,now,label);
+    assert.ok(near(c.share_pct,own.share,0.006)&&near(c.policy_share_pct,pol.share,0.006),`${label}: доли ${name} и policy_v1 по времени: ${c.share_pct}/${own.share}, ${c.policy_share_pct}/${pol.share}`);
+    assert.ok(near(c.timing_pp,own.timing,1e-4)&&near(c.policy_timing_pp,pol.timing,1e-4),`${label}: тайминг ${name} по полной сетке: ${c.timing_pp} / ${own.timing}; policy_v1 ${c.policy_timing_pp} / ${pol.timing}`);
+    assert.ok(near(c.vs_null_pp,own.vsNull,1e-4)&&near(c.policy_vs_null_pp,pol.vsNull,1e-4)&&near(c.vs_null_gap_pp,own.vsNull-pol.vsNull,1.5e-4)&&near(c.timing_gap_pp,own.timing-pol.timing,1.5e-4),`${label}: ${name} против своего нуля: ${c.vs_null_pp} / ${own.vsNull}`);
+  }
+  // Приёмка кандидата v3: окно и четыре числа сравнения — на окне блока, теневые сутки — возраст линии.
+  function verifyAcceptance(basis,now,label,lifeDays){
+    const{c,start,rows,own,pol}=verifyLine("policy_v3_shadow",basis,now,label),a=m.v3_candidate.acceptance_status;
+    const lineDd=drawdown(rows,"policy_v3_shadow",basis==="birth"?start.lines.policy_v3_shadow.nav:null),policyDd=drawdown(rows,"policy_v1",basis==="birth"?start.lines.policy_v1.nav:null);
+    assert.deepEqual(a.window,{basis,from:c.from,days:c.days},`${label}: приёмка публикует окно своих чисел`);
+    assert.equal(a.shadow_days,lifeDays,`${label}: теневые сутки — возраст линии, от окна не зависят`);
+    assert.deepEqual([a.divergence_base,a.divergence_episodes,a.divergence_days],["v1_daily_close",...Object.values(episodes(rows,"policy_v3_shadow","v1_daily_close"))],`${label}: эпизоды приёмки — на окне сравнения`);
+    assert.ok(near(a.timing_gap_pp_vs_v1,own.vsNull-pol.vsNull,1.5e-4),`${label}: тайминг приёмки: ${a.timing_gap_pp_vs_v1} / ${own.vsNull-pol.vsNull}`);
+    assert.ok(near(a.max_drawdown_worse_pp,Math.abs(lineDd)-Math.abs(policyDd),1e-4),`${label}: просадка приёмки по закрытиям окна: ${a.max_drawdown_worse_pp} / ${Math.abs(lineDd)-Math.abs(policyDd)}`);
+    assert.ok(near(a.net_return_gap_pp_vs_v1,own.net-pol.net,1e-4),`${label}: разница доходностей приёмки: ${a.net_return_gap_pp_vs_v1} / ${own.net-pol.net}`);
+    // Н2. Вывод приёмки — критерии контракта, применённые к независимым числам: тайминг — против
+    // своего нуля и не хуже v1, просадка — насколько ГЛУБЖЕ, отклонение — при ОТСТАВАНИИ по доходности.
+    const k=POLICY_V3_CANDIDATE.decision_record.acceptance_criteria,timing=own.vsNull-pol.vsNull,worse=Math.abs(lineDd)-Math.abs(policyDd),gap=own.net-pol.net;
+    const meets={shadow_days:lifeDays>=k.shadow_days_min,divergence:episodes(rows,"policy_v3_shadow",k.divergence_base).episodes>=k.min_divergence_episodes,timing:timing>=0,drawdown:worse<=k.max_drawdown_worse_pp_max};
+    const falsified=gap<-Math.abs(k.falsify_net_return_gap_pp)&&lifeDays>=k.falsify_min_days;
+    assert.deepEqual([a.meets,a.falsified,a.status],[meets,falsified,falsified?"falsified":Object.values(meets).every(Boolean)?"switch_ready_pending_owner":"collecting"],`${label}: вывод приёмки по критериям контракта`);
+    return{rows,start,lineDd,policyDd,own,pol,timing,worse,gap,meets,falsified};
+  }
+
+  const marks={};
+  for(let d=0;d<=LAST;d++)for(const offset of d%5===4?[6.5*HOUR,23*HOUR]:[23*HOUR]){
+    const t=D0+d*DAY+offset,closing=offset===23*HOUR;
+    price*=1+(rnd()-0.5)*0.03+0.0005;
+    // Сконструированные участки: обвал до рождения линий (политика стоит в 100 %); падение в сутки
+    // рождения между прогоном рождения и закрытием (пик окна — стартовый NAV, а не первая строка);
+    // обвал на 65–67-е сутки — в строках, которые на последней отметке ещё хранятся, но в окно
+    // 365 суток не входят.
+    if(closing){if(d===1)price*=1.08;if(d===2||d===3)price*=0.8;if(d===BIRTH)price*=0.9;if(d>=65&&d<=67)price*=0.88;if(d===68||d===69)price*=1.1;}
+    const good=d>=64&&d<=67,opts={strategic:d<BIRTH?"constructive":d>=62&&d<=69?"defensive":REGIMES[Math.floor(run/7)%REGIMES.length],...(good?{mvrv:20,recovery:"good"}:{})};
+    const v1=mkDecision(t,opts).decision.target_pct;
+    // Цели линий: суточная повторяет v1 с задержкой на прогон, кандидат — на два, а на прогоне 06:30
+    // держит на 20 п.п. больше до закрытия суток (в дневных строках этой смены не видно); на 64–69-е
+    // сутки кандидат стоит в 100 % (расходится и с v1, и с суточной линией).
+    const lagged=v1Targets[run-2]??v1,targets={policy_v3_shadow:d>=64&&d<=69?100:closing?lagged:Math.min(100,lagged+20),v1_daily_close:v1Targets[run-1]??v1,v1_floor_handoff:v1,v1_no_cftc:d%11<3?Math.min(100,v1+15):v1};
+    m=tick(m,t,price,opts,d>=BIRTH?{variantInputs:variantInputs(v1),variantEngine:()=>({state:{},variants:Object.fromEntries(LINES.map(name=>[name,{target_pct:targets[name]}]))})}:{});
+    v1Targets.push(v1);run++;account(t);
+    if(!closing)continue;
+    const life=d-BIRTH,label=`сутки ${d}`;
+    if(d===BIRTH+3||d===BIRTH+300||d===BIRTH+369||d===BIRTH+370){
+      // Пока строка суток рождения хранится, окно — с рождения, и числа равны пересчёту по полной сетке.
+      for(const name of ["policy_v3_shadow","v1_no_cftc"])verifyTiming(name,"birth",t,label);
+      const early=verifyAcceptance("birth",t,label,life);
+      // На третьи сутки жизни просадка обеих линий — падение суток рождения от стартового NAV: по
+      // одним дневным строкам (пик — первое закрытие) её не было бы видно.
+      if(d===BIRTH+300){
+        // Н2. Линия родилась на четверо суток позже v1 и разошлась с ней: каждое число приёмки здесь
+        // отличается от того, что дала бы типовая ошибка в его сборке.
+        const sinceGenesis=rowsFrom(born.policy_v1.t);
+        assert.equal(m.days_elapsed,life+BIRTH,"фикстура: возраст монитора больше возраста линии — теневые сутки считаются от её старта");
+        assert.ok(Math.abs(early.worse)>1,`фикстура: просадки линии и v1 на общем окне разные, знак различим: ${early.worse}`);
+        assert.ok(Math.abs(early.timing-(early.own.timing-early.pol.timing))>0.5,`фикстура: тайминг «против своего нуля» отличается от валового тайминга: ${early.timing} / ${early.own.timing-early.pol.timing}`);
+        assert.ok(Math.abs(early.gap)>1,`фикстура: разница доходностей ненулевая, знак различим: ${early.gap}`);
+        assert.ok(Math.abs(Math.abs(drawdown(sinceGenesis,"policy_v1"))-Math.abs(early.policyDd))>1,"фикстура: просадка v1 от её собственного старта отличается от просадки на общем окне");
+        assert.notDeepEqual(episodes(early.rows,"policy_v3_shadow","v1_daily_close"),episodes(early.rows,"policy_v3_shadow","policy_v1"),"фикстура: эпизоды против суточной линии v1 и против policy_v1 — разные числа");
+        assert.deepEqual([early.meets,early.falsified],[{shadow_days:true,divergence:true,timing:false,drawdown:false},false],"фикстура: сутки и эпизоды набраны, тайминг хуже v1, просадка глубже допуска");
+      }
+      if(d===BIRTH+3)assert.ok(early.lineDd<-9&&early.policyDd<-4&&Math.abs(drawdown(early.rows,"policy_v3_shadow"))<Math.abs(early.lineDd)-5&&Math.abs(drawdown(early.rows,"policy_v1"))<Math.abs(early.policyDd)-2,`фикстура: просадка окна с рождения мерится от стартовых NAV: ${early.lineDd} / ${early.policyDd}`);
+    }
+    if(d===370||d===371){
+      // Линии, рождённые вместе с монитором: строка суток рождения хранится 370 суток и уходит на 371-е.
+      const basis=d===370?"birth":"rolling";
+      verifyLine("buy_and_hold",basis,t,label);verifyLine("policy_v2_shadow",basis,t,label);
+      assert.equal(m.timing_null.since_start===null,d===371,`${label}: окно «с начала» честного нуля политики закрывается тем же правилом`);
+      assert.equal(m.v2_candidate.acceptance_status.window.basis,basis,`${label}: приёмка v2 публикует окно`);
+    }
+    if(d===BIRTH+371||d===BIRTH+380||d===LAST){
+      // Строка суток рождения ушла: окно с рождения закрыто и помечено, сравнение — на скользящем окне.
+      verifyTiming("policy_v3_shadow","rolling",t,label);
+      const{c}=verifyLine("v1_no_cftc","rolling",t,label);
+      assert.deepEqual([c.timing_pp,c.vs_null_pp,c.share_pct],[undefined,undefined,undefined],`${label}: линии без пути в дневных строках тайминг на скользящем окне не публикуют`);
+      marks[d]=verifyAcceptance("rolling",t,label,life);
+    }
+  }
+  // Н2. К 430-му дню кандидат отстал от v1 по доходности больше порога — приёмка его отклоняет; обратный
+  // знак разницы (опережение) отклонением не был бы.
+  assert.deepEqual([marks[LAST].falsified,m.v3_candidate.acceptance_status.status,marks[LAST].gap<-10],[true,"falsified",true],"отставание больше 10 п.п. на окне от 180 суток — кандидат отклонён");
+  assert.equal(evaluateAcceptanceV3({shadowDays:430,divergence:{episodes:54,days:54},timingGapPp:marks[LAST].timing,drawdownWorsePp:marks[LAST].worse,netReturnGapPp:-marks[LAST].gap}).falsified,false,"опережение на ту же величину — не отклонение");
+  // Фикстура говорит то, ради чего построена.
+  for(const name of Object.keys(m.strategies))assert.ok(near(m.strategies[name].nav,acc[name].nav,1e-9),`независимый учёт NAV расходится с монитором: ${name}`);
+  assert.ok(near(m.strategies.policy_v3_shadow.exposure_pct_days,acc.policy_v3_shadow.w,1e-6)&&near(m.strategies.policy_v3_shadow.gross_nav,acc.policy_v3_shadow.gross,1e-9));
+  const now=lastT,today=iso(now).slice(0,10),kept=stored(now),last=marks[LAST],dayOf=d=>iso(D0+d*DAY).slice(0,10);
+  assert.deepEqual([m.daily[0].date,m.daily.length,kept[0].date,last.start.date],[dayOf(64),371,dayOf(64),dayOf(69)],"хранятся строки с 64-х суток, окно 365 суток начинается с 69-х");
+  assert.deepEqual(m.daily.map(row=>Object.keys(row.path||{}).join()),m.daily.map(()=>"policy_v1,policy_v3_shadow"),"путь в дневной строке — у политики и кандидата, у остальных линий его нет");
+  // 1. По хранимым строкам (а не по окну) вышли бы другие эпизоды и другая просадка.
+  assert.notDeepEqual(episodes(kept,"policy_v3_shadow","v1_daily_close"),episodes(last.rows,"policy_v3_shadow","v1_daily_close"),"фикстура: в хранимых строках вне окна есть эпизод расхождения");
+  assert.ok(Math.abs(drawdown(kept,"policy_v3_shadow"))-Math.abs(last.lineDd)>5&&Math.abs((Math.abs(drawdown(kept,"policy_v3_shadow"))-Math.abs(drawdown(kept,"policy_v1")))-(Math.abs(last.lineDd)-Math.abs(last.policyDd)))>1,"фикстура: обвал 65–67-х суток лежит в хранимых строках вне окна");
+  // 2. Старт окна: линии стоят в разных долях, вход оплачен обеими.
+  assert.notEqual(last.start.lines.policy_v3_shadow.target,last.start.lines.policy_v1.target,"фикстура: в начале окна доли линий разные — вход со своей доли различим");
+  // 3. Доля по целям закрытия дня заметно отличается от доли по времени: приближение не прошло бы.
+  {
+    let weighted=0,prev=last.start;for(const row of last.rows.slice(1)){weighted+=prev.lines.policy_v3_shadow.target*(row.t-prev.t);prev=row;}
+    assert.ok(Math.abs(weighted/(now-last.start.t)-last.own.share)>0.05,`фикстура: доля по целям закрытия ${weighted/(now-last.start.t)} против доли по времени ${last.own.share}`);
+  }
+  // 4. Окно с рождения по обрезанной сетке дало бы другой тайминг — тот самый дефект.
+  {
+    const start=point(born.policy_v3_shadow,"policy_v3_shadow"),a=acc.policy_v3_shadow,share=a.w/((now-start.t)/DAY)/100;
+    let full=1,cut=1,p=start.price,c=start.cash;for(const row of closes){if(row.t<=start.t)continue;full*=1+share*(row.price/p-1)+(1-share)*(row.cash/c-1);p=row.price;c=row.cash;}
+    p=start.price;c=start.cash;for(const row of kept){cut*=1+share*(row.price/p-1)+(1-share)*(row.cash/c-1);p=row.price;c=row.cash;}
+    assert.ok(Math.abs(full-cut)*100>0.01,`фикстура: ноль с рождения по обрезанной сетке отличается от полного на ${(Math.abs(full-cut)*100).toFixed(4)} п.п.`);
+  }
+  // Приёмка v2: эпизод пола тени 65–67-х суток хранится, но в окно не входит — счёт идёт по окну.
+  assert.deepEqual(m.daily.filter(row=>row.v2_floor).map(row=>row.date),[65,66,67].map(dayOf),"фикстура: единственный эпизод пола тени — в хранимых строках вне окна");
+  const v2=m.v2_candidate.acceptance_status,v2Window=m.comparisons.policy_v2_shadow;
+  assert.deepEqual(v2.window,{basis:"rolling",from:v2Window.from,days:v2Window.days});
+  assert.equal(v2.recovery_episodes_observed,0,"эпизоды пола тени считаются на окне сравнения, а не по всем хранимым строкам");
+  assert.equal(m.v2_candidate.days_diverged,m.daily.filter(row=>row.v2_diverged===true&&Date.parse(row.t)>=Date.parse(v2Window.from)).length);
+  assert.ok(m.daily.some(row=>row.v2_diverged===true&&Date.parse(row.t)<Date.parse(v2Window.from)),"фикстура: сутки расхождения тени есть и вне окна");
+  assert.equal(v2.sharpe_gap_vs_v1,v2Window.sharpe_gap);
+  // Само разложение с рождения по обрезанной сетке не считается вовсе — и при прямом вызове.
+  assert.equal(lineTimingV1(m,"policy_v3_shadow",{costRate:COST}),null,"окно с рождения закрыто: null, а не число по обрезанной сетке");
+  assert.ok(lineTimingV1(m,"policy_v3_shadow",{costRate:COST,from:m.daily.find(row=>row.t===m.comparisons.policy_v3_shadow.from)}),"скользящее окно от строки с путём считается");
+  assert.equal(lineTimingV1(m,"v1_no_cftc",{costRate:COST,from:m.daily[5]}),null,"без пути линии в начальной строке скользящего разложения нет");
+  assert.equal(m.optional_errors,undefined);assert.equal(m.variant_errors,undefined);
+}
+
+// ---------- Н4. В блоках кандидата и линий нет ключей прошлых прогонов ----------
+{
+  const view=(target,extra={})=>({target_pct:target,base_target_pct:target,state:"transition",candidate:"transition",fix_at:iso(T0),next_fix_at:iso(T0+DAY),floor:{active:false,rung:null,closes:0},binding_overlays:[],inputs:{a:1},reason_codes:["between_fixes"],...extra});
+  const engineOf=(v3,daily={target_pct:45,state:"transition",fix_at:iso(T0)})=>()=>({state:{k:1},variants:{policy_v3_shadow:v3,v1_daily_close:daily,v1_floor_handoff:{target_pct:45,carry:false},v1_no_cftc:{target_pct:45}}});
+  const run=(monitor,hour,engine)=>tick(monitor,T0+hour*HOUR,60_000,{strategic:"transition"},engine===null?{}:{variantInputs:variantInputs(45),variantEngine:engine});
+  const OWN=["id","version","status","created","base_suite","evaluated_at","acceptance","acceptance_status"];
+  const engineKeys=block=>Object.keys(block).filter(key=>!OWN.includes(key)).sort();
+  const healthy=run(run(null,0,null),1,engineOf(view(45)));
+  assert.deepEqual(engineKeys(healthy.v3_candidate),Object.keys(view(45)).sort(),"фикстура: в блоке — поля движка и свои поля монитора");
+  // Разовый отказ линии в движке: настоящий движок отдаёт target_pct null, код и текст ошибки.
+  const broken=run(healthy,2,engineOf({target_pct:null,reason_codes:["engine_error"],error:"TypeError: boom"},{target_pct:null,reason_codes:["engine_error"],error:"TypeError: boom"}));
+  assert.deepEqual([broken.v3_candidate.error,broken.v3_candidate.target_pct,broken.v3_candidate.evaluated_at],["TypeError: boom",null,iso(T0+2*HOUR)]);
+  assert.deepEqual(engineKeys(broken.v3_candidate),["error","reason_codes","target_pct"],"на отказном прогоне в блоке — только то, что движок отдал сейчас");
+  assert.equal(broken.strategies.policy_v3_shadow.current_target_pct,45,"линия держит прежнюю цель");
+  const healed=run(broken,3,engineOf(view(45)));
+  assert.deepEqual(healed.v3_candidate,{...healthy.v3_candidate,evaluated_at:iso(T0+3*HOUR),acceptance_status:healed.v3_candidate.acceptance_status},"после восстановления движка следа прошлой ошибки в блоке нет");
+  assert.equal(healed.v3_candidate.error,undefined);
+  assert.deepEqual([broken.variants.v1_daily_close.error,healed.variants.v1_daily_close.error,Object.keys(healed.variants.v1_daily_close).sort()],["TypeError: boom",undefined,["evaluated_at","fix_at","state","target_pct"]],"то же у линий «v1 с одной правкой»");
+  // Обрезанный блок (линия отдала больше 4 КБ) помечается только на том прогоне, где он обрезан.
+  const cut=run(healthy,2,engineOf(view(45,{blob:"x".repeat(5000)})));
+  assert.deepEqual(engineKeys(cut.v3_candidate),["target_pct","truncated"]);assert.equal(cut.v3_candidate.target_pct,45);
+  assert.equal(run(cut,3,engineOf(view(45))).v3_candidate.truncated,undefined,"пометка truncated не переживает прогон");
+  // Свежего ответа нет (движок упал целиком либо входов нет): прежние поля движка остаются как были, возраст — в evaluated_at.
+  for(const [label,engine] of [["движок упал",()=>{throw new Error("boom");}],["входов нет",null]]){
+    const stale=run(healthy,2,engine);
+    assert.deepEqual({...stale.v3_candidate,acceptance_status:null},{...healthy.v3_candidate,acceptance_status:null},`${label}: блок кандидата — прежний, с прежним evaluated_at`);
+    assert.deepEqual(stale.variants,healthy.variants,`${label}: блоки линий — прежние`);
+    assert.equal(stale.v3_candidate.evaluated_at,iso(T0+HOUR));
+  }
+  // Движок ответил не по всем линиям: у ответивших блок свежий, у остальных — прежний целиком.
+  const partial=run(healthy,2,()=>({state:{k:2},variants:{policy_v3_shadow:view(20),v1_no_cftc:{target_pct:20,note:"fresh"}}}));
+  assert.deepEqual([partial.v3_candidate.target_pct,partial.variants.v1_no_cftc,partial.variants.v1_daily_close],[20,{target_pct:20,note:"fresh",evaluated_at:iso(T0+2*HOUR)},healthy.variants.v1_daily_close]);
+  // Данные контракта движок переписать не может: свои поля монитор кладёт поверх.
+  const spoof=run(healthy,2,engineOf(view(45,{id:"чужой",version:99,acceptance:"подмена",evaluated_at:"вчера"})));
+  assert.deepEqual([spoof.v3_candidate.id,spoof.v3_candidate.version,spoof.v3_candidate.acceptance,spoof.v3_candidate.evaluated_at],[POLICY_V3_CANDIDATE.id,POLICY_V3_CANDIDATE.version,POLICY_V3_CANDIDATE.decision_record.acceptance_criteria,iso(T0+2*HOUR)]);
+}
+
+// ---------- Н5. Захват роста при росте HODL около нуля ----------
+{
+  // Десять суток, цель политики меняется через день; цена конца задаёт рост HODL за окно.
+  const runTo=endPrice=>{let m=tick(null,T0,60_000,{strategic:"transition"});for(let d=1;d<=10;d++)m=tick(m,T0+d*DAY,d<10?60_000*(1+0.05*Math.sin(d)):endPrice,{strategic:d%2?"deteriorating":"transition"});return m.timing_null.since_start;};
+  const tiny=runTo(60_000*1.00101),small=runTo(60_000*1.03),fallen=runTo(60_000*0.99),grown=runTo(60_000*1.3);
+  assert.ok(tiny.hodl_net_return_pct>0&&tiny.hodl_net_return_pct<0.01&&Math.abs(tiny.policy_net_return_pct/tiny.hodl_net_return_pct)>50,`фикстура: HODL ${tiny.hodl_net_return_pct} %, политика ${tiny.policy_net_return_pct} % — прежний «захват» трёхзначный`);
+  assert.deepEqual([tiny.capture_ratio,small.capture_ratio,fallen.capture_ratio],[null,null,null],"рост HODL меньше 5 % или падение — захват не публикуется");
+  assert.ok(small.hodl_net_return_pct>2&&small.hodl_net_return_pct<5&&fallen.hodl_net_return_pct<0);
+  assert.equal(grown.capture_ratio,Number((grown.policy_net_return_pct/grown.hodl_net_return_pct).toFixed(4)),"при заметном росте HODL захват — отношение чистых доходностей");
+  assert.ok(grown.hodl_net_return_pct>29&&grown.capture_ratio>0&&grown.capture_ratio<1);
+  for(const w of [tiny,small,fallen,grown])assert.ok(near(w.level_pp+w.timing_pp+w.costs_pp,w.policy_net_return_pct-w.hodl_net_return_pct,3e-4),"остальные числа окна не тронуты");
+}
+
+// ---------- Н6. Обёртка движка: цель линии — только число, чтение ответа не роняет прогон ----------
+{
+  const NAMES=["policy_v3_shadow","v1_daily_close","v1_floor_handoff","v1_no_cftc"];
+  // Правило приёма цели.
+  for(const good of [0,5,37.5,100,1e-320])assert.deepEqual(acceptLineTargetV1(good),{target:good,rejected:null},`число в 0…100 исполняется: ${good}`);
+  assert.ok(Object.is(acceptLineTargetV1(-0).target,0),"минус ноль в цель не попадает");
+  for(const hold of [null,undefined])assert.deepEqual(acceptLineTargetV1(hold),{target:null,rejected:null},"null и отсутствие поля — законное «держать»");
+  for(const [value,code] of [[true,"target_not_number"],[false,"target_not_number"],[[],"target_not_number"],[[80],"target_not_number"],["80","target_not_number"],[" ","target_not_number"],["","target_not_number"],[{},"target_not_number"],[80n,"target_not_number"],[NaN,"target_not_finite"],[Infinity,"target_not_finite"],[-Infinity,"target_not_finite"],[-5,"target_out_of_range"],[150,"target_out_of_range"],[100.0001,"target_out_of_range"],[-1e-9,"target_out_of_range"]])
+    assert.deepEqual(acceptLineTargetV1(value),{target:null,rejected:code},`не исполняется: ${typeof value} ${String(value)}`);
+  // Монитор: мусорная цель одной линии — линия держит долю, остальные исполняются, след остаётся.
+  const all=target=>Object.fromEntries(NAMES.map(name=>[name,{target_pct:target,state:"transition"}]));
+  const run=(monitor,hour,variants,price=60_000)=>tick(monitor,T0+hour*HOUR,price,{strategic:"transition"},{variantInputs:variantInputs(45),variantEngine:typeof variants==="function"?variants:()=>({state:{k:hour},variants})});
+  const base=run(tick(null,T0,60_000,{strategic:"transition"}),1,all(45));
+  assert.deepEqual(NAMES.map(name=>base.strategies[name].current_target_pct),[45,45,45,45]);
+  for(const [garbage,code] of [[true,"target_not_number"],[false,"target_not_number"],[[],"target_not_number"],[[80],"target_not_number"],["80","target_not_number"],[" ","target_not_number"],[NaN,"target_not_finite"],[250,"target_out_of_range"],[-5,"target_out_of_range"]]){
+    // Движок прислал мусор кандидату и настоящую новую цель остальным; цена за интервал +10 %.
+    const m=run(base,2,{...all(20),policy_v3_shadow:{target_pct:garbage,state:"transition",fix_at:iso(T0)}},66_000),label=`${typeof garbage} ${JSON.stringify(garbage)}`;
+    assert.equal(m.strategies.policy_v3_shadow.current_target_pct,45,`${label}: линия держит прежнюю цель`);
+    assert.equal(m.strategies.policy_v3_shadow.turnover_pct,base.strategies.policy_v3_shadow.turnover_pct,`${label}: оборота нет`);
+    assert.deepEqual(NAMES.slice(1).map(name=>m.strategies[name].current_target_pct),[20,20,20],`${label}: остальные линии исполнены`);
+    assert.deepEqual(m.variant_errors,[{t:iso(T0+2*HOUR),line:"policy_v3_shadow",error:code}],`${label}: причина записана с именем линии`);
+    assert.deepEqual([m.v3_candidate.target_pct,m.v3_candidate.target_rejected,m.v3_candidate.state,m.v3_candidate.fix_at],[null,code,"transition",iso(T0)],`${label}: в блоке — принятая цель (её нет) и причина, остальные поля движка на месте`);
+    assert.deepEqual(m.variants_state,{k:2},`${label}: состояние движка принято — отказ одной линии остальных не касается`);
+    assert.equal(m.decision_log.at(-1).v3.target_pct,null);assert.equal(verifyDecisionLogChainV1(m.decision_log).ok,true);
+    assert.equal(m.decision_log.at(-1).quality,"good");assert.equal(m.optional_errors,undefined);
+    // Следующий здоровый прогон: причины в блоке нет (Н4), запись в variant_errors остаётся историей.
+    const healed=run(m,3,all(20),66_000);
+    assert.deepEqual([healed.v3_candidate.target_pct,healed.v3_candidate.target_rejected,healed.strategies.policy_v3_shadow.current_target_pct,healed.variant_errors.length],[20,undefined,20,1],label);
+  }
+  // Интервал с +10 % прошёл с прежней долей 45 %: NAV мусорной линии равен NAV линии, которой движок ответил null.
+  const held=run(base,2,{...all(20),policy_v3_shadow:{target_pct:null}},66_000),junk=run(base,2,{...all(20),policy_v3_shadow:{target_pct:"80"}},66_000);
+  assert.equal(junk.strategies.policy_v3_shadow.nav,held.strategies.policy_v3_shadow.nav);assert.ok(junk.strategies.policy_v3_shadow.nav/base.strategies.policy_v3_shadow.nav>1.044);
+  assert.equal(held.variant_errors,undefined,"null — не отказ: следа в variant_errors нет");
+  assert.equal(held.v3_candidate.target_rejected,undefined);
+  // Линия не объектом; линии нет в ответе.
+  const shaped=run(base,2,{...all(20),policy_v3_shadow:[80],v1_daily_close:"80",v1_no_cftc:undefined});
+  assert.deepEqual([shaped.strategies.policy_v3_shadow.current_target_pct,shaped.strategies.v1_daily_close.current_target_pct,shaped.strategies.v1_floor_handoff.current_target_pct,shaped.strategies.v1_no_cftc.current_target_pct],[45,45,20,45]);
+  assert.deepEqual(shaped.variant_errors.map(e=>[e.line,e.error]),[["policy_v3_shadow","line_not_object"],["v1_daily_close","line_not_object"]],"линия, которой в ответе нет, — не отказ");
+  assert.deepEqual([shaped.v3_candidate.target_rejected,shaped.variants.v1_daily_close.target_rejected,shaped.variants.v1_no_cftc],["line_not_object","line_not_object",base.variants.v1_no_cftc]);
+  // Геттеры, бросающие исключение: на чтении линии, на чтении её цели, на чтении всего ответа.
+  const throwing=key=>({get [key](){throw new Error(`геттер ${key}`);}});
+  const withGetter=(target,key)=>Object.defineProperties({...target},Object.getOwnPropertyDescriptors(throwing(key)));
+  const lineGetter=run(base,2,withGetter(all(20),"v1_daily_close")),targetGetter=run(base,2,{...all(20),v1_no_cftc:withGetter({state:"transition"},"target_pct")});
+  assert.deepEqual([lineGetter.strategies.v1_daily_close.current_target_pct,lineGetter.strategies.policy_v3_shadow.current_target_pct,lineGetter.strategies.v1_no_cftc.current_target_pct,lineGetter.variant_errors.map(e=>[e.line,e.error])],[45,20,20,[["v1_daily_close","line_unreadable"]]],"геттер на чтении линии: она держит долю, остальные исполнены");
+  assert.deepEqual([targetGetter.strategies.v1_no_cftc.current_target_pct,targetGetter.strategies.policy_v3_shadow.current_target_pct,targetGetter.variant_errors.map(e=>[e.line,e.error]),targetGetter.variants.v1_no_cftc.target_rejected],[45,20,[["v1_no_cftc","line_unreadable"]],"line_unreadable"],"геттер на чтении цели — то же");
+  const reference=run(base,2,all(45));
+  for(const [label,engine,error] of [["variants",()=>withGetter({state:{k:9}},"variants"),"engine_result_unreadable: геттер variants"],["state",()=>withGetter({variants:all(20)},"state"),"engine_result_unreadable: геттер state"]]){
+    const m=run(base,2,engine);
+    assert.deepEqual(m.variant_errors,[{t:iso(T0+2*HOUR),error}],`геттер на чтении ${label}: отказ движка целиком записан`);
+    assert.deepEqual([NAMES.map(name=>m.strategies[name].current_target_pct),m.variants_state],[[45,45,45,45],{k:1}],`геттер на чтении ${label}: линии держат цель, состояние прежнее`);
+    for(const key of ["policy_v1","buy_and_hold","policy_v2_shadow"])assert.deepEqual(m.strategies[key],reference.strategies[key],`геттер на чтении ${label}: учёт остальных линий не тронут`);
+  }
+  // Сама обёртка не бросает ни на чём из этого и отдаёт коды причин.
+  const direct=runShadowVariantsV1({engine:()=>({state:{},variants:withGetter({policy_v3_shadow:{target_pct:true},v1_daily_close:{target_pct:60}},"v1_no_cftc")}),now:T0,inputs:{},state:{}});
+  assert.deepEqual([direct.ok,direct.error,direct.targets,direct.rejected],[true,null,{policy_v3_shadow:null,v1_daily_close:60,v1_floor_handoff:null,v1_no_cftc:null},{policy_v3_shadow:"target_not_number",v1_no_cftc:"line_unreadable"}]);
+  assert.deepEqual(direct.published,{policy_v3_shadow:{target_pct:null,target_rejected:"target_not_number"},v1_daily_close:{target_pct:60},v1_no_cftc:{target_pct:null,target_rejected:"line_unreadable"}});
+  // Запись hash-журнала читает поля кандидата тем же строгим правилом: мусор и длинные строки в неё
+  // не попадают (блок публикации держит их до своего потолка, запись журнала хранится 400 раз).
+  const valid=run(base,2,{...all(20),policy_v3_shadow:{target_pct:20,base_target_pct:20,state:"deteriorating",candidate:"transition",fix_at:iso(T0),floor:{active:true,rung:2,closes:2},inputs:{a:1}}});
+  assert.deepEqual(valid.decision_log.at(-1).v3,{target_pct:20,base_target_pct:20,state:"deteriorating",candidate:"transition",fix_at:iso(T0),floor_rung:2,inputs:{a:1},lines:{v1_daily_close:20,v1_floor_handoff:20,v1_no_cftc:20}});
+  const bloated=run(base,2,{...all(20),policy_v3_shadow:{target_pct:20,base_target_pct:"20",state:"x".repeat(3_000),candidate:{a:1},fix_at:12345,floor:{rung:"2"},inputs:[1,2]}});
+  assert.deepEqual(bloated.decision_log.at(-1).v3,{target_pct:20,base_target_pct:null,state:null,candidate:null,fix_at:null,floor_rung:null,inputs:null,lines:{v1_daily_close:20,v1_floor_handoff:20,v1_no_cftc:20}});
+  assert.ok(jsonBytesV1(bloated.decision_log.at(-1))<=jsonBytesV1(valid.decision_log.at(-1)),"запись журнала от мусора не растёт");
+  assert.equal(bloated.v3_candidate.state.length,3_000,"в блоке публикации поле движка остаётся как пришло — он ограничен своим потолком");
+  assert.equal(verifyDecisionLogChainV1(bloated.decision_log).ok,true);
+  // Журнал отказов ограничен десятью записями.
+  let noisy=base;for(let h=2;h<8;h++)noisy=run(noisy,h,{policy_v3_shadow:{target_pct:"x"},v1_daily_close:{target_pct:[]}});
+  assert.equal(noisy.variant_errors.length,10);assert.equal(noisy.variant_errors.at(-1).t,iso(T0+7*HOUR));
+}
+
+// ---------- Н7. Запасной вызов сборщика не стирает значения теневых карточек этих суток ----------
+{
+  // Сборщик при отказе дополнительного расчёта повторяет вызов монитора без variantInputs,
+  // shadowValues, regimeBirth и tickDiff. Строка дня переписывается каждым прогоном целиком.
+  const values={tga_daily:887.4,g3_liquidity:24.1,gold_axis:0.5,sth_pricing:1.1,realized_pnl:1.0,options_structure:-3,oi_purge_24h:-0.5,hash_ribbons:1.02},rounded=shadowRowValuesV1(values);
+  const engine=()=>({state:{k:1},variants:{policy_v3_shadow:{target_pct:45},v1_daily_close:{target_pct:45}}});
+  const full=(monitor,t,shadow=values)=>tick(monitor,t,60_000,{strategic:"defensive",mvrv:20,recovery:"good",tactical:"spot_led"},{shadowValues:shadow,variantInputs:variantInputs(45),variantEngine:engine});
+  const fallback=(monitor,t)=>tick(monitor,t,60_000,{strategic:"defensive",mvrv:20,recovery:"good",tactical:"spot_led"},{variantInputs:null,shadowValues:null,regimeBirth:null,tickDiff:null});
+  const D0=Math.floor(T0/DAY)*DAY;
+  // Сутки 0 — recovery good весь день, чтобы на сутки 1 пол тени v2 был в строке (v2_floor).
+  let m=full(full(null,D0+HOUR),D0+20*HOUR);
+  m=full(m,D0+DAY+HOUR);
+  const before=m.daily.at(-1);
+  assert.deepEqual([before.shadow,before.tactical,before.v2_floor,Object.keys(before.path).join()],[rounded,"spot_led",true,"policy_v1,policy_v3_shadow"],"фикстура: строка суток с теневыми значениями, путём и полом тени");
+  // Запасной вызов — последний прогон суток 1.
+  m=fallback(m,D0+DAY+23*HOUR);
+  const row=m.daily.at(-1);
+  assert.equal(row.t,iso(D0+DAY+23*HOUR));
+  assert.deepEqual(row.shadow,rounded,"значения теневых карточек этих суток перенесены из прежней строки");
+  assert.deepEqual([row.tactical,row.v2_floor,Object.keys(row.path).join()],["spot_led",true,"policy_v1,policy_v3_shadow"],"краткосрочное состояние, пол тени и путь линий запасной вызов пишет сам");
+  assert.ok(row.path.policy_v3_shadow[0]>before.path.policy_v3_shadow[0]&&row.nav.policy_v3_shadow>0,"учёт линий в запасном вызове идёт: доля копится, NAV ведётся");
+  assert.equal(m.decision_log.at(-1).v3,undefined,"запись журнала запасного вызова — без блока v3: движок не вызывался");
+  assert.equal(m.accounting_at,m.last_at,"разрыва учёта запасной вызов не создаёт");
+  // Сутки 2: день 1 закрыт и входит в счёт утверждений — его последний прогон был запасным.
+  const next=full(m,D0+2*DAY+HOUR);
+  assert.equal(next.shadow_evidence.cards.tga_daily.observed_days,2,"сутки с запасным последним прогоном не выпадают из счёта теневого слоя");
+  assert.equal(next.line_restarts,undefined);
+  // Запасной вызов — первый прогон суток: вчерашние значения в новую строку не переносятся.
+  const cold=fallback(m,D0+2*DAY+HOUR);
+  assert.equal(cold.daily.at(-1).shadow,undefined,"из строки прошлых суток значения не берутся");
+  assert.deepEqual(full(cold,D0+2*DAY+2*HOUR,{...values,tga_daily:900}).daily.at(-1).shadow,{...rounded,tga_daily:900},"следующий полный прогон тех же суток пишет свежие значения");
+  // Полный прогон после запасного переписывает перенесённое свежим; карточка без значения на закрытии — null.
+  const fresh=full(m,D0+DAY+23*HOUR+30*MIN,{...values,tga_daily:null,sth_pricing:1.3});
+  assert.deepEqual(fresh.daily.at(-1).shadow,{...rounded,tga_daily:null,sth_pricing:1.3},"значение строки — значение последнего прогона, получившего карточки");
+}
+
+// ---------- Н8. Пределы хранения монитора объявлены и входят в проекцию размера ----------
+{
+  const limits=monitorRetentionLimitsV1(),limitOf=key=>limits.lists.find(x=>x.path===`monitoring.${key}`)?.limit;
+  const engine=()=>({state:{k:1},variants:{policy_v3_shadow:{target_pct:45},v1_daily_close:{target_pct:45}}});
+  const alert=i=>({source:"network",type:"same_vintage_rewritten",quality_impact:"audit",observed_at:iso(T0),changed_rows:i});
+  let m=tick(null,T0,60_000,{strategic:"transition"},{variantInputs:variantInputs(45),variantEngine:engine});
+  m=tick(m,T0+HOUR,60_000,{strategic:"deteriorating"},{variantInputs:variantInputs(20),variantEngine:engine});
+  // Каждый список переполнен заранее; один прогон дописывает в каждый по записи.
+  const stuffed=structuredClone(m);
+  stuffed.decision_events=Array.from({length:limitOf("decision_events")+5},(_,i)=>({...m.decision_events.at(-1),t:iso(T0-(2000-i)*MIN)}));
+  stuffed.revision_alerts=Array.from({length:60},(_,i)=>({...alert(i),detected_at:iso(T0)}));
+  stuffed.target_change_log=Array.from({length:70},()=>structuredClone(m.target_change_log.at(-1)));
+  stuffed.optional_errors=Array.from({length:25},(_,i)=>({t:iso(T0),part:"x",error:String(i)}));
+  stuffed.variant_errors=Array.from({length:12},(_,i)=>({t:iso(T0),error:String(i)}));
+  const poisoned={get tga_daily(){throw new Error("сломанное значение карточки");}};
+  const next=tick(stuffed,T0+2*HOUR,60_000,{strategic:"transition"},{revisionAlerts:[alert(100),alert(101)],shadowValues:poisoned,variantInputs:variantInputs(45),variantEngine:()=>({state:{k:2},variants:{policy_v3_shadow:{target_pct:"45"}}})});
+  for(const key of ["decision_events","revision_alerts","target_change_log","optional_errors","variant_errors"])assert.equal(next[key].length,limitOf(key),`${key}: список держит объявленный предел`);
+  assert.deepEqual([limitOf("decision_events"),limitOf("revision_alerts"),limitOf("target_change_log"),limitOf("optional_errors"),limitOf("variant_errors")],[MODEL_POLICY_V1.forward_monitoring.decision_event_limit,40,TARGET_CHANGE_LOG_LIMIT,20,10]);
+  assert.deepEqual(next.revision_alerts.slice(-2).map(x=>[x.changed_rows,x.detected_at]),[[100,iso(T0+2*HOUR)],[101,iso(T0+2*HOUR)]],"в буфере пересмотров остаются самые свежие");
+  assert.equal(next.revision_alerts[0].changed_rows,22,"вытесняются самые старые: из 62 записей остались последние 40");
+  assert.equal(next.decision_events.at(-1).t,iso(T0+2*HOUR));assert.equal(next.optional_errors.at(-1).part,"shadow_values");assert.equal(next.variant_errors.at(-1).line,"policy_v3_shadow");
+  // Перезапуски линий и сбросы монитора — по десять записей.
+  const gap=structuredClone(m);gap.line_restarts=Array.from({length:12},(_,i)=>({t:iso(T0),reason:"x",lines:[String(i)]}));gap.accounting_at=iso(T0);
+  assert.equal(tick(gap,T0+2*HOUR,60_000,{strategic:"transition"},{variantInputs:variantInputs(45),variantEngine:engine}).line_restarts.length,limitOf("line_restarts"));
+  const reborn=tick({reset_events:Array.from({length:12},(_,i)=>({t:iso(T0),reason:String(i)}))},T0,60_000,{strategic:"transition"},{previousSnapshotPresent:true});
+  assert.equal(reborn.reset_events.length,limitOf("reset_events"));assert.equal(limitOf("line_restarts"),10);assert.equal(limitOf("reset_events"),10);
+  // Склейка с архивом (графт) режет те же списки теми же пределами.
+  {
+    let archive=tick(null,T0,100,{strategic:"constructive"});archive=tick(archive,T0+DAY,104,{strategic:"constructive"});
+    const era=tick(null,T0+DAY+2*HOUR,105,{strategic:"constructive"},{previousSnapshotPresent:true});
+    archive.revision_alerts=Array.from({length:30},(_,i)=>({...alert(i),detected_at:iso(T0)}));era.revision_alerts=Array.from({length:30},(_,i)=>({...alert(100+i),detected_at:iso(T0+DAY)}));
+    archive.reset_events=Array.from({length:8},(_,i)=>({t:iso(T0),reason:String(i)}));era.reset_events=Array.from({length:8},(_,i)=>({t:iso(T0+DAY),reason:String(100+i)}));
+    const pack={schema:1,reason:"test_restore",invalid_window:[],orphaned_genesis_log_hashes:[],archive:{source_commit:"fixture",monitor:archive},era:{started_at:era.started_at,price:105,strategies:Object.fromEntries(Object.entries(era.strategies).map(([k])=>[k,{initial_target_pct:era.strategy_meta[k].start_target_pct,initial_nav:1-era.strategy_meta[k].start_target_pct/100*COST,initial_turnover_pct:era.strategy_meta[k].start_target_pct,initial_cost_pct:era.strategy_meta[k].start_target_pct/100*COST*100}]))}};
+    const grafted=graftForwardMonitorV1(era,pack);
+    assert.deepEqual([grafted.revision_alerts.length,grafted.revision_alerts[0].changed_rows,grafted.revision_alerts.at(-1).changed_rows,grafted.reset_events.length,grafted.reset_events.at(-1).reason],[limitOf("revision_alerts"),20,129,limitOf("reset_events"),"107"],"графт держит те же пределы и оставляет самые свежие записи");
+  }
+  // Каждый список монитора либо объявлен, либо это дневные строки и журнал, которые проекция знает сама.
+  const arrays=new Set([m,next,reborn,tick(gap,T0+2*HOUR,60_000,{strategic:"transition"})].flatMap(state=>Object.keys(state).filter(key=>Array.isArray(state[key]))));
+  const declared=new Set([...limits.lists.map(x=>x.path.replace("monitoring.","")),"daily","decision_log","review_schedule_days"]);
+  assert.deepEqual([...arrays].filter(key=>!declared.has(key)),[],"список без объявленного предела в проекцию размера не попал бы");
+  for(const key of ["decision_events","revision_alerts","target_change_log","optional_errors","variant_errors","line_restarts","reset_events"])assert.ok(arrays.has(key),`фикстура: список ${key} встретился`);
+  // Байтовые потолки: состояние движка и блоки линий.
+  assert.deepEqual(limits.ceilings.map(x=>[x.path,x.max_bytes]),[["monitoring.variants_state",VARIANTS_STATE_MAX_BYTES],["monitoring.v3_candidate",6_000],["monitoring.variants",12_300]]);
+  assert.equal(VARIANTS_STATE_MAX_BYTES,12_000,"потолок состояния движка входит в проекцию размера: менять вместе с её пересчётом");
+  const stateOf=bytes=>runShadowVariantsV1({engine:()=>({state:{blob:"x".repeat(bytes-11)},variants:{policy_v3_shadow:{target_pct:50}}}),now:T0,inputs:{},state:{a:1}});
+  assert.deepEqual([stateOf(12_000).error,stateOf(12_000).targets.policy_v3_shadow],[null,50],"состояние ровно на потолке принимается");
+  assert.ok(stateOf(12_001).error.startsWith("engine_state_too_large: 12001 > 12000")&&stateOf(12_001).targets.policy_v3_shadow===null,"состояние больше потолка не принимается");
+  // Блок линии больше своего потолка в снимок не попадает, блок кандидата целиком — меньше объявленного.
+  const fat=tick(m,T0+2*HOUR,60_000,{strategic:"transition"},{variantInputs:variantInputs(45),variantEngine:()=>({state:{k:2},variants:Object.fromEntries(["policy_v3_shadow","v1_daily_close","v1_floor_handoff","v1_no_cftc"].map(name=>[name,{target_pct:45,pad:"x".repeat(3_950)}]))})});
+  assert.ok(jsonBytesV1(fat.v3_candidate)<=6_000&&jsonBytesV1(fat.v3_candidate)>4_000&&jsonBytesV1(fat.variants)<=12_300&&jsonBytesV1(fat.variants)>11_000,`блоки линий на потолке движка укладываются в объявленные: ${jsonBytesV1(fat.v3_candidate)} / ${jsonBytesV1(fat.variants)}`);
+  // Проверка перед публикацией предупреждает заранее и не отказывает: снимок, которому до капа при всех
+  // пределах разом остаётся меньше 150 КБ, проходит self-test с предупреждением.
+  const committed=JSON.parse(readFileSync(new URL("../docs/snapshot.json",import.meta.url),"utf8")),room=publicSnapshotAtLimitsV1({snapshot:committed,snapshotBytes:jsonBytesV1(committed),...limits}).margin;
+  const dir=mkdtempSync(join(tmpdir(),"monitor-size-")),padded=join(dir,"snapshot.json");
+  try{
+    writeFileSync(padded,JSON.stringify({...committed,size_test_padding:"x".repeat(Math.max(0,room-100_000))}));
+    const run=spawnSync(process.execPath,["scripts/self-test.mjs"],{cwd:fileURLToPath(new URL("..",import.meta.url)),encoding:"utf8",env:{...process.env,OUT:padded,STATE:join(dir,"absent.json"),REQUIRE_LIVE:""}});
+    assert.equal(run.status,0,`предупреждение о размере не отказ: ${run.stderr.slice(0,300)}`);
+    assert.ok(/at all retention limits would be \d\.\d{3} MB: margin \d+ KB is below 150 KB/.test(run.stderr),`self-test обязан предупредить о проекции «все лимиты разом»: ${run.stderr.slice(-400)}`);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+}
+
+console.log("Monitor audit fixes OK: display gate, honest timing null, v2 acceptance windows, closed-day Sharpe, risk-off counter, graft peak, v3 lines, tranched execution, target change log, shadow evidence, performance numbers, 2.13.0 migration, size budget; review fixes: rolling comparison window, fresh-only engine blocks, capture floor, strict line targets, same-day shadow carry, retention limits, acceptance numbers");

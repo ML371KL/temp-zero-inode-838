@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { POLICY_V2_CANDIDATE, allocationDecisionV2Candidate, allocationTargetV2Candidate, evaluateAcceptanceV2, evaluateReviewV2, excessSharpeV2, policyV2CandidateMetadata, riskOffConfirmationDeferredV2, timingNullV2, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
+import { CAPTURE_MIN_HODL_NET, POLICY_V2_CANDIDATE, allocationDecisionV2Candidate, allocationTargetV2Candidate, captureRatioV2, evaluateAcceptanceV2, evaluateReviewV2, excessSharpeV2, policyV2CandidateMetadata, riskOffConfirmationDeferredV2, timingNullV2, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
 import { allocationTargetV1 } from "../docs/policy-v1.mjs";
 
 const DAY = 86_400_000, HOUR = 3_600_000, MIN = 60_000;
@@ -290,6 +290,36 @@ const flatMarket = evaluateReviewV2(mkRows(400, { buy_and_hold: i => 1 + 0.2 * M
 assert.equal(flatMarket.r3_upside_capture.bull_window, false, "не бычье окно помечается явно");
 for (const r of [noCapture, okCapture, flatMarket, badTiming, goodTiming]) assert.notEqual(r.r3_upside_capture.status, "review");
 
+// ЗАХВАТ РОСТА публикуется, только когда HODL за окно вырос не меньше чем на 5 % (ревью 13.10.2026):
+// при росте около нуля отношение доходностей ничего не значит (HODL +0,0009 %, политика +0,20 % —
+// «захват» 224), при падении HODL его нет вовсе. Один порог на честный ноль и на справочное число R3.
+{
+  assert.equal(CAPTURE_MIN_HODL_NET, 0.05);
+  assert.equal(evaluateReviewV2([], null).thresholds.r3.capture_hodl_net_min, CAPTURE_MIN_HODL_NET, "порог публикуется рядом с порогами триады");
+  assert.deepEqual([captureRatioV2(0.03, 0.05), captureRatioV2(0.03, 0.0499), captureRatioV2(0.002, 0.000009), captureRatioV2(0.03, 0), captureRatioV2(0.03, -0.2), captureRatioV2(-0.02, 0.08), captureRatioV2(null, 0.10), captureRatioV2(0.03, null)], [0.6, null, null, null, null, -0.25, null, null], "порог включительный; ниже него, при нуле и при падении HODL захвата нет; отрицательный захват при росте HODL — число");
+  // Честный ноль: три дневные строки, политика держит 40 %; цена конца задаёт чистый рост HODL за окно.
+  const windowTo = hodlNet => { const end = 100 * (1 + hodlNet) / (1 - COST), prices = [100, 101, end]; return timingNullV2(monitorRows({ prices, returns: [0, 0.01, end / 101 - 1] }, () => 40), { costRate: COST }); };
+  for (const hodlNet of [-0.011, 0.000009, 0.0002, 0.0499]) {
+    const tn = windowTo(hodlNet);
+    assert.ok(Math.abs(tn.hodl_net_return_pct - hodlNet * 100) < 1e-9, "фикстура: рост HODL задан точно");
+    assert.equal(tn.capture_ratio, null, `HODL ${(hodlNet * 100).toFixed(4)} %: захват не публикуется`);
+    assert.ok(Number.isFinite(tn.policy_net_return_pct) && Number.isFinite(tn.vs_null_pp), "остальные числа окна на месте");
+  }
+  assert.ok(Math.abs(windowTo(0.000009).policy_net_return_pct / windowTo(0.000009).hodl_net_return_pct) > 10, `фикстура: прежний расчёт дал бы здесь «захват» ${windowTo(0.000009).policy_net_return_pct / windowTo(0.000009).hodl_net_return_pct}`);
+  for (const hodlNet of [0.0501, 0.30]) {
+    const tn = windowTo(hodlNet);
+    assert.ok(Math.abs(tn.capture_ratio - tn.policy_net_return_pct / tn.hodl_net_return_pct) < 1e-12 && tn.capture_ratio > 0.3 && tn.capture_ratio < 0.5, `HODL +${hodlNet * 100} %: захват — отношение чистых доходностей: ${tn.capture_ratio}`);
+  }
+  // R3: тот же порог. Окно не бычье и HODL вырос на 3 % — числа захвата нет; на 20 % — есть.
+  const r3 = (hodl, policy) => evaluateReviewV2(mkRows(400, { buy_and_hold: i => 1 + hodl * Math.min(1, i / 360), policy_v1: i => 1 + policy * Math.min(1, i / 360) }), null).r3_upside_capture;
+  assert.deepEqual([r3(0.03, 0.02).capture_ratio, r3(0.0004, 0.02).capture_ratio, r3(-0.10, 0.02).capture_ratio, r3(0.03, 0.02).status, r3(0.03, 0.02).bull_window], [null, null, null, "reference", false]);
+  // Окно R3 — последние 365 суток из 400: HODL в нём вырос чуть меньше, чем за все 400.
+  const flat = flatMarket.r3_upside_capture, above = r3(0.08, 0.02);
+  assert.ok(flat.hodl_net_pct > 17 && flat.hodl_net_pct < 20 && Math.abs(flat.capture_ratio - flat.policy_net_pct / flat.hodl_net_pct) < 1e-3, `HODL +${flat.hodl_net_pct} %: захват публикуется числом ${flat.capture_ratio}`);
+  assert.ok(above.hodl_net_pct >= 5 && above.hodl_net_pct < 8 && Math.abs(above.capture_ratio - above.policy_net_pct / above.hodl_net_pct) < 2e-3, `HODL +${above.hodl_net_pct} % — выше порога, захват есть: ${above.capture_ratio}`);
+  assert.ok(r3(0.03, 0.02).hodl_net_pct > 2 && r3(0.03, 0.02).hodl_net_pct < 5, "фикстура: рост HODL ниже порога");
+}
+
 // Недостаток данных — честный collecting.
 const early = evaluateReviewV2(healthyRows.slice(0, 30), null);
 assert.equal(early.r1_protection.status, "collecting");
@@ -324,5 +354,14 @@ const accCommon = evaluateAcceptanceV2({ performance: { policy_v1: { sharpe_exce
 assert.equal(accCommon.sharpe_gap_vs_v1, -0.4);
 assert.equal(accCommon.status, "falsified", "приёмка судит по разрыву на общем окне, а не по Sharpe с разных окон");
 assert.equal(evaluateAcceptanceV2({ performance: { policy_v1: { sharpe_excess: 1.0 }, policy_v2_shadow: { sharpe_excess: 1.2 } }, sharpeGap: null, shadowDays: 130, recoveryEpisodesObserved: 1 }).meets.sharpe_floor, null, "общее окно ещё не набралось — критерий честно не оценён");
+// Без числа разрыва Sharpe готовности нет: сутки и эпизод набраны, но неоценённый критерий — не выполненный.
+{
+  const noGap = evaluateAcceptanceV2({ performance: { policy_v1: { sharpe_excess: 1.0 }, policy_v2_shadow: { sharpe_excess: 1.2 } }, sharpeGap: null, shadowDays: 130, recoveryEpisodesObserved: 1 });
+  assert.deepEqual([noGap.meets, noGap.sharpe_gap_vs_v1, noGap.falsified, noGap.status], [{ shadow_days: true, sharpe_floor: null, episode_or_180d: true }, null, false, "collecting"], "без числа разрыва Sharpe статус — collecting, а не готовность к переключению");
+  assert.equal(evaluateAcceptanceV2({ sharpeGap: 0.2, shadowDays: 130, recoveryEpisodesObserved: 1 }).status, "switch_ready_pending_owner", "с числом и теми же сутками и эпизодом — готовность");
+  // Окно, на котором монитор посчитал числа, публикуется рядом с ними как есть.
+  assert.deepEqual(evaluateAcceptanceV2({ sharpeGap: 0.2, shadowDays: 400, recoveryEpisodesObserved: 0, window: { basis: "rolling", from: "2027-08-01T23:45:00.000Z", days: 365.4, extra: 1 } }).window, { basis: "rolling", from: "2027-08-01T23:45:00.000Z", days: 365.4 });
+  assert.equal(evaluateAcceptanceV2({ sharpeGap: 0.2, shadowDays: 130 }).window, null);
+}
 
 console.log("Policy v2 candidate OK: shadow contract, strict-majority graduation, directional floor, two-window capitulation, review-day streaks, honest timing null, R1/R2 power tests, R3 reference, machine acceptance");

@@ -1,8 +1,8 @@
 import { readFileSync, statSync, existsSync } from "node:fs";
 import { allocationDecisionV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
 import { policySuiteMetadataV1, POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
-import { policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
-import { PUBLIC_SNAPSHOT_MAX_BYTES, optionalSnapshotProblemsV1, optionalSnapshotBytesV1 } from "./public-snapshot-contract.mjs";
+import { monitorRetentionLimitsV1, policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
+import { PUBLIC_SNAPSHOT_MAX_BYTES, optionalSnapshotProblemsV1, optionalSnapshotBytesV1, publicSnapshotAtLimitsV1, publicSnapshotAtLimitsWarningV1 } from "./public-snapshot-contract.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
 const statePath=process.env.STATE||".state/cache.json";
@@ -322,6 +322,12 @@ if(!s.mock){
 }
 const bytes=statSync(path).size;
 if(bytes>PUBLIC_SNAPSHOT_MAX_BYTES)warn.push(`snapshot is large: ${(bytes/1e6).toFixed(2)} MB`);
+// Предупреждение заранее, а не отказ: наибольший файл, который разрешают все пределы хранения разом
+// (дневные строки, журнал, история, события решения и остальные списки монитора, потолки блоков),
+// обязан помещаться в кап с запасом стража. Отказ остаётся за стражем размера в unit-test — он
+// срабатывает, когда к капу подходит настоящий файл. Сбой самого расчёта проверку не роняет.
+try{const atLimits=publicSnapshotAtLimitsWarningV1(publicSnapshotAtLimitsV1({snapshot:s,snapshotBytes:bytes,...monitorRetentionLimitsV1()}));if(atLimits)warn.push(atLimits);}
+catch(error){warn.push(`size projection at all limits failed: ${String(error?.message||error).slice(0,160)}`);}
 
 if(fail.length){console.error("Snapshot validation failed:\n- "+fail.join("\n- "));process.exit(1);}
 const optionalBytes=optionalSnapshotBytesV1(s).total;

@@ -172,10 +172,20 @@ const navStats = (rows, name, windowDays) => {
   return { net: navs.at(-1) / navs[0] - 1, max_dd: maxDd, days: (Date.parse(w.at(-1).t) - Date.parse(w[0].t)) / DAY };
 };
 
+// ЗАХВАТ РОСТА — отношение чистой доходности стратегии к чистой доходности HODL за окно. Отношение
+// осмысленно, только когда знаменатель заметно больше того, что стратегия получает и без всякого
+// захвата: кэш даёт около 1 п.п. за квартал, издержки оборота — десятые доли пункта. При росте HODL
+// около нуля число бессмысленно и выглядит как результат: HODL +0,0009 % и политика +0,20 % давали
+// «захват» 224, HODL +0,02 % — 10,3 (ревью 13.10.2026). Поэтому захват публикуется, только когда
+// HODL за окно вырос не меньше чем на 5 %; ниже порога и при падении HODL — null. Один порог на оба
+// места, где захват считается: честный ноль (timing_null.*.capture_ratio) и справочное число R3.
+export const CAPTURE_MIN_HODL_NET = 0.05;
+export const captureRatioV2 = (strategyNet, hodlNet) => finite(strategyNet) && finite(hodlNet) && Number(hodlNet) >= CAPTURE_MIN_HODL_NET ? Number(strategyNet) / Number(hodlNet) : null;
+
 const T = Object.freeze({
   r1: Object.freeze({ hodl_dd_min: -0.25, dd_ratio_max: 0.7, persist_days: 14, window_days: 180 }),
   r2: Object.freeze({ sharpe_gap_min: 0.35, net_gap_pp_min: 10, persist_days: 60, window_days: 365 }),
-  r3: Object.freeze({ hodl_net_min: 0.80, capture_min: 0.30, window_days: 365 }),
+  r3: Object.freeze({ hodl_net_min: 0.80, capture_min: 0.30, capture_hodl_net_min: CAPTURE_MIN_HODL_NET, window_days: 365 }),
 });
 
 // Excess-Sharpe по ряду точек {t, nav, cash}: доходности между соседними точками, избыточная —
@@ -258,7 +268,7 @@ export function timingNullV2(rows, { name = "policy_v1", start = null, end = nul
     level_pp: (constG - hodlG) * 100,
     timing_pp: policyG === null ? null : (policyG - constG) * 100,
     costs_pp: policyG === null ? null : ((policy - policyG) - (hodl - hodlG)) * 100,
-    capture_ratio: hodl > 1 ? (policy - 1) / (hodl - 1) : null,
+    capture_ratio: captureRatioV2(policy - 1, hodl - 1),
     closed_rows: policyPoints.length, policy_sharpe: policySharpe, null_sharpe: nullSharpe,
     sharpe_gap: finite(nullSharpe) && finite(policySharpe) ? nullSharpe - policySharpe : null,
   };
@@ -322,7 +332,7 @@ export function evaluateReviewV2(dailyRows, previousReview, performance = null, 
   // политике порог срабатывал в 57 % запусков реконструкции, на инвертированной — в 51 %.
   const pol365 = navStats(rows, "policy_v1", T.r3.window_days), hodl365 = navStats(rows, "buy_and_hold", T.r3.window_days);
   if (hodl365 && pol365 && hodl365.days >= T.r3.window_days * 0.82) {
-    const bull = hodl365.net >= T.r3.hodl_net_min, capture = hodl365.net > 0 ? pol365.net / hodl365.net : null;
+    const bull = hodl365.net >= T.r3.hodl_net_min, capture = captureRatioV2(pol365.net, hodl365.net);
     Object.assign(out.r3_upside_capture, {
       status: "reference", bull_window: bull, hodl_net_pct: round(hodl365.net * 100, 2), policy_net_pct: round(pol365.net * 100, 2), capture_ratio: round(capture),
       detail: bull
@@ -338,7 +348,10 @@ export function evaluateReviewV2(dailyRows, previousReview, performance = null, 
 // `sharpeGap` — разрыв Sharpe тени и v1 на ОБЩЕМ окне (от рождения тени), его считает монитор;
 // `shadowDays` — возраст самой тени. Без `sharpeGap` разрыв берётся из performance (прежний
 // вызов), но тогда окна линий разные — тень родилась на трое суток позже v1.
-export function evaluateAcceptanceV2({ performance = null, sharpeGap, shadowDays = 0, recoveryEpisodesObserved = 0 } = {}) {
+// `window` — окно, на котором монитор посчитал разрыв Sharpe и эпизоды ({basis, from, days}): с
+// рождения тени, а после 370 суток её жизни — скользящее (дневные строки хранятся 370 суток).
+// Публикуется рядом с числами как есть: сменить окно молча числа приёмки не имеют права.
+export function evaluateAcceptanceV2({ performance = null, sharpeGap, shadowDays = 0, recoveryEpisodesObserved = 0, window = null } = {}) {
   const a = POLICY_V2_CANDIDATE.decision_record.acceptance_criteria;
   const sharpeV2 = performance?.policy_v2_shadow?.sharpe_excess, sharpeV1 = performance?.policy_v1?.sharpe_excess;
   const gap = sharpeGap !== undefined ? (finite(sharpeGap) ? Number(sharpeGap) : null) : (finite(sharpeV2) && finite(sharpeV1) ? Number(sharpeV2) - Number(sharpeV1) : null);
@@ -350,6 +363,7 @@ export function evaluateAcceptanceV2({ performance = null, sharpeGap, shadowDays
   };
   return {
     shadow_days: shadowDays,
+    window: window && typeof window === "object" ? { basis: window.basis ?? null, from: window.from ?? null, days: finite(window.days) ? Number(window.days) : null } : null,
     sharpe_gap_vs_v1: finite(gap) ? Number(gap.toFixed(4)) + 0 : null,
     recovery_episodes_observed: recoveryEpisodesObserved,
     falsified,

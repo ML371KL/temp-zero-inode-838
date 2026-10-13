@@ -8,10 +8,44 @@ import { DAILY_INPUT_SUMMARY_DAYS, pruneDailyInputSummaryV1 } from "./public-sna
 import { STRATEGY_REGISTRY_V1, applyMonitorBackfillV1 } from "./monitor-backfill-v1.mjs";
 import { TARGET_CHANGE_LOG_LIMIT, targetChangeRecordV1, tickDiffFromInputSummariesV1 } from "./monitor-changes-v1.mjs";
 import { shadowEvidenceV1, shadowRowValuesV1, tacticalForwardV1 } from "./monitor-evidence-v1.mjs";
-import { TRANCHE_CONVENTION_V1, TRANCHED_LINE_V1, VARIANT_LINES_V1, acceptanceCriteriaV3, divergenceEpisodesV3, evaluateAcceptanceV3, policyV3CandidateMetadata, runShadowVariantsV1, updateTrancheStateV1, variantLedgerV1 } from "./monitor-lines-v1.mjs";
-import { closeDrawdownPctV1, closedRowsV1, comparisonsV1, sharpeOfRowsV1, timingNullBlockV1 } from "./monitor-timing-v1.mjs";
+import { TRANCHE_CONVENTION_V1, TRANCHED_LINE_V1, VARIANTS_STATE_MAX_BYTES, VARIANT_LINES_V1, VARIANT_PUBLIC_MAX_BYTES, acceptanceCriteriaV3, divergenceEpisodesV3, evaluateAcceptanceV3, policyV3CandidateMetadata, runShadowVariantsV1, updateTrancheStateV1, variantLedgerV1 } from "./monitor-lines-v1.mjs";
+import { closeDrawdownPctV1, closedRowsV1, comparisonsV1, rowPathV1, rowsFromV1, sharpeOfRowsV1, timingNullBlockV1 } from "./monitor-timing-v1.mjs";
 
 const DAY=86_400_000,YEAR_DAYS=365.25;
+// ПРЕДЕЛЫ ХРАНЕНИЯ списков монитора — в одном месте: ими пользуется сам монитор и по ним считается
+// проекция размера снимка «все лимиты разом» (publicSnapshotAtLimitsV1). Предел списка, которого нет
+// в этом перечне, проекция не увидит — так страж размера не видел событий решения.
+// REVISION_ALERT_LIMIT: 100 → 40 (ревью 13.10.2026, Н8). Буфер пересмотров источников в монитор
+// только копится для показа: решение считает пересмотры своего прогона, уведомления читают
+// source_revision_alerts снимка, сторож буфер не читает, полный след — в git-истории снимков. В бою
+// 100 записей покрывали 41 час и на три четверти состояли из одного и того же аудит-алерта; 40
+// записей покрывают 16 часов и освобождают 28,5 КБ в каждом снимке.
+export const REVISION_ALERT_LIMIT=40;
+const RESET_EVENT_LIMIT=10,OPTIONAL_ERROR_LIMIT=20,VARIANT_ERROR_LIMIT=10,LINE_RESTART_LIMIT=10;
+// Номинал записи — для списка, который сейчас пуст: текст ошибки режется по знакам (200 и 300),
+// знак кириллицы занимает два байта. corrections ведёт засев (monitor-backfill-v1.mjs), предел там же.
+export function monitorRetentionLimitsV1(){
+  const cfg=MODEL_POLICY_V1.forward_monitoring;
+  return{
+    dailyLimit:cfg.daily_history_days,decisionLogLimit:cfg.observation_log_limit,
+    lists:[
+      {path:"monitoring.decision_events",limit:cfg.decision_event_limit,item_bytes:380},
+      {path:"monitoring.revision_alerts",limit:REVISION_ALERT_LIMIT,item_bytes:490},
+      {path:"monitoring.target_change_log",limit:TARGET_CHANGE_LOG_LIMIT,item_bytes:700},
+      {path:"monitoring.optional_errors",limit:OPTIONAL_ERROR_LIMIT,item_bytes:480},
+      {path:"monitoring.variant_errors",limit:VARIANT_ERROR_LIMIT,item_bytes:700},
+      {path:"monitoring.line_restarts",limit:LINE_RESTART_LIMIT,item_bytes:300},
+      {path:"monitoring.reset_events",limit:RESET_EVENT_LIMIT,item_bytes:100},
+      {path:"monitoring.corrections",limit:20,item_bytes:250},
+    ],
+    // Блок кандидата — поля движка до потолка плюс данные контракта и приёмка, которые пишет монитор.
+    ceilings:[
+      {path:"monitoring.variants_state",max_bytes:VARIANTS_STATE_MAX_BYTES},
+      {path:"monitoring.v3_candidate",max_bytes:VARIANT_PUBLIC_MAX_BYTES+2_000},
+      {path:"monitoring.variants",max_bytes:(VARIANT_LINES_V1.length-1)*(VARIANT_PUBLIC_MAX_BYTES+100)},
+    ],
+  };
+}
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const mean=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:null;
@@ -98,6 +132,20 @@ export function buildSourceVintagesV1(datasets={},sourceStates={}){
   return{mode:"as_collected",captured_at:null,sources,contract_sha256:sha256(sources)};
 }
 
+// ПАКЕТЫ ЖИВЫХ КОТИРОВОК (правка 14.10.2026). Правило «тот же observed_at, другие данные — винтаж
+// переписан» писалось для опубликованных наблюдений: у отчёта или дневной точки отметка наблюдения
+// и есть винтаж. У среза живых котировок винтажа в этом смысле нет. Сборщик ставит пакету `spot`
+// в observed_at МИНИМУМ отметок времени площадок: пока самая тихая пара не сторговалась, отметка
+// стоит, а цены остальных площадок меняются — и новый срез цен принимался за переписанный винтаж с
+// понижением качества решения. За 19.07–10.10.2026 это 181 снимок из 1 468 с качеством degraded,
+// в 151 из них — единственная причина; одиночных эпизодов деградации (один снимок — и обратно
+// good) было 140, без этого алерта их 48.
+// Пакет из этого перечня алерта «тот же винтаж переписан» по одному хэшу не поднимает. Смена схемы
+// у него ловится как раньше; пакет с временными рядами судится по закрытым строкам, как любой другой.
+// Перечень — по ключам пакетов сборщика, и в нём только `spot`: `pegs` ставит observed_at = моменту
+// сбора (совпасть у двух прогонов он не может, ветка недостижима), `derivatives` несёт временной ряд
+// DVOL и судится по закрытым строкам. Остальные пакеты — ряды опубликованных наблюдений.
+export const LIVE_QUOTE_SOURCES_V1=Object.freeze(["spot"]);
 export function sourceRevisionAlertsV1(previousVintages,currentVintages,previousDatasets={},currentDatasets={}){
   const alerts=[];
   for(const [key,current] of Object.entries(currentVintages?.sources||{})){
@@ -110,7 +158,8 @@ export function sourceRevisionAlertsV1(previousVintages,currentVintages,previous
         const affected=[...diff.changed,...diff.added,...diff.removed];
         // Keep the legacy hash-only safeguard for scalar/non-temporal packets. For
         // time-series packets, alert only when an already closed row changed.
-        if(!diff.has_timed_rows)alerts.push({source:key,type:"same_vintage_rewritten",quality_impact:"degraded",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
+        // Срез живых котировок — не винтаж: новые цены при прежней отметке ревизией не считаются.
+        if(!diff.has_timed_rows){if(!LIVE_QUOTE_SOURCES_V1.includes(key))alerts.push({source:key,type:"same_vintage_rewritten",quality_impact:"degraded",observed_at:current.observed_at,previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});}
         else if(affected.length)alerts.push({source:key,type:"same_vintage_rewritten",quality_impact:"audit",observed_at:current.observed_at,changed_rows:diff.changed.length,added_rows:diff.added.length,removed_rows:diff.removed.length,...revisionRange(affected),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
       }else if(diff.changed.length){
         alerts.push({source:key,type:"historical_overlap_rewritten",quality_impact:"audit",changed_rows:diff.changed.length,...revisionRange(diff.changed),previous_data_sha256:prior.data_sha256,current_data_sha256:current.data_sha256});
@@ -131,6 +180,9 @@ export function sourceRevisionAlertsV1(previousVintages,currentVintages,previous
 // качком не считается никогда. Окно памяти короткое (24 ч) сознательно: это вопрос «здоров ли
 // пакет СЕЙЧАС», в отличие от 90-дневной памяти в уведомлениях, где вопрос другой — «новость ли
 // это для читателя» (scripts/notify.mjs, rememberRevised). Ошибка в сторону сообщения о деградации.
+// С 14.10.2026 пакет живых котировок `spot` алерта «тот же винтаж переписан» не поднимает вовсе
+// (LIVE_QUOTE_SOURCES_V1): его «качок 24.07» был новым срезом цен, а не пересмотром. Механизм
+// остаётся для смены схемы и для пакетов опубликованных наблюдений без временных рядов.
 const bounceKey=hash=>typeof hash==="string"?hash.slice(0,16):null;
 export function applyRevisionBounceToleranceV1(alerts=[],{currentVintages,bounceState,now=Date.now(),ttlHours=24,keep=3}={}){
   const ttl=ttlHours*3_600_000,prior=bounceState&&typeof bounceState==="object"?bounceState:{};
@@ -422,8 +474,8 @@ export function graftForwardMonitorV1(liveMonitor,pack){
   merged.updated_at=live.updated_at;merged.last_at=live.last_at;merged.last_price=live.last_price;
   merged.last_cash_quote_pct=live.last_cash_quote_pct;merged.last_cash_quote_basis=live.last_cash_quote_basis;
   merged.counter_semantics_version=2;
-  merged.revision_alerts=[...(merged.revision_alerts||[]),...(live.revision_alerts||[])].slice(-100);
-  merged.reset_events=[...(merged.reset_events||[]),...(live.reset_events||[])].slice(-10);
+  merged.revision_alerts=[...(merged.revision_alerts||[]),...(live.revision_alerts||[])].slice(-REVISION_ALERT_LIMIT);
+  merged.reset_events=[...(merged.reset_events||[]),...(live.reset_events||[])].slice(-RESET_EVENT_LIMIT);
   // Состояние тени v2 живёт у ЖИВОЙ линии (архив 5165340 его не знает): без переноса графт молча
   // обнулял бы идущую градуировку пола и стрики ревью — потеря acceptance-evidence (ревью 2026-07-22).
   for(const key of ["v2_shadow_state","v2_theta","v2_review","v2_candidate","variants_state","variant_errors","v3_candidate","variants","tranche_state"])if(live[key]!==undefined)merged[key]=live[key];
@@ -461,13 +513,13 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // сброс уничтожил 58-записный журнал). Сброс обязан оставлять СЛЕД в самом мониторе; внешний
   // сторож дополнительно ловит регресс started_at против HEAD репозитория.
   if(previousMonitor?.schema!==1&&previousSnapshotPresent)
-    monitor.reset_events=[...(previousMonitor?.reset_events||[]),{t:at,reason:"previous_snapshot_without_monitoring"}].slice(-10);
+    monitor.reset_events=[...(previousMonitor?.reset_events||[]),{t:at,reason:"previous_snapshot_without_monitoring"}].slice(-RESET_EVENT_LIMIT);
   // Всё, что добавлено к учёту NAV и журналу решений (сравнения, честный ноль, журнал смен цели,
   // теневые линии, форвард-счёт), — необязательные расчёты: их отказ не имеет права остановить сбор
   // или тронуть решение. Отказ оставляет след в monitoring.optional_errors, расчёт даёт запасное значение.
   const optional=(part,compute,fallback)=>{
     try{return compute();}
-    catch(error){monitor.optional_errors=[...(monitor.optional_errors||[]),{t:at,part,error:String(error?.message||error).slice(0,200)}].slice(-20);return fallback;}
+    catch(error){monitor.optional_errors=[...(monitor.optional_errors||[]),{t:at,part,error:String(error?.message||error).slice(0,200)}].slice(-OPTIONAL_ERROR_LIMIT);return fallback;}
   };
   // РАЗРЫВ УЧЁТА. Если предыдущий прогон выполнила прежняя версия (откат релиза), путь политики и
   // новые линии в нём не велись: их NAV простоял бы интервал без доходности, и сравнение с v1 было
@@ -476,11 +528,11 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // записью о перезапуске: короткая честная история лучше длинной с дырой.
   if(previousMonitor?.schema===1&&monitor.accounting_at!==undefined&&monitor.accounting_at!==monitor.last_at)optional("accounting_gap",()=>{
     const restarted=[...VARIANT_LINES_V1,TRANCHED_LINE_V1].filter(name=>monitor.strategies[name]);
-    for(const name of restarted){delete monitor.strategies[name];delete monitor.strategy_meta?.[name];for(const row of monitor.daily||[]){delete row.targets?.[name];delete row.nav?.[name];}}
+    for(const name of restarted){delete monitor.strategies[name];delete monitor.strategy_meta?.[name];for(const row of monitor.daily||[]){delete row.targets?.[name];delete row.nav?.[name];delete row.path?.[name];}}
     delete monitor.tranche_state;
     if(monitor.strategies.policy_v1){delete monitor.strategies.policy_v1.gross_nav;delete monitor.strategies.policy_v1.exposure_pct_days;}
     for(const meta of Object.values(monitor.strategy_meta||{}))if(meta.base){delete meta.base.policy_v1_gross;delete meta.base.policy_v1_w_days;}
-    monitor.line_restarts=[...(monitor.line_restarts||[]),{t:at,reason:"run_without_line_accounting",accounted_until:monitor.accounting_at,last_run:monitor.last_at,lines:restarted}].slice(-10);
+    monitor.line_restarts=[...(monitor.line_restarts||[]),{t:at,reason:"run_without_line_accounting",accounted_until:monitor.accounting_at,last_run:monitor.last_at,lines:restarted}].slice(-LINE_RESTART_LIMIT);
   });
   // Состояние прежней версии досевается на лету: старты линий, путь доли политики, журнал смен
   // цели, краткосрочное состояние в дневных строках (scripts/monitor-backfill-v1.mjs). Засев идемпотентен.
@@ -508,10 +560,13 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   monitor.v2_theta=thetaState;
   // ТЕНЕВЫЕ ЛИНИИ v3 (scripts/monitor-lines-v1.mjs): цели даёт движок вариантов; отказ движка —
   // запись в variant_errors, линии держат прежнюю цель, решение и его качество не затронуты.
+  // Непринятая цель одной линии (не число, вне 0…100, поле не читается) — такая же запись с именем
+  // линии; остальные линии этого прогона исполняются.
   const variantRun=runShadowVariantsV1({...(variantEngine?{engine:variantEngine}:{}),now,inputs:variantInputs,state:monitor.variants_state});
   if(variantRun.ran){
     monitor.variants_state=variantRun.state;
-    if(variantRun.error)monitor.variant_errors=[...(monitor.variant_errors||[]),{t:at,error:variantRun.error}].slice(-10);
+    const failures=[...(variantRun.error?[{t:at,error:variantRun.error}]:[]),...Object.entries(variantRun.rejected||{}).map(([line,error])=>({t:at,line,error}))];
+    if(failures.length)monitor.variant_errors=[...(monitor.variant_errors||[]),...failures].slice(-VARIANT_ERROR_LIMIT);
   }
   // Исполнение по правилу панели: понижения сразу, повышения траншами (соглашение — в assumptions).
   const tranchedLine=monitor.strategies[TRANCHED_LINE_V1];let tranchedTarget=null;
@@ -602,11 +657,16 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // во время insufficient расходились бы фиктивно и завышали days_diverged (ревью 2026-07-22).
   // Дополнения строки (аудит 2026-10-10): tactical — краткосрочное состояние; v2_floor — пол тени
   // держал её цель выше базовой ступени хотя бы на одном прогоне этих суток (основа счётчика
-  // эпизодов); path — путь политики [накопленная доля, %·сутки; валовой NAV]; shadow — значения
-  // восьми теневых карточек.
+  // эпизодов); path — путь политики и кандидата v3 [накопленная доля, %·сутки; валовой NAV]: с него
+  // начинается скользящее окно (ROW_PATH_LINES_V1); shadow — значения восьми теневых карточек.
+  // Прогон без значений карточек (запасной вызов сборщика после отказа дополнительного расчёта)
+  // не стирает уже записанные в строку этих суток: строка дня переписывается целиком, и день, чей
+  // последний прогон оказался запасным, выпадал из счёта утверждений. Значения переносятся из
+  // прежней строки ТЕХ ЖЕ суток; из вчерашней строки не переносится ничего. Остальное в строке
+  // запасной вызов пишет сам: tactical — из решения, path — из учёта линий, v2_floor держится сутки.
   const sameDay=monitor.daily.findIndex(x=>x.date===date);
-  const floorToday=v2Decision.binding_overlays.includes("recovery_floor")||(sameDay>=0&&monitor.daily[sameDay].v2_floor===true),shadowRow=optional("shadow_values",()=>shadowRowValuesV1(shadowValues),null);
-  const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,v2_diverged:finite(v2Target)&&finite(decision.target_pct)&&Number(v2Target)!==Number(decision.target_pct),tactical:decision.tactical??null,...(floorToday?{v2_floor:true}:{}),...(finite(policyLine?.gross_nav)?{path:{policy_v1:[Number(Number(policyLine.exposure_pct_days).toFixed(4)),Number(Number(policyLine.gross_nav).toFixed(9))]}}:{}),...(shadowRow?{shadow:shadowRow}:{}),input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
+  const floorToday=v2Decision.binding_overlays.includes("recovery_floor")||(sameDay>=0&&monitor.daily[sameDay].v2_floor===true),shadowRow=optional("shadow_values",()=>shadowRowValuesV1(shadowValues),null)??(sameDay>=0?monitor.daily[sameDay].shadow??null:null),rowPath=rowPathV1(monitor.strategies);
+  const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,v2_diverged:finite(v2Target)&&finite(decision.target_pct)&&Number(v2Target)!==Number(decision.target_pct),tactical:decision.tactical??null,...(floorToday?{v2_floor:true}:{}),...(rowPath?{path:rowPath}:{}),...(shadowRow?{shadow:shadowRow}:{}),input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
   if(sameDay>=0)monitor.daily[sameDay]=dailyRow;else monitor.daily.push(dailyRow);
   monitor.daily=monitor.daily.filter(x=>now-Date.parse(x.t)<=cfg.daily_history_days*DAY).sort((a,b)=>Date.parse(a.t)-Date.parse(b.t));
   // Детальные входы держим только за свежее окно: NAV-серия обязана покрывать 365 дней, а
@@ -618,10 +678,10 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   monitor.assumptions={...(monitor.assumptions||{}),transaction_cost_bps_per_full_turnover:cfg.transaction_cost_bps_per_full_turnover,cash_yield_source:"FRED DTB3, discount basis converted to effective annual yield (91-day convention)",cash_yield_basis:"3-month Treasury bill discount quote; ACT/360 price conversion, effective ACT/365.25 annualization",timezone:cfg.timezone,observation_mode:cfg.observation_mode,
     execution_gate:"Цель исполняется, только если решение проходит гейт витрины; при паузе решения линии, выведенные из него, держат прежнюю долю.",
     tranched_execution:TRANCHE_CONVENTION_V1,
-    comparison_windows:"Линии сравниваются на общем окне от более позднего старта; оба портфеля открываются в начале окна и платят вход со своей доли. Sharpe и волатильность — по закрытым суткам.",
+    comparison_windows:"Линии сравниваются на общем окне от более позднего старта; оба портфеля открываются в начале окна и платят вход со своей доли. Sharpe и волатильность — по закрытым суткам. Дневные строки хранятся 370 суток: когда строка суток старта уходит, окно с рождения закрывается и сравнение идёт на скользящем окне 365 суток (basis: rolling).",
   };
   monitor.days_elapsed=Math.max(0,Math.floor((now-Date.parse(monitor.started_at))/DAY));monitor.observation_days=monitor.daily.length;monitor.review_schedule_days=cfg.review_days;monitor.next_review_day=cfg.review_days.find(x=>x>monitor.days_elapsed)??null;monitor.trend_vol_context=simple.trend_vol_context;
-  monitor.revision_alerts=[...(monitor.revision_alerts||[]),...revisionAlerts.map(x=>({...x,detected_at:at}))].slice(-100);
+  monitor.revision_alerts=[...(monitor.revision_alerts||[]),...revisionAlerts.map(x=>({...x,detected_at:at}))].slice(-REVISION_ALERT_LIMIT);
   // Теневые счётчики кандидатов policy v2 (аудит 2026-07-21). Решение они НЕ меняют — только
   // накапливают форвард-доказательства: как часто одиночный degraded-снимок обнулил бы 48ч-удержание
   // повышения и сколько понижений v1 подтвердил раньше, чем разрешило бы правило v2.
@@ -650,11 +710,13 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   const closedDaily=closedRowsV1(monitor.daily,date);
   monitor.performance=Object.fromEntries(Object.entries(monitor.strategies).map(([name,strategy])=>[name,strategyStats(strategy,closedDaily,name)]));
   // Сравнения на общем окне и честный ноль тайминга (scripts/monitor-timing-v1.mjs).
-  // Для теневых линий рядом — эпизоды расхождения цели с policy_v1 по дневным строкам (определение
-  // из контракта кандидата v3; пока его нет в модуле, поля нет).
+  // Для теневых линий рядом — эпизоды расхождения цели с policy_v1 по дневным строкам ТОГО ЖЕ окна
+  // (определение из контракта кандидата v3; пока его нет в модуле, поля нет). Окно блока — с
+  // рождения линии, а когда рождение ушло из дневных строк — скользящее: счёт по всем хранимым
+  // строкам молча терял бы ранние эпизоды.
   monitor.comparisons=optional("comparisons",()=>{
     const out=comparisonsV1(monitor,{now,date,costRate});
-    for(const name of ["policy_v2_shadow",...VARIANT_LINES_V1,TRANCHED_LINE_V1]){const divergence=out[name]?divergenceEpisodesV3(monitor.daily,name):null;if(divergence)out[name].divergence=divergence;}
+    for(const name of ["policy_v2_shadow",...VARIANT_LINES_V1,TRANCHED_LINE_V1]){const divergence=out[name]?divergenceEpisodesV3(rowsFromV1(monitor.daily,out[name].from),name):null;if(divergence)out[name].divergence=divergence;}
     return out;
   },{});
   monitor.timing_null=optional("timing_null",()=>timingNullBlockV1(monitor,{now,date,costRate}),null);
@@ -663,26 +725,38 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // критериев приёмки/фальсификации и расхождение с живой политикой — весь материал будущего
   // решения о переключении в одном месте.
   monitor.v2_review=optional("v2_review",()=>evaluateReviewV2(monitor.daily,monitor.v2_review,monitor.performance,{costRate}),monitor.v2_review??null);
-  const divergedDays=(monitor.daily||[]).filter(x=>x.v2_diverged===true).length;
   // Recovery-эпизод тени — отрезок суток подряд, в которые градуированный пол держал её цель выше
   // базовой ступени. Прежнее условие «цель тени выше цели v1» невыполнимо по построению (пол тени
   // 40/60/80 не выше пола v1): опубликовано было 0 эпизодов при двух фактических. Теневые дни —
   // от рождения тени, разрыв Sharpe — на общем с v1 окне (аудит 2026-10-10, 3.4).
-  const episodesObserved=(()=>{let n=0,inEpisode=false;for(const x of (monitor.daily||[])){const on=x.v2_floor===true;if(on&&!inEpisode)n++;inEpisode=on;}return n;})();
+  // Сутки расхождения и эпизоды считаются на окне блока сравнения тени — том же, что разрыв Sharpe;
+  // окно публикуется в acceptance_status.window. Пока рождение тени в дневных строках, это окно с
+  // её рождения; когда оно уходит (тень старше 370 суток) — скользящее, и числа приёмки это говорят.
+  const v2Cmp=monitor.comparisons?.policy_v2_shadow,v2Rows=v2Cmp?rowsFromV1(monitor.daily,v2Cmp.from):(monitor.daily||[]);
+  const divergedDays=v2Rows.filter(x=>x.v2_diverged===true).length;
+  const episodesObserved=(()=>{let n=0,inEpisode=false;for(const x of v2Rows){const on=x.v2_floor===true;if(on&&!inEpisode)n++;inEpisode=on;}return n;})();
   const v2Born=Date.parse(monitor.strategy_meta.policy_v2_shadow?.started_at),v2ShadowDays=finite(v2Born)?Math.max(0,Math.floor((now-v2Born)/DAY)):monitor.days_elapsed;
-  monitor.v2_candidate={...policyV2CandidateMetadata(),target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state.closes,inputs:{mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,deep_window_used:finite(v2Inputs?.mvrv_percentile_deep),theta_pct:finite(monitor.v2_theta?.pct)?monitor.v2_theta.pct:null,theta_fixed_at_day:monitor.v2_theta?.fixed_at_day??null},diverges_now:finite(v2Target)&&v2Target!==decision.target_pct,days_diverged:divergedDays,acceptance:POLICY_V2_CANDIDATE.decision_record.acceptance_criteria,acceptance_status:evaluateAcceptanceV2({performance:monitor.performance,sharpeGap:monitor.comparisons?.policy_v2_shadow?.sharpe_gap??null,shadowDays:v2ShadowDays,recoveryEpisodesObserved:episodesObserved})};
+  monitor.v2_candidate={...policyV2CandidateMetadata(),target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state.closes,inputs:{mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,deep_window_used:finite(v2Inputs?.mvrv_percentile_deep),theta_pct:finite(monitor.v2_theta?.pct)?monitor.v2_theta.pct:null,theta_fixed_at_day:monitor.v2_theta?.fixed_at_day??null},diverges_now:finite(v2Target)&&v2Target!==decision.target_pct,days_diverged:divergedDays,acceptance:POLICY_V2_CANDIDATE.decision_record.acceptance_criteria,acceptance_status:evaluateAcceptanceV2({performance:monitor.performance,sharpeGap:v2Cmp?.sharpe_gap??null,shadowDays:v2ShadowDays,recoveryEpisodesObserved:episodesObserved,window:v2Cmp?{basis:v2Cmp.basis,from:v2Cmp.from,days:v2Cmp.days}:null})};
   // Публичные блоки кандидата v3 и линий «v1 с одной правкой» — когда движок вариантов вызывался.
-  // Поля движка публикуются как он их отдал; без свежего результата остаются прежние (evaluated_at
-  // показывает их возраст). Приёмка v3 считается здесь, критерии — из контракта кандидата.
+  // Поля движка публикуются как он их отдал и ТОЛЬКО из свежего ответа: слияние с прежним блоком
+  // оставляло в нём ключи прошлых прогонов — после разового отказа линии `error` (или `truncated`)
+  // стоял рядом со свежими кодами навсегда. Без свежего ответа блок линии остаётся прежним целиком
+  // (evaluated_at показывает его возраст). Своё — данные контракта и приёмку — монитор пишет поверх
+  // на каждом прогоне. Приёмка v3 считается здесь, критерии — из контракта кандидата.
   if(variantRun.ran||monitor.v3_candidate)optional("v3_candidate",()=>{
     const fresh=variantRun.ok?variantRun.published:{},v3Line=monitor.strategies.policy_v3_shadow,v3Meta=monitor.strategy_meta.policy_v3_shadow,v3Born=Date.parse(v3Meta?.started_at);
     const numbers=v3Line&&finite(v3Born)?(()=>{
-      const lineDd=closeDrawdownPctV1(monitor.daily,"policy_v3_shadow",v3Born,1-Math.abs(Number(v3Meta.start_target_pct)||0)/100*costRate),policyDd=closeDrawdownPctV1(monitor.daily,"policy_v1",v3Born,v3Meta.base?.policy_v1_nav??null),cmp=monitor.comparisons.policy_v3_shadow;
+      // Все сравнения приёмки — на одном окне, окне блока comparisons.policy_v3_shadow: с рождения
+      // кандидата, а когда рождение ушло из дневных строк — на скользящем (basis: rolling). Окно
+      // публикуется рядом с числами; без блока сравнения чисел нет вовсе. На окне с рождения
+      // просадка мерится от стартовых NAV обеих линий, на скользящем — от первой строки окна.
+      const cmp=monitor.comparisons.policy_v3_shadow,fromMs=Date.parse(cmp?.from),sinceBirth=cmp?.basis==="birth",rows=cmp?rowsFromV1(monitor.daily,cmp.from):[];
+      const lineDd=cmp?closeDrawdownPctV1(monitor.daily,"policy_v3_shadow",fromMs,sinceBirth?1-Math.abs(Number(v3Meta.start_target_pct)||0)/100*costRate:null):null,policyDd=cmp?closeDrawdownPctV1(monitor.daily,"policy_v1",fromMs,sinceBirth?v3Meta.base?.policy_v1_nav??null:null):null;
       // Эпизоды расхождения приёмки — против линии с теми же часами, а не против policy_v1 (см. контракт кандидата).
-      const base=acceptanceCriteriaV3()?.divergence_base,divergence=typeof base==="string"&&monitor.strategies[base]?divergenceEpisodesV3(monitor.daily,"policy_v3_shadow",undefined,base):null;
-      return{shadowDays:Math.max(0,Math.floor((now-v3Born)/DAY)),divergence,timingGapPp:cmp?.vs_null_gap_pp??null,drawdownWorsePp:finite(lineDd)&&finite(policyDd)?Math.abs(lineDd)-Math.abs(policyDd):null,netReturnGapPp:cmp?.net_return_gap_pp??null};
+      const base=acceptanceCriteriaV3()?.divergence_base,divergence=cmp&&typeof base==="string"&&monitor.strategies[base]?divergenceEpisodesV3(rows,"policy_v3_shadow",undefined,base):null;
+      return{shadowDays:Math.max(0,Math.floor((now-v3Born)/DAY)),window:cmp?{basis:cmp.basis,from:cmp.from,days:cmp.days}:null,divergence,timingGapPp:cmp?.vs_null_gap_pp??null,drawdownWorsePp:finite(lineDd)&&finite(policyDd)?Math.abs(lineDd)-Math.abs(policyDd):null,netReturnGapPp:cmp?.net_return_gap_pp??null};
     })():{};
-    monitor.v3_candidate={target_pct:null,evaluated_at:null,...(monitor.v3_candidate||{}),...policyV3CandidateMetadata(),...(fresh.policy_v3_shadow?{...fresh.policy_v3_shadow,evaluated_at:at}:{}),acceptance:acceptanceCriteriaV3(),acceptance_status:evaluateAcceptanceV3(numbers)};
+    monitor.v3_candidate={target_pct:null,evaluated_at:null,...(fresh.policy_v3_shadow?{...fresh.policy_v3_shadow,evaluated_at:at}:monitor.v3_candidate||{}),...policyV3CandidateMetadata(),acceptance:acceptanceCriteriaV3(),acceptance_status:evaluateAcceptanceV3(numbers)};
     monitor.variants={...(monitor.variants||{}),...Object.fromEntries(VARIANT_LINES_V1.filter(name=>name!=="policy_v3_shadow"&&fresh[name]).map(name=>[name,{...fresh[name],evaluated_at:at}]))};
   });
   // Форвард-счёт краткосрочного вердикта и теневого слоя (scripts/monitor-evidence-v1.mjs).

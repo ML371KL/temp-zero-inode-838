@@ -93,7 +93,19 @@ export function pruneDailyInputSummaryV1(daily, { now = Date.now(), keepDays = D
 // 2026-07-21: monitoring.daily at limit 370×~3.1KB ≈ 1.15 MB + decision_log 400×~1.06KB ≈ 0.42 MB
 // + non-history base ≈ 0.31 MB → ~1.88 MB steady-state without history. 1.0 MB history budget keeps
 // ~0.1 MB of slack at every limit simultaneously; a larger budget re-opens the deadlock dead zone.
-export const HISTORY_BYTE_BUDGET = 1_000_000;
+//
+// ПЕРЕСЧЁТ 14.10.2026 (ревью, Н8). Бюджет истории — остаток: кап файла минус запас стража минус всё
+// остальное на своих пределах. Выпуск 2.14.0 добавил в монитор линии, путь, блок v3 в записи журнала
+// и новые блоки, а список событий решения (предел 1 000) в прежний вывод не входил вовсе. На боевом
+// состоянии 13.10.2026 (созревший снимок новой формы, publicSnapshotAtLimitsV1): всё, кроме истории,
+// на пределах — 2,056 МБ (сейчас 1,080 МБ; дневные строки +472 КБ, события решения +372 КБ, журнал
+// смен цели +46 КБ, необязательные поля на потолках +33 КБ, служебные списки и блоки линий +49 КБ).
+// Остаток 3,000 − 0,150 − 2,056 = 0,794 МБ; бюджет 0,770 МБ оставляет 24 КБ сверх запаса стража.
+// Цена: история при такте 15 минут — 9,6 суток вместо 12,4 (918 строк по 837 байт). Сборщику нужна
+// строка семидневной давности (недельная база OI, допуск три дня) и сутки для сброса OI; витрина
+// по истории считает только такт. Прежний бюджет в 1,0 МБ при всех пределах разом давал файл
+// 3,06 МБ, и страж остановил бы сбор примерно на 600-м событии решения.
+export const HISTORY_BYTE_BUDGET = 770_000;
 export function boundedPublicHistoryV1(history, { budget = HISTORY_BYTE_BUDGET, minRows = 48, hourlyCut = null } = {}) {
   const rows = [...(history || [])];
   // Мерить обязано ровно ту форму, которая уедет в файл, — см. publicHistoryEntryV1.
@@ -130,6 +142,61 @@ export function projectedPublicSnapshotBytesV1({ snapshotBytes, snapshot, dailyL
   // beyond the remaining budget will be evicted oldest-first, so they cannot enlarge the file.
   const historyGrowth = Math.min(addedBytes(history, historyMaxRows), Math.max(0, HISTORY_BYTE_BUDGET - jsonBytesV1(history)));
   return snapshotBytes + dailyGrowth + addedBytes(decisions, decisionLogLimit) + historyGrowth;
+}
+
+// ВСЕ ЛИМИТЫ РАЗОМ. Проекция выше знает три ряда — дневные строки, журнал решений и историю — и
+// молчит обо всём остальном, что растёт до своего предела. Список событий решения (до 1 000 записей
+// по 360–380 байт) в ней не участвовал: при 22 событиях это 8 КБ, на пределе — 380 КБ, и страж
+// узнал бы о них, только когда настоящий файл подойдёт к капу, то есть остановкой сбора
+// (ревью 13.10.2026, Н8). Эта функция считает наибольший файл, который разрешают ВСЕ объявленные
+// пределы сразу:
+//  — дневные строки на пределе (свежие с входами, остальные прорежены) — как у стража;
+//  — журнал решений на пределе, все записи — формы самой свежей (после смены формы журнал
+//    заполняется новыми записями за сто часов, а не сразу);
+//  — история на своём байтовом бюджете (больше бюджета она не бывает: сборщик срезает старое);
+//  — каждый список с пределом длины (`lists`) — на пределе, запись — наибольшая из хранимых, а у
+//    пустого списка — номинал из его описания;
+//  — каждый блок с байтовым потолком (`ceilings`) — на потолке; необязательные поля снимка — на
+//    своих потолках OPTIONAL_FIELD_MAX_BYTES.
+// Пределы списков объявляет тот, кто их ведёт (монитор: monitorRetentionLimitsV1). Результат — не
+// прогноз, а верхняя граница: по ней выдаётся предупреждение заранее, отказ остаётся за стражем.
+export const PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES = 150_000;
+const valueAt = (root, path) => String(path).split(".").reduce((node, key) => (node && typeof node === "object" ? node[key] : undefined), root);
+// Сколько байт добавит значение, которого в снимке ещё нет: ключ в кавычках, двоеточие и запятая.
+const keyOverhead = (path, present) => (present ? 0 : String(path).split(".").at(-1).length + 4);
+const arrayBytes = (count, itemBytes) => (count > 0 ? count * itemBytes + (count - 1) + 2 : 2);
+export function publicSnapshotAtLimitsV1({ snapshot, snapshotBytes = jsonBytesV1(snapshot), dailyLimit, decisionLogLimit, dailyInputSummaryDays = DAILY_INPUT_SUMMARY_DAYS, historyBudget = HISTORY_BYTE_BUDGET, lists = [], ceilings = [] } = {}) {
+  const parts = [], add = (name, growth, note) => parts.push({ name, growth: Math.round(growth), note });
+  const daily = snapshot?.monitoring?.daily || [], decisions = snapshot?.monitoring?.decision_log || [], history = snapshot?.history || [];
+  if (daily.length) {
+    const sample = daily.at(-1), fresh = Math.min(dailyLimit, dailyInputSummaryDays), old = Math.max(0, dailyLimit - dailyInputSummaryDays);
+    const full = jsonBytesV1(sample), pruned = jsonBytesV1(prunedDailyRowV1(sample));
+    add("monitoring.daily", Math.max(0, fresh * full + old * pruned + (fresh + old) + 1 - jsonBytesV1(daily)), `${daily.length} → ${dailyLimit} строк: ${fresh} по ${full} Б и ${old} по ${pruned} Б`);
+  }
+  if (decisions.length) {
+    const record = jsonBytesV1(decisions.at(-1));
+    add("monitoring.decision_log", Math.max(0, arrayBytes(decisionLogLimit, record) - jsonBytesV1(decisions)), `${decisions.length} → ${decisionLogLimit} записей по ${record} Б (форма самой свежей)`);
+  }
+  // История выше бюджета — это снимок, записанный при прежнем бюджете: следующий сбор срежет её до нового.
+  if (history.length) add("history", historyBudget - jsonBytesV1(history), `${jsonBytesV1(history)} Б → бюджет ${historyBudget} Б`);
+  for (const spec of lists) {
+    const items = valueAt(snapshot, spec.path), present = Array.isArray(items);
+    const item = present && items.length ? Math.max(...items.map(jsonBytesV1)) : Number(spec.item_bytes) || 0;
+    add(spec.path, Math.max(0, arrayBytes(spec.limit, item) - (present ? jsonBytesV1(items) : 0)) + keyOverhead(spec.path, present), `${present ? items.length : 0} → ${spec.limit} записей по ${item} Б${present && items.length ? "" : " (номинал)"}`);
+  }
+  const blocks = [...ceilings, ...OPTIONAL_SNAPSHOT_FIELDS.map(name => ({ path: name, max_bytes: OPTIONAL_FIELD_MAX_BYTES[name] })), { path: "sources.etf.legs", max_bytes: OPTIONAL_FIELD_MAX_BYTES.etf_legs }];
+  for (const spec of blocks) {
+    const value = valueAt(snapshot, spec.path), present = value !== undefined, now = present ? jsonBytesV1(value) : 0;
+    add(spec.path, Math.max(0, spec.max_bytes - now) + keyOverhead(spec.path, present), `${now} Б → потолок ${spec.max_bytes} Б`);
+  }
+  const total = snapshotBytes + parts.reduce((sum, part) => sum + part.growth, 0), margin = PUBLIC_SNAPSHOT_MAX_BYTES - total;
+  return { total, margin, fits: margin > PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES, parts };
+}
+// Строка предупреждения для проверки перед публикацией: что не помещается и на чём набегает больше всего.
+export function publicSnapshotAtLimitsWarningV1(projection) {
+  if (!projection || projection.fits) return null;
+  const top = [...projection.parts].sort((a, b) => b.growth - a.growth).slice(0, 3).filter(part => part.growth > 0).map(part => `${part.name} +${(part.growth / 1e3).toFixed(0)} КБ (${part.note})`).join("; ");
+  return `snapshot at all retention limits would be ${(projection.total / 1e6).toFixed(3)} MB: margin ${(projection.margin / 1e3).toFixed(0)} KB is below ${PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES / 1e3} KB — ${top}`;
 }
 
 // ---------------------------------------------------------------------------------------------

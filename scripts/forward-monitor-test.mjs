@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { POLICY_V1, allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
-import { applyRevisionBounceToleranceV1, buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, previousPolicyTargetV1, sha256, sourceRevisionAlertsV1, treasuryBillDiscountToEffectiveAnnualPct, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
+import { LIVE_QUOTE_SOURCES_V1, applyRevisionBounceToleranceV1, buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, previousPolicyTargetV1, sha256, sourceRevisionAlertsV1, treasuryBillDiscountToEffectiveAnnualPct, updateForwardMonitorV1, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
 import { POLICY_V2_CANDIDATE } from "../docs/policy-v2-candidate.mjs";
 import { monitorResetIssues, validatePublishedAssetsV1, validateSnapshotV1 } from "./monitor-live.mjs";
 
@@ -75,6 +75,41 @@ const scalarAlerts=sourceRevisionAlertsV1(scalarPrevious.vintages,scalarCurrent.
 assert.ok(scalarAlerts.some(x=>x.quality_impact==="degraded"),"a non-temporal same-vintage rewrite must remain quality-affecting");
 const scalarDecision=buildDecisionRecordV1({generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:{},metrics,blocks,detectors:[],scores,sourceVintages:scalarCurrent.vintages,revisionAlerts:scalarAlerts});
 assert.equal(scalarDecision.decision.quality.status,"degraded");
+
+// ПАКЕТ ЖИВЫХ КОТИРОВОК (правка 14.10.2026). Сборщик ставит пакету `spot` в observed_at минимум
+// отметок времени площадок: пока самая тихая пара не сторговалась, отметка стоит, а цены остальных
+// площадок меняются. Новый срез цен при прежней отметке — не переписанный винтаж: алерта нет и
+// качество решения остаётся good. В бою это дало 181 снимок с деградацией за 83 дня, в 151 из них
+// другой причины не было.
+{
+  const packetOf=(key,observedAt,fetchedAt,data)=>{const datasets={[key]:{source:"fixture",observed_at:observedAt,fetched_at:fetchedAt,data}},states={[key]:{state:"ok",source:"fixture",observed_at:observedAt,fetched_at:fetchedAt}};return{datasets,vintages:buildSourceVintagesV1(datasets,states)};};
+  const qualityOf=(packet,alerts)=>buildDecisionRecordV1({generatedAt,regime:{strategic:"defensive",tactical:"balanced"},regimeMeta:{},metrics,blocks,detectors:[],scores,sourceVintages:packet.vintages,revisionAlerts:applyRevisionBounceToleranceV1(alerts,{currentVintages:packet.vintages,bounceState:null,now:Date.parse("2026-07-19T13:15:00.000Z")}).alerts}).decision.quality;
+  // Отметка пакета 12:58:21 — последняя сделка самой тихой пары (coinbase_usdt): её цена не изменилась, остальные ушли.
+  const STUCK="2026-07-19T12:58:21.000Z",before={coinbase:65000.1,kraken:65001,bitstamp:64999,gemini:65000.5,okx:65002,kraken_usdt:65003,coinbase_usdt:64990},after={coinbase:65120.4,kraken:65119,bitstamp:65117,gemini:65121,okx:65118.5,kraken_usdt:65122,coinbase_usdt:64990};
+  const previous=packetOf("spot",STUCK,"2026-07-19T13:00:00.000Z",before),current=packetOf("spot",STUCK,"2026-07-19T13:15:00.000Z",after);
+  assert.ok(previous.vintages.sources.spot.observed_at===current.vintages.sources.spot.observed_at&&previous.vintages.sources.spot.data_sha256!==current.vintages.sources.spot.data_sha256&&previous.vintages.sources.spot.schema_sha256===current.vintages.sources.spot.schema_sha256,"фикстура: та же отметка, та же схема, другие цены");
+  const alerts=sourceRevisionAlertsV1(previous.vintages,current.vintages,previous.datasets,current.datasets);
+  assert.deepEqual(alerts,[],"новый срез живых котировок при прежней отметке — не ревизия");
+  assert.deepEqual([qualityOf(current,alerts).status,qualityOf(current,alerts).revision_alerts,qualityOf(current,alerts).quality_affecting_revision_alerts],["good",0,0],"качество решения от нового среза цен не падает");
+  assert.deepEqual(LIVE_QUOTE_SOURCES_V1,["spot"],"перечень пакетов живых котировок — по ключам сборщика");
+  // Тот же пакет под ключом опубликованного наблюдения без рядов: правило действует как раньше.
+  for(const key of ["pegs","cftc"]){
+    const a=packetOf(key,STUCK,"2026-07-19T13:00:00.000Z",before),b=packetOf(key,STUCK,"2026-07-19T13:15:00.000Z",after),published=sourceRevisionAlertsV1(a.vintages,b.vintages,a.datasets,b.datasets);
+    assert.deepEqual(published.map(x=>[x.source,x.type,x.quality_impact,x.observed_at]),[[key,"same_vintage_rewritten","degraded",STUCK]],`${key}: тот же винтаж с другим хэшем — ревизия, влияющая на качество`);
+    assert.deepEqual([qualityOf(b,published).status,qualityOf(b,published).quality_affecting_revision_alerts],["degraded",1],`${key}: качество решения понижено, как раньше`);
+  }
+  // Смена схемы у пакета живых котировок ловится как раньше: площадка пропала из среза.
+  const venueLost=packetOf("spot",STUCK,"2026-07-19T13:15:00.000Z",{...after,okx:null}),schemaAlerts=sourceRevisionAlertsV1(previous.vintages,venueLost.vintages,previous.datasets,venueLost.datasets);
+  assert.deepEqual(schemaAlerts.map(x=>[x.source,x.type,x.quality_impact]),[["spot","schema_changed","degraded"]],"смена схемы spot — по-прежнему алерт, и только он");
+  assert.equal(qualityOf(venueLost,schemaAlerts).status,"degraded");
+  // Отметка сдвинулась — алерта не было и раньше; те же цены — тоже.
+  assert.deepEqual(sourceRevisionAlertsV1(previous.vintages,packetOf("spot","2026-07-19T13:14:02.000Z","2026-07-19T13:15:00.000Z",after).vintages),[]);
+  assert.deepEqual(sourceRevisionAlertsV1(previous.vintages,packetOf("spot",STUCK,"2026-07-19T13:15:00.000Z",before).vintages),[]);
+  // Перечень освобождает только от правила «по одному хэшу»: пакет с временными рядами судится по закрытым
+  // строкам под любым ключом — переписанная закрытая строка остаётся в журнале аудита.
+  const rowsBefore=packetOf("spot","2026-07-19T00:00:00.000Z","2026-07-19T12:00:00.000Z",[{t:"2026-07-18T00:00:00.000Z",v:100},{t:"2026-07-19T00:00:00.000Z",v:101}]),rowsAfter=packetOf("spot","2026-07-19T00:00:00.000Z","2026-07-19T13:00:00.000Z",[{t:"2026-07-18T00:00:00.000Z",v:999},{t:"2026-07-19T00:00:00.000Z",v:102}]);
+  assert.deepEqual(sourceRevisionAlertsV1(rowsBefore.vintages,rowsAfter.vintages,rowsBefore.datasets,rowsAfter.datasets).map(x=>[x.type,x.quality_impact,x.changed_rows]),[["same_vintage_rewritten","audit",1]]);
+}
 const advancingPrevious=sourcePacket("2026-07-19T12:00:00.000Z","2026-07-19T12:00:00.000Z",openPrevious.datasets.market.data);
 const advancingCurrent=sourcePacket("2026-07-19T13:00:00.000Z","2026-07-19T13:00:00.000Z",openCurrent.datasets.market.data);
 assert.deepEqual(sourceRevisionAlertsV1(advancingPrevious.vintages,advancingCurrent.vintages,advancingPrevious.datasets,advancingCurrent.datasets),[],"an advancing intraday vintage must ignore changes confined to today's open row");
@@ -200,8 +235,11 @@ const migrated=updateForwardMonitorV1({previousMonitor:legacyShadow,now:targetAt
 assert.equal(migrated.shadow_hysteresis.risk_off_confirmed_under_min_interval,8,"накопленное по старому ключу переносится, а не начинается заново");
 
 // --- Толерантность к качку источника: возврат к виденному состоянию не деградирует решение ---
-const bounceVintage=(dataSha,schemaSha)=>({sources:{spot:{state:"ok",data_sha256:dataSha,schema_sha256:schemaSha}}});
-const degradedAlert=[{source:"spot",type:"same_vintage_rewritten",quality_impact:"degraded"}];
+// Пример — пакет `pegs`: опубликованное наблюдение без временных рядов, для него правило «тот же
+// винтаж переписан» действует. Пакет живых котировок `spot`, с которого механизм начинался, такого
+// алерта больше не поднимает (LIVE_QUOTE_SOURCES_V1), но сам механизм от имени источника не зависит.
+const bounceVintage=(dataSha,schemaSha)=>({sources:{pegs:{state:"ok",data_sha256:dataSha,schema_sha256:schemaSha}}});
+const degradedAlert=[{source:"pegs",type:"same_vintage_rewritten",quality_impact:"degraded"}];
 const t0=Date.parse("2026-07-24T03:00:00.000Z");
 // Прогон 1: значение A — истории нет, состояние копится.
 let bs=applyRevisionBounceToleranceV1([],{currentVintages:bounceVintage("aaa","sch"),bounceState:null,now:t0}).bounceState;
@@ -218,17 +256,17 @@ const stale=applyRevisionBounceToleranceV1(degradedAlert,{currentVintages:bounce
 assert.equal(stale.alerts[0].quality_impact,"degraded","за пределами 24ч память не действует — ошибаемся в сторону сообщения о деградации");
 // Схемный качок ловится тем же механизмом.
 let schemaState=applyRevisionBounceToleranceV1([],{currentVintages:bounceVintage("d1","s1"),bounceState:null,now:t0}).bounceState;
-schemaState=applyRevisionBounceToleranceV1([{source:"spot",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("d2","s2"),bounceState:schemaState,now:t0+3_600_000}).bounceState;
-const schemaBack=applyRevisionBounceToleranceV1([{source:"spot",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("d3","s1"),bounceState:schemaState,now:t0+2*3_600_000});
+schemaState=applyRevisionBounceToleranceV1([{source:"pegs",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("d2","s2"),bounceState:schemaState,now:t0+3_600_000}).bounceState;
+const schemaBack=applyRevisionBounceToleranceV1([{source:"pegs",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("d3","s1"),bounceState:schemaState,now:t0+2*3_600_000});
 assert.equal(schemaBack.alerts[0].quality_impact,"audit","возврат схемы к прежней после восстановления провайдера — качок");
 // Audit-алерты и неизвестные источники не трогаются; пустой вход безопасен.
-assert.equal(applyRevisionBounceToleranceV1([{source:"spot",type:"same_vintage_rewritten",quality_impact:"audit"}],{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0+2*3_600_000}).alerts[0].quality_impact,"audit");
+assert.equal(applyRevisionBounceToleranceV1([{source:"pegs",type:"same_vintage_rewritten",quality_impact:"audit"}],{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0+2*3_600_000}).alerts[0].quality_impact,"audit");
 assert.equal(applyRevisionBounceToleranceV1([{source:"unknown",type:"schema_changed",quality_impact:"degraded"}],{currentVintages:bounceVintage("aaa","sch"),bounceState:bs,now:t0}).alerts[0].quality_impact,"degraded","источник без винтажа остаётся как есть");
 assert.deepEqual(applyRevisionBounceToleranceV1([],{currentVintages:null,bounceState:null,now:t0}).alerts,[]);
 // Память ограничена: не растёт бесконечно.
 let ring=null;
 for(let i=0;i<12;i++)ring=applyRevisionBounceToleranceV1([],{currentVintages:bounceVintage("d"+i,"s"),bounceState:ring,now:t0+i*60_000}).bounceState;
-assert.ok(ring.spot.length<=3,"кольцо памяти ограничено тремя записями на источник");
+assert.ok(ring.pegs.length<=3,"кольцо памяти ограничено тремя записями на источник");
 assert.equal(shadowTick.strategies.policy_v1.current_target_pct,metaTick.strategies.policy_v1.current_target_pct,"shadow counters must not move the allocation");
 
 // Молчаливый генезис при живом previous обязан оставлять reset-событие (класс инцидента 2026-07-21).

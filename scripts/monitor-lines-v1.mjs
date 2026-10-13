@@ -13,7 +13,6 @@ const { POLICY_V3_CANDIDATE, evaluateShadowVariantsV1, policyV3CandidateMetadata
 
 const DAY=86_400_000,HOUR=3_600_000;
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
-const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const isObject=x=>!!x&&typeof x==="object"&&!Array.isArray(x);
 const bytes=x=>Buffer.byteLength(JSON.stringify(x));
 
@@ -21,46 +20,82 @@ export const VARIANT_LINES_V1=Object.freeze(["policy_v3_shadow","v1_daily_close"
 export const TRANCHED_LINE_V1="policy_v1_tranched";
 // Состояние движка публикуется вместе с монитором. Потолок защищает публикацию: снимок, выросший
 // сверх бюджета, блокирует сбор целиком, а состояние теневого расчёта этого не стоит.
-export const VARIANTS_STATE_MAX_BYTES=48_000;
-const VARIANT_PUBLIC_MAX_BYTES=4_000,LEDGER_INPUTS_MAX_BYTES=600;
+// 48 000 → 12 000 (ревью 13.10.2026, Н8): потолок входит в проекцию размера «все лимиты разом», и
+// каждый его килобайт вычитается из запаса снимка. Состояние настоящего движка — 1,7 КБ на боевых
+// входах (четыре линии, запись входов последнего фикса кандидата); 12 КБ — семикратный запас.
+export const VARIANTS_STATE_MAX_BYTES=12_000;
+// Потолок блока одной линии в снимке (поля движка как он их отдал).
+export const VARIANT_PUBLIC_MAX_BYTES=4_000;
+const LEDGER_INPUTS_MAX_BYTES=600;
+
+// Цель линии из ответа движка. Исполняется только число: typeof "number", конечное, в 0…100; null и
+// отсутствие поля — законное «держать прежнюю цель». Всё остальное — тоже «держать», но с кодом
+// причины: приведение типов исполняло бы мусор как цель (true → 1 %, "80" и [80] → 80 %, false, []
+// и " " → 0 %), а число вне 0…100 — признак сломанного расчёта, а не повод встать в край лестницы.
+export function acceptLineTargetV1(value){
+  if(value===null||value===undefined)return{target:null,rejected:null};
+  if(typeof value!=="number")return{target:null,rejected:"target_not_number"};
+  if(!Number.isFinite(value))return{target:null,rejected:"target_not_finite"};
+  if(value<0||value>100)return{target:null,rejected:"target_out_of_range"};
+  return{target:value+0,rejected:null};
+}
 
 // Вызов движка вариантов. Возвращает цели линий (number либо null — «держать прежнюю»), новое
-// состояние и блоки для публикации. Любой отказ — error и прежнее состояние.
+// состояние, блоки для публикации и коды причин, по которым цель линии не принята (`rejected`).
+// Отказ движка целиком — error и прежнее состояние; отказ одной линии остальных не трогает.
+// Функция не бросает исключений: ответ движка читается внутри try — геттер, бросающий на чтении
+// поля, такой же отказ, как исключение в вызове. Иначе исключение уходило в сборщик, и тот
+// повторял прогон без всего теневого слоя.
 export function runShadowVariantsV1({engine=evaluateShadowVariantsV1,now,inputs,state}={}){
-  const previousState=isObject(state)?state:{},hold=Object.fromEntries(VARIANT_LINES_V1.map(name=>[name,null]));
-  const fail=message=>({ran:true,ok:false,error:String(message).slice(0,300),state:previousState,targets:hold,published:{}});
-  if(!isObject(inputs))return{ran:false,ok:true,error:null,state:previousState,targets:hold,published:{}};
-  let result;
+  const previousState=isObject(state)?state:{},hold=()=>Object.fromEntries(VARIANT_LINES_V1.map(name=>[name,null]));
+  const fail=message=>({ran:true,ok:false,error:String(message).slice(0,300),state:previousState,targets:hold(),published:{},rejected:{}});
+  if(!isObject(inputs))return{ran:false,ok:true,error:null,state:previousState,targets:hold(),published:{},rejected:{}};
+  let result,variants,rawState;
   try{result=engine({now,inputs,state:structuredClone(previousState)});}
   catch(error){return fail(`engine_threw: ${error?.message||error}`);}
-  if(!isObject(result)||!isObject(result.variants))return fail("engine_result_invalid");
-  let nextState=previousState,error=null;
-  try{
-    if(!isObject(result.state))error="engine_state_invalid";
-    else if(bytes(result.state)>VARIANTS_STATE_MAX_BYTES)error=`engine_state_too_large: ${bytes(result.state)} > ${VARIANTS_STATE_MAX_BYTES}`;
-    else nextState=JSON.parse(JSON.stringify(result.state));
-  }catch(e){error=`engine_state_not_serializable: ${e?.message||e}`;}
-  const targets={},published={};
-  for(const name of VARIANT_LINES_V1){
-    const variant=result.variants[name];
-    targets[name]=isObject(variant)&&finite(variant.target_pct)?clamp(Number(variant.target_pct),0,100):null;
-    if(!isObject(variant))continue;
-    try{const copy=JSON.parse(JSON.stringify(variant));published[name]=bytes(copy)<=VARIANT_PUBLIC_MAX_BYTES?copy:{target_pct:targets[name],truncated:true};}
-    catch{published[name]={target_pct:targets[name],truncated:true};}
-  }
+  try{variants=isObject(result)?result.variants:null;rawState=isObject(result)?result.state:null;}
+  catch(error){return fail(`engine_result_unreadable: ${error?.message||error}`);}
+  if(!isObject(variants))return fail("engine_result_invalid");
   // Состояние и цели движка — одно целое: если состояние не принято, цели этого прогона тоже.
-  return error?fail(error):{ran:true,ok:true,error:null,state:nextState,targets,published};
+  let nextState;
+  try{
+    if(!isObject(rawState))return fail("engine_state_invalid");
+    if(bytes(rawState)>VARIANTS_STATE_MAX_BYTES)return fail(`engine_state_too_large: ${bytes(rawState)} > ${VARIANTS_STATE_MAX_BYTES}`);
+    nextState=JSON.parse(JSON.stringify(rawState));
+  }catch(e){return fail(`engine_state_not_serializable: ${e?.message||e}`);}
+  const targets=hold(),published={},rejected={};
+  for(const name of VARIANT_LINES_V1){
+    try{
+      const variant=variants[name];
+      if(variant===undefined||variant===null)continue;
+      if(!isObject(variant)){rejected[name]="line_not_object";published[name]={target_pct:null,target_rejected:rejected[name]};continue;}
+      const accepted=acceptLineTargetV1(variant.target_pct);
+      let copy;
+      try{copy=JSON.parse(JSON.stringify(variant));if(!isObject(copy)||bytes(copy)>VARIANT_PUBLIC_MAX_BYTES)copy={target_pct:accepted.target,truncated:true};}
+      catch{copy={target_pct:accepted.target,truncated:true};}
+      // В блоке линии — принятая цель, а не то, что прислал движок: `target_pct: true` в снимке
+      // прочитали бы как число. Почему цели нет, говорит target_rejected.
+      if(accepted.rejected){rejected[name]=accepted.rejected;copy={...copy,target_pct:null,target_rejected:accepted.rejected};}
+      targets[name]=accepted.target;published[name]=copy;
+    }catch{targets[name]=null;rejected[name]="line_unreadable";published[name]={target_pct:null,target_rejected:rejected[name]};}
+  }
+  return{ran:true,ok:true,error:null,state:nextState,targets,published,rejected};
 }
 
 // Блок кандидата v3 для записи hash-журнала: цель и входы хэшируются вместе с решением v1, как
 // блок `v2`. Все значения явно ??null — undefined-ключ невоспроизводим из публикации. Запись
 // хранится 400 штук, поэтому блок короткий: входы кандидата — как их отдал движок, а если они
 // длиннее 600 байт — их sha256 (сами входы тогда остаются в `v3_candidate.inputs` снимка).
+// Поля читаются тем же строгим правилом, что и цель: число — только number, метка — только
+// короткая строка. Иначе ответ движка с длинной строкой на месте метки режима раздувал бы каждую
+// из 400 записей журнала на килобайты, и через сто часов снимок упёрся бы в кап публикации.
+const LEDGER_LABEL_MAX_CHARS=40;
 export function variantLedgerV1(run,sha256){
   const v3=run.published.policy_v3_shadow||{},targets=run.targets,inputs=isObject(v3.inputs)?v3.inputs:null;
+  const number=x=>typeof x==="number"&&Number.isFinite(x)?x:null,label=x=>typeof x==="string"&&x.length<=LEDGER_LABEL_MAX_CHARS?x:null;
   return{
-    target_pct:targets.policy_v3_shadow??null,base_target_pct:finite(v3.base_target_pct)?Number(v3.base_target_pct):null,
-    state:v3.state??null,candidate:v3.candidate??null,fix_at:v3.fix_at??null,floor_rung:v3.floor?.rung??null,
+    target_pct:targets.policy_v3_shadow??null,base_target_pct:number(v3.base_target_pct),
+    state:label(v3.state),candidate:label(v3.candidate),fix_at:label(v3.fix_at),floor_rung:number(v3.floor?.rung),
     inputs:inputs===null?null:bytes(inputs)<=LEDGER_INPUTS_MAX_BYTES?inputs:{sha256:sha256(inputs)},
     lines:{v1_daily_close:targets.v1_daily_close??null,v1_floor_handoff:targets.v1_floor_handoff??null,v1_no_cftc:targets.v1_no_cftc??null},
   };
@@ -115,11 +150,15 @@ export function divergenceEpisodesV3(daily,line="policy_v3_shadow",counter=V3.co
 //  — не хуже; число — допуск в п.п.); max_drawdown_worse_pp_max — насколько глубже просадка по
 //  дневным закрытиям общего окна; falsify_net_return_gap_pp на окне не короче falsify_min_days —
 //  отклонение (знак порога не важен: отклоняет отставание больше его модуля).
+//  window — окно, на котором монитор посчитал эпизоды, тайминг, просадку и разницу доходностей
+//  ({basis, from, days} блока comparisons.policy_v3_shadow): с рождения кандидата, а после 370 суток
+//  его жизни — скользящее (basis: rolling). Публикуется как есть: числа приёмки не имеют права
+//  сменить окно молча. Теневые сутки от окна не зависят — это возраст линии.
 const ACCEPTANCE_KEYS_V3=["shadow_days_min","divergence_base","min_divergence_episodes","timing_pp_not_worse_than_v1","max_drawdown_worse_pp_max","falsify_net_return_gap_pp","falsify_min_days"];
 export const acceptanceCriteriaV3=()=>POLICY_V3_CANDIDATE?.decision_record?.acceptance_criteria??null;
-export function evaluateAcceptanceV3({criteria=acceptanceCriteriaV3(),shadowDays=null,divergence=null,timingGapPp=null,drawdownWorsePp=null,netReturnGapPp=null}={}){
+export function evaluateAcceptanceV3({criteria=acceptanceCriteriaV3(),shadowDays=null,window=null,divergence=null,timingGapPp=null,drawdownWorsePp=null,netReturnGapPp=null}={}){
   const round=x=>finite(x)?Number(Number(x).toFixed(4))+0:null;
-  const numbers={shadow_days:finite(shadowDays)?Number(shadowDays):null,divergence_base:typeof criteria?.divergence_base==="string"?criteria.divergence_base:null,divergence_episodes:finite(divergence?.episodes)?Number(divergence.episodes):null,divergence_days:finite(divergence?.days)?Number(divergence.days):null,timing_gap_pp_vs_v1:round(timingGapPp),max_drawdown_worse_pp:round(drawdownWorsePp),net_return_gap_pp_vs_v1:round(netReturnGapPp)};
+  const numbers={shadow_days:finite(shadowDays)?Number(shadowDays):null,window:isObject(window)?{basis:window.basis??null,from:window.from??null,days:finite(window.days)?Number(window.days):null}:null,divergence_base:typeof criteria?.divergence_base==="string"?criteria.divergence_base:null,divergence_episodes:finite(divergence?.episodes)?Number(divergence.episodes):null,divergence_days:finite(divergence?.days)?Number(divergence.days):null,timing_gap_pp_vs_v1:round(timingGapPp),max_drawdown_worse_pp:round(drawdownWorsePp),net_return_gap_pp_vs_v1:round(netReturnGapPp)};
   const missing=ACCEPTANCE_KEYS_V3.filter(key=>!isObject(criteria)||criteria[key]===undefined||criteria[key]===null);
   if(missing.length)return{...numbers,falsified:false,meets:null,status:"collecting",missing_criteria:missing};
   const timingRule=criteria.timing_pp_not_worse_than_v1,timingFloor=timingRule===true?0:finite(timingRule)&&typeof timingRule!=="boolean"?-Math.abs(Number(timingRule)):null;

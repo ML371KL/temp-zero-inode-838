@@ -363,6 +363,54 @@ for(const [id,cfg] of Object.entries(FRED_SERIES)){
   eq(untouched.trimmed,0,"при запасе бюджета история не режется");
   const floor=boundedPublicHistoryV1(rows,{budget:1,minRows:48});
   eq(floor.history.length,48,"минимум строк сохраняется даже при нулевом бюджете");
+  // ---- Проекция «все лимиты разом» (ревью 13.10.2026, Н8) ----
+  // Страж выше знает дневные строки, журнал и историю. Событий решения (до 1 000 записей) и
+  // остальных списков монитора он не видел: о них сообщила бы только остановка сбора.
+  {
+    const {publicSnapshotAtLimitsV1,publicSnapshotAtLimitsWarningV1,PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES}=await import("./public-snapshot-contract.mjs");
+    const {monitorRetentionLimitsV1,REVISION_ALERT_LIMIT}=await import("./forward-monitor-v1.mjs");
+    const row={t:"2026-10-01T00:00:00.000Z",input_summary:{m:[1,2,3]},nav:{a:1}},record={t:"x",v3:{a:1}},event={t:"e",h:"0123456789"},bigEvent={...event,h:"0123456789abcdef"};
+    const fake={monitoring:{daily:[row],decision_log:[{t:"x"},record],decision_events:[event,bigEvent],revision_alerts:[],variants_state:{k:1}},history:[{h:1},{h:2}],tick_diff:{families:[],detectors:[]}};
+    const args={snapshot:fake,snapshotBytes:bytes(fake),dailyLimit:5,decisionLogLimit:4,dailyInputSummaryDays:2,historyBudget:100,lists:[{path:"monitoring.decision_events",limit:10},{path:"monitoring.revision_alerts",limit:3,item_bytes:50},{path:"monitoring.absent_list",limit:2,item_bytes:7}],ceilings:[{path:"monitoring.variants_state",max_bytes:40},{path:"monitoring.absent_block",max_bytes:30}]};
+    const p=publicSnapshotAtLimitsV1(args),part=name=>p.parts.find(x=>x.name===name)?.growth;
+    eq(part("monitoring.daily"),2*bytes(row)+3*bytes(prunedDailyRowV1(row))+5+1-bytes(fake.monitoring.daily),"все лимиты: дневные строки на пределе — свежие с входами, остальные прорежены");
+    eq(part("monitoring.decision_log"),4*bytes(record)+3+2-bytes(fake.monitoring.decision_log),"все лимиты: журнал на пределе, все записи — формы самой свежей");
+    eq(part("history"),100-bytes(fake.history),"все лимиты: история — на своём байтовом бюджете");
+    eq(part("monitoring.decision_events"),10*bytes(bigEvent)+9+2-bytes(fake.monitoring.decision_events),"все лимиты: список на пределе длины, запись — наибольшая из хранимых");
+    eq(part("monitoring.revision_alerts"),3*50+2+2-2,"все лимиты: пустой список считается по номиналу записи");
+    eq(part("monitoring.absent_list"),2*7+1+2+"absent_list".length+4,"все лимиты: списку, которого в снимке ещё нет, добавляется и ключ");
+    eq(part("monitoring.variants_state"),40-bytes(fake.monitoring.variants_state),"все лимиты: блок с байтовым потолком — на потолке");
+    eq(part("monitoring.absent_block"),30+"absent_block".length+4,"все лимиты: блоку, которого ещё нет, добавляется и ключ");
+    eq([part("tick_diff"),part("regime_birth"),part("sources.etf.legs")],[OPTIONAL_FIELD_MAX_BYTES.tick_diff-bytes(fake.tick_diff),OPTIONAL_FIELD_MAX_BYTES.regime_birth+"regime_birth".length+4,OPTIONAL_FIELD_MAX_BYTES.etf_legs+"legs".length+4],"все лимиты: необязательные поля снимка — на своих потолках");
+    eq(p.total,bytes(fake)+p.parts.reduce((sum,x)=>sum+x.growth,0),"все лимиты: итог — снимок плюс рост каждой части");
+    eq([p.margin,p.fits,publicSnapshotAtLimitsWarningV1(p)],[PUBLIC_SNAPSHOT_MAX_BYTES-p.total,true,null],"все лимиты: помещается — предупреждения нет");
+    // История, записанная при прежнем бюджете, больше нового: следующий сбор срежет её — рост отрицательный.
+    eq(publicSnapshotAtLimitsV1({...args,historyBudget:5}).parts.find(x=>x.name==="history").growth,5-bytes(fake.history),"все лимиты: история выше бюджета считается по бюджету");
+    // Список на пределе не растёт, блок на потолке — тоже.
+    const full=publicSnapshotAtLimitsV1({...args,lists:[{path:"monitoring.decision_events",limit:2}],ceilings:[{path:"monitoring.variants_state",max_bytes:3}]});
+    eq([full.parts.find(x=>x.name==="monitoring.decision_events").growth,full.parts.find(x=>x.name==="monitoring.variants_state").growth],[bytes([bigEvent,bigEvent])-bytes(fake.monitoring.decision_events),0],"все лимиты: заполненный список добирает только до наибольшей записи, блок выше потолка не уменьшается");
+    // Предупреждение: запас не больше запаса стража. Граница строгая, как у стража (> 150 КБ).
+    const grown=p.parts.reduce((sum,x)=>sum+x.growth,0);
+    const atEdge=publicSnapshotAtLimitsV1({...args,snapshotBytes:PUBLIC_SNAPSHOT_MAX_BYTES-PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES-grown}),inside=publicSnapshotAtLimitsV1({...args,snapshotBytes:PUBLIC_SNAPSHOT_MAX_BYTES-PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES-grown-1});
+    eq([atEdge.margin,atEdge.fits,inside.fits],[PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES,false,true],"все лимиты: запас ровно в 150 КБ — уже предупреждение");
+    const warning=publicSnapshotAtLimitsWarningV1(atEdge);
+    ok(typeof warning==="string"&&warning.includes("at all retention limits")&&warning.includes("2.850 MB")&&warning.includes("margin 150 KB")&&warning.includes("regime_birth")&&warning.includes("tick_diff"),`все лимиты: предупреждение называет размер, запас и самые большие части: ${warning}`);
+    eq(PUBLIC_SNAPSHOT_GUARD_MARGIN_BYTES,150_000,"запас стража объявлен одним числом");
+    // Прежняя проекция стража от новых параметров не зависит: отказ остаётся там, где был.
+    eq(projectedPublicSnapshotBytesV1({snapshotBytes:1000,snapshot:fake,dailyLimit:5,decisionLogLimit:4,historyMaxRows:5,dailyInputSummaryDays:2}),1000+(2*bytes(row)+3*bytes(prunedDailyRowV1(row))+5+1-bytes(fake.monitoring.daily))+2*bytes(record)+Math.min(3*bytes({h:2}),Math.max(0,HISTORY_BYTE_BUDGET-bytes(fake.history))),"проекция стража считается как раньше");
+    // Пределы монитора объявлены в одном месте и входят в проекцию на закоммиченном снимке.
+    const limits=monitorRetentionLimitsV1(),cfg=MODEL_POLICY_V1.forward_monitoring;
+    eq([limits.dailyLimit,limits.decisionLogLimit,limits.lists.find(x=>x.path==="monitoring.decision_events").limit,limits.lists.find(x=>x.path==="monitoring.revision_alerts").limit],[cfg.daily_history_days,cfg.observation_log_limit,cfg.decision_event_limit,REVISION_ALERT_LIMIT],"пределы монитора берутся из контракта и из его же констант");
+    if(snap.monitoring?.daily?.length&&Array.isArray(snap.monitoring.decision_events)){
+      const live=publicSnapshotAtLimitsV1({snapshot:snap,snapshotBytes:bytes(snap),...limits}),events=live.parts.find(x=>x.name==="monitoring.decision_events");
+      ok(events.growth>=(cfg.decision_event_limit-snap.monitoring.decision_events.length)*300,`события решения входят в проекцию на своём пределе: ${events.growth} Б`);
+      ok(live.total>=bytes(snap)+events.growth-HISTORY_BYTE_BUDGET&&Number.isFinite(live.margin),"проекция на закоммиченном снимке считается");
+    }
+    // Бюджет истории — остаток: кап минус запас стража минус всё остальное на пределах (вывод — в
+    // public-snapshot-contract.mjs). Менять только вместе с пересчётом «все лимиты разом».
+    eq(HISTORY_BYTE_BUDGET,770_000,"бюджет истории — по выводу 14.10.2026");
+    eq(REVISION_ALERT_LIMIT,40,"буфер пересмотров источников — 40 записей");
+  }
 }
 
 // ---- Неполная семья предупреждает, но не поддерживает ----
