@@ -8,7 +8,7 @@ import {
   closedDaysOnly, krakenDatedBasis, oiPurgeWindow,
   updateCanonRegistry, carryCanonDays, ETF_CANON_HOLD_TTL, ETF_CANON_HOLD_MAX_DAYS, ETF_CANON_REGISTRY_TTL, ETF_LEG_NAMES, parseEtfFlowJson,
   exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC,
-  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, buildVariantInputsV1, VALUATION_LEVELS
+  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS
 } from "./fetch-snapshot.mjs";
 import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES,
   optionalFieldProblemsV1, optionalSnapshotProblemsV1, optionalSnapshotBytesV1, OPTIONAL_FIELD_MAX_BYTES } from "./public-snapshot-contract.mjs";
@@ -787,6 +787,28 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   eq(carryCanonDays(canon(1),"мусор").days,[],"испорченный реестр не роняет сборку");
   eq(carryCanonDays([],seeded).days,[],"пустой канон — нечего удерживать");
   const frozen=JSON.stringify(seeded);carryCanonDays(canon(2),seeded);eq(JSON.stringify(seeded),frozen,"удержание не мутирует реестр");
+  // Ревью 13.10.2026. Негодная метка времени в записи реестра — число вне диапазона Date, строка с
+  // числом, выходной, день из будущего — роняла dayKey, а с ним весь адаптер потоков ETF на каждом такте.
+  const SAT=(()=>{let t=day0;while(new Date(t).getUTCDay()!==6)t+=D;return t;})();
+  for(const [bad,why] of [[1e300,"число вне диапазона Date"],[8.64e15+1,"за пределом Date"],[String(day0),"строка с числом"],[NaN,"NaN"],[Infinity,"бесконечность"],[null,"null"],[SAT-7*D,"суббота"],[NOWMS+2*H,"больше часа вперёд"]]){
+    const poisoned=[...seeded.filter(x=>x.t!==day0),{t:bad,v:1e8,at:ago(1),from:"The Block"}];
+    let carried,registry;
+    try{carried=carryCanonDays(canon(1),poisoned);registry=updateCanonRegistry(poisoned,canon(1),"The Block");}catch(e){ok(false,`запись реестра «${why}» не имеет права ронять удержание: ${e.message}`);continue;}
+    eq(carried.days,[],`запись реестра «${why}» не удерживается`);
+    ok(registry.every(x=>typeof x.t==="number"&&x.t<=day1),`запись реестра «${why}» в новый реестр не переносится`);
+  }
+  // Зеркала ставят один и тот же день на разные метки времени (12:00 и 00:00 UTC): сравнение в
+  // миллисекундах считало день реестра «за краем» того же дня канона и вписывало его в ряд дважды.
+  const midnight=canon(0).map(x=>({t:x.t-NOON,v:x.v}));
+  const sameDay=carryCanonDays(midnight,seeded);
+  eq(sameDay.days,[],"день, который канон уже несёт под другой меткой времени, не удерживается вторым экземпляром");
+  eq(sameDay.series.length,midnight.length,"и ряд не получает дубля дня");
+  const lagMidnight=carryCanonDays(midnight.slice(0,-1),seeded);
+  eq(lagMidnight.days.map(x=>x.t),[day0-NOON],"удержанный день встаёт на метку времени канона");
+  eq(new Set(lagMidnight.series.map(x=>new Date(x.t).toISOString().slice(0,10))).size,lagMidnight.series.length,"в ряду с удержанным днём каждый день один раз");
+  const mixed=updateCanonRegistry(seeded,midnight,"The Block");
+  eq(mixed.length,5,"реестр при смене метки времени зеркала не раздваивает дни");
+  eq(new Set(mixed.map(x=>new Date(x.t).toISOString().slice(0,10))).size,5,"один день — одна запись реестра");
 
   // --- общий предел хвоста: слой SosoValue получает только остаток ---
   const soso=all.map(t=>({t:t-NOON,v:val(t)})),seen=Object.fromEntries(soso.slice(-2).map(x=>[new Date(x.t).toISOString().slice(0,10),x.v]));
@@ -953,6 +975,10 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   // Пока кандидат тот же, запись ПЕРЕНОСИТСЯ из прошлого снимка без изменений — что бы ни менялось вокруг.
   const later={...args,previous:{...before,metrics:metricsAt({etf:-1}),regime_meta:meta("transition","balanced"),regime_birth:birth},now:now+5*36e5,price:79000,metrics:metricsAt({etf:1}),blocks:blocksAt(-6.25)};
   eq(buildRegimeBirthV1(later).strategic,birth.strategic,"запись о рождении переносится, пока кандидат тот же");
+  // Ревью 13.10.2026: запись с меткой позже такта (часы шагнули назад, испорченное состояние) не переносится —
+  // самопроверка живого кандидата отвергала бы снимок на каждом такте до смены кандидата.
+  eq(buildRegimeBirthV1({...later,previous:{...later.previous,regime_birth:{...later.previous.regime_birth,strategic:{...birth.strategic,t:new Date(later.now+60_000).toISOString()}}}}).strategic,null,"запись о рождении из будущего не переносится");
+  eq(buildRegimeBirthV1({...later,previous:{...later.previous,regime_birth:{...later.previous.regime_birth,strategic:{...birth.strategic,t:new Date(later.now).toISOString()}}}}).strategic?.t,new Date(later.now).toISOString(),"запись с меткой ровно этого такта переносится");
   eq(buildRegimeBirthV1({...later,previous:{...later.previous,regime_birth:undefined}}).strategic,null,"прошлый снимок без записи (состояние прежней версии) — null до следующей смены кандидата");
   eq(buildRegimeBirthV1({...later,previous:{...later.previous,regime_birth:{strategic:{...birth.strategic,candidate:"defensive"}}}}).strategic,null,"перенесённая запись о ДРУГОМ кандидате не годится");
   // Краткосрочный горизонт: блоков нет, семьи — только краткосрочные голосующие, детекторы — только его.
@@ -985,17 +1011,48 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
 
 // ПРЕДУПРЕЖДЕНИЯ О ДАННЫХ.
 {
-  const legs=(...states)=>["The Block","The Block (tbstat)","SosoValue"].slice(0,states.length).map((name,i)=>states[i]==="ok"?{name,state:"ok"}:{name,state:"fail",error:`HTTP ${states[i]}`});
-  eq(buildDataWarningsV1({etfLegs:legs(410,"ok",404)}),[{source:"etf",code:"redundancy_lost",alive:1,total:3,text:"Потоки ETF идут с одного источника из трёх",affects:["etf_regime"]}],"одна живая нога из трёх — потеря резерва (положение 10.10.2026)");
-  eq(buildDataWarningsV1({etfLegs:legs("ok","ok",404)}),[],"две живые ноги — резерв есть, предупреждения нет");
-  eq(buildDataWarningsV1({etfLegs:legs("ok","ok","ok")}),[]);
-  eq(buildDataWarningsV1({etfLegs:legs(503,503,503)})[0].text,"Ни один из трёх источников потоков ETF не ответил");
-  eq(buildDataWarningsV1({etfLegs:legs("ok",503)})[0].text,"Потоки ETF идут с одного источника из двух");
+  const T=Date.parse("2026-10-13T12:00:00.000Z"),MIN=60_000,ago=min=>new Date(T-min*MIN).toISOString();
+  // Ноги: "ok" либо [код отказа, сколько минут нога уже лежит] (без второго числа — без метки since).
+  const legs=(...states)=>["The Block","The Block (tbstat)","SosoValue"].slice(0,states.length).map((name,i)=>states[i]==="ok"?{name,state:"ok"}:{name,state:"fail",error:`HTTP ${[].concat(states[i])[0]}`,...([].concat(states[i])[1]===undefined?{}:{since:ago([].concat(states[i])[1])})});
+  const warn=(etfLegs,o={})=>buildDataWarningsV1({etfLegs,now:T,...o});
+  eq(ETF_REDUNDANCY_CONFIRM_MS,45*MIN,"резерв должен отсутствовать 45 минут подряд");
+  eq(warn(legs([410,5000],"ok",[404,6000])),[{source:"etf",code:"redundancy_lost",alive:1,total:3,since:ago(5000),text:"Потоки ETF идут с одного источника из трёх",affects:["etf_regime"]}],"одна живая нога из трёх дольше порога — потеря резерва (положение 10.10.2026); резерва нет с момента ВТОРОГО отказа");
+  eq(warn(legs("ok","ok",[404,6000])),[],"две живые ноги — резерв есть, предупреждения нет");
+  eq(warn(legs("ok","ok","ok")),[]);
+  // Ревью 13.10.2026: зеркало моргнуло на такт-два — предупреждение не ставится.
+  eq(warn(legs([503,0],"ok",[404,6000])),[],"зеркало не ответило в этом такте — ещё не потеря резерва");
+  eq(warn(legs([503,30],"ok",[404,6000])),[],"полчаса без резерва — ещё нет");
+  eq(warn(legs([503,44],"ok",[404,6000])),[]);
+  eq(warn(legs([503,45],"ok",[404,6000])).map(x=>[x.code,x.since]),[["redundancy_lost",ago(45)]],"ровно порог — предупреждение есть, и оно называет начало");
+  eq(warn(legs([503,6000],"ok",[404,10])),[],"счёт идёт от отказа, ПОСЛЕ которого живая нога осталась одна, а не от самого давнего");
+  eq(warn(legs([503],"ok",[404])),[],"ноги без метки начала считаются отказавшими только что");
+  eq(warn(legs([503,-10],"ok",[404,6000])),[],"метка начала из будущего — серия считается начавшейся сейчас");
+  eq(warn(legs([503,100],[503,60],[503,50]))[0].text,"Ни один из трёх источников потоков ETF не ответил");
+  eq(warn(legs([503,100],[503,60],[503,50]))[0].since,ago(60),"без резерва — с отказа предпоследней ноги");
+  eq(warn(legs("ok",[503,90]))[0].text,"Потоки ETF идут с одного источника из двух");
   eq(buildDataWarningsV1({}),[],"нет ног и нет сверки — нет предупреждений");
-  const both=buildDataWarningsV1({etfLegs:legs(410,"ok",404),flowSupplyCheck:{days:30,gap_btc:-61725.28}});
+  // Метка начала серии переносится, пока нога лежит, и сбрасывается удачным ответом.
+  const first=annotateEtfLegOutagesV1(legs([503],"ok",[404]),null,T);
+  eq(first.map(x=>x.since),[ago(0),undefined,ago(0)],"первый отказ помечается текущим моментом; живая нога метки не несёт");
+  const second=annotateEtfLegOutagesV1(legs([503],"ok",[404]),first,T+15*MIN);
+  eq(second.map(x=>x.since),[ago(0),undefined,ago(0)],"нога лежит второй такт — начало серии прежнее");
+  const healed=annotateEtfLegOutagesV1(legs("ok","ok",[404]),second,T+30*MIN);
+  eq(healed.map(x=>x.since),[undefined,undefined,ago(0)],"ответившая нога метку теряет");
+  eq(annotateEtfLegOutagesV1(legs([503],"ok",[404]),healed,T+45*MIN).map(x=>x.since),[ago(-45),undefined,ago(0)],"новый отказ — новая серия");
+  eq(annotateEtfLegOutagesV1(legs([503]),[{name:"The Block",state:"fail",since:ago(-600)}],T)[0].since,ago(0),"метка из будущего в прошлом снимке заменяется текущим моментом");
+  eq(annotateEtfLegOutagesV1(legs([503]),[{name:"The Block",state:"fail",since:"мусор"}],T)[0].since,ago(0));
+  eq(annotateEtfLegOutagesV1(legs([503]),"мусор",T)[0].since,ago(0),"негодный прошлый список не роняет сборку");
+  eq(annotateEtfLegOutagesV1(null,first,T),null);
+  // Сквозная серия на такте 15 минут: моргание в один и два такта молчит, отказ дольше порога — нет.
+  { let prev=null;const seen=[];for(const [i,state] of [[0,"ok"],[1,[503]],[2,"ok"],[3,[503]],[4,[503]],[5,"ok"],[6,[503]],[7,[503]],[8,[503]],[9,[503]],[10,"ok"]]){const now=T+i*15*MIN,cur=annotateEtfLegOutagesV1(legs(state,"ok",[404]),prev,now);seen.push(buildDataWarningsV1({etfLegs:cur,now}).length);prev=cur;}
+    eq(seen,[0,0,0,0,0,0,0,0,0,1,0],"одиночный и двойной сбой зеркала предупреждения не дают; на четвёртом такте подряд оно появляется и снимается первым же ответом"); }
+  const both=buildDataWarningsV1({etfLegs:legs([410,5000],"ok",[404,6000]),flowSupplyCheck:{days:30,gap_btc:-61725.28},now:T});
   eq(both.map(x=>x.code),["exchange_flow_supply_mismatch","redundancy_lost"],"порядок предупреждений постоянный");
   eq(optionalFieldProblemsV1("data_warnings",both),[],"предупреждения проходят контракт публичного снимка");
-  eq(optionalFieldProblemsV1("etf_legs",legs(410,"ok",404)),[],"ноги проходят контракт публичного снимка");
+  eq(optionalFieldProblemsV1("etf_legs",legs([410,5000],"ok",[404])),[],"ноги проходят контракт публичного снимка");
+  ok(optionalFieldProblemsV1("etf_legs",[{name:"The Block",state:"ok",since:ago(5)}]).length===1,"у живой ноги метки начала отказа не бывает");
+  ok(optionalFieldProblemsV1("etf_legs",[{name:"The Block",state:"fail",error:"HTTP 503",since:"вчера"}]).length===1,"метка начала отказа — дата");
+  ok(optionalFieldProblemsV1("data_warnings",[{source:"etf",code:"redundancy_lost",text:"т",affects:[],since:5}]).length===1,"начало условия в предупреждении — дата");
 }
 
 // ВХОДЫ ДВИЖКА ТЕНЕВЫХ ВАРИАНТОВ (SPEC 1.4): форма.

@@ -735,7 +735,10 @@ const ETF_CANON_REGISTRY_TAIL = 5;
 // его истечения ряд становится короче принятого, и пакет обязан оставаться помеченным, а не
 // «выздороветь» на втором снимке. Неделя — тот же горизонт, на котором протухает сам канон.
 const ETF_CANON_REGISTRY_TTL = 7 * DAY;
-const canonRegistryEntry=x=>!!x&&finite(x.t)&&finite(x.v)&&finite(Date.parse(x.at||""));
+// Запись реестра годна, только если её день — настоящий торговый день не из будущего: метка времени —
+// число в диапазоне Date (строка с числом и 1e300 роняли dayKey и вместе с ним весь адаптер потоков ETF),
+// будний день, не позже текущего часа. Негодная запись не удерживается и пакет не помечает.
+const canonRegistryEntry=x=>!!x&&typeof x.t==="number"&&Number.isFinite(x.t)&&Math.abs(x.t)<8.64e15&&x.t<=NOW+HOUR&&![0,6].includes(new Date(x.t).getUTCDay())&&finite(x.v)&&finite(Date.parse(x.at||""));
 // Новый реестр по прошлому и по живому канону этого прогона. `liveCanon=null` — зеркала не ответили:
 // реестр только стареет. Метка первого принятия (`at`) переносится как есть и не освежается ничем.
 function updateCanonRegistry(prevRegistry,liveCanon,canonName){
@@ -745,9 +748,10 @@ function updateCanonRegistry(prevRegistry,liveCanon,canonName){
     const key=dayKey(row.t),old=prev.get(key),oldAt=Date.parse(old?.at||"");
     out.set(key,{t:Number(row.t),v:Number(row.v),at:finite(oldAt)&&oldAt<=NOW?old.at:iso(NOW),from:old?.from||canonName});
   }
-  for(const [key,x] of prev)if(Number(x.t)>edge&&!out.has(key))out.set(key,{t:Number(x.t),v:Number(x.v),at:x.at,from:x.from||null});
+  const edgeDay=liveCanon?.length?dayKey(edge):"";
+  for(const [key,x] of prev)if(key>edgeDay&&!out.has(key))out.set(key,{t:Number(x.t),v:Number(x.v),at:x.at,from:x.from||null});
   return [...out.values()].filter(x=>{
-    if(Number(x.t)<=edge)return true;
+    if(dayKey(x.t)<=edgeDay)return true;
     const age=NOW-Date.parse(x.at);
     return age>=0&&age<=ETF_CANON_REGISTRY_TTL;
   }).sort((a,b)=>a.t-b.t);
@@ -756,8 +760,11 @@ function updateCanonRegistry(prevRegistry,liveCanon,canonName){
 function carryCanonDays(canon,registry,{maxDays=ETF_CANON_HOLD_MAX_DAYS}={}){
   const none=(note=null)=>({series:canon,days:[],note});
   if(!canon?.length||!Array.isArray(registry))return none();
-  const edge=Number(last(canon).t);
-  const beyond=registry.filter(x=>canonRegistryEntry(x)&&Number(x.t)>edge).sort((a,b)=>a.t-b.t);
+  // Сравнение — по дню, а не по миллисекундам: реестр хранит метку того зеркала, от которого день
+  // принят, и при разной метке у зеркал (12:00 против 00:00 UTC) край канона оказался бы «раньше»
+  // того же самого дня в реестре — день вошёл бы в ряд дважды.
+  const edge=Number(last(canon).t),edgeDay=dayKey(edge);
+  const beyond=registry.filter(x=>canonRegistryEntry(x)&&dayKey(x.t)>edgeDay).sort((a,b)=>a.t-b.t);
   if(!beyond.length)return none();
   // Предел — по СЫРОМУ отставанию, до отсева по сроку: иначе канон, отставший на неделю, прошёл бы,
   // урезанный сроком до разрешённых трёх дней.
@@ -767,7 +774,8 @@ function carryCanonDays(canon,registry,{maxDays=ETF_CANON_HOLD_MAX_DAYS}={}){
     const age=NOW-Date.parse(x.at),day=dayKey(x.t);
     if(age<0){stop=`день ${day}: метка принятия из будущего, удержание невозможно`;break;}
     if(age>ETF_CANON_HOLD_TTL){stop=`день ${day}: срок удержания истёк (принят ${Math.round(age/HOUR)} ч назад, предел ${ETF_CANON_HOLD_TTL/HOUR} ч)`;break;}
-    days.push({t:Number(x.t),v:Number(x.v),at:x.at,from:x.from||null});
+    // Удержанный день встаёт на метку времени канона, как сшитый день SosoValue (spliceConfirmed).
+    days.push({t:Number(x.t)-Number(x.t)%DAY+edge%DAY,v:Number(x.v),at:x.at,from:x.from||null});
   }
   if(!days.length)return none(stop);
   const merged=[...canon,...days.map(({t,v})=>({t,v}))];
@@ -795,7 +803,10 @@ async function fetchEtfFlows(){
   // слоёв: удержанные дни канона, затем дополняющий слой SosoValue поверх них, затем проверки.
   const assemble=async({canon,canonName,live})=>{
     const edge=Number(last(canon).t);
-    const carry=carryCanonDays(canon,prevEtf?.canon_days);
+    // Удержание и реестр — слой, который по замыслу не может ухудшить картину: любой его отказ —
+    // это ряд канона как есть, пустой реестр и строка в диагностике, а не падение всего адаптера.
+    let carry={series:canon,days:[],note:null};
+    try{carry=carryCanonDays(canon,prevEtf?.canon_days);}catch(e){errors.push(`удержание канона отказало: ${String(e?.message||e).slice(0,120)} — ряд взят как есть`);}
     if(carry.note)errors.push(`удержание канона: ${carry.note}`);
     for(const d of carry.days)errors.push(`день ${dayKey(d.t)} удержан: принят от канона${d.from?` (${d.from})`:""} ${Math.round((NOW-Date.parse(d.at))/HOUR)} ч назад, ${live?`живое зеркало ${canonName}`:"кэш канона"} отдаёт ряд по ${dayKey(edge)} — ряд не укорочен`);
     // Предел в три дня — общий для всего хвоста за краем живого канона.
@@ -831,14 +842,15 @@ async function fetchEtfFlows(){
     }
     // Реестр пополняется ТОЛЬКО живым каноном: ни удержанный, ни сшитый, ни кэшированный день
     // метку принятия получить или освежить не может.
-    const registry=updateCanonRegistry(prevEtf?.canon_days,live?canon:null,canonName);
+    let registry=[];
+    try{registry=updateCanonRegistry(prevEtf?.canon_days,live?canon:null,canonName);}catch(e){errors.push(`реестр канона отказал: ${String(e?.message||e).slice(0,120)} — начат заново`);}
     // Ряд может стать ХУЖЕ прошлого двумя способами, и оба обязаны быть видны: откат последнего
     // дня двигает возраст наблюдения назад, усечение истории меняет перцентили. Третий случай —
     // ряд короче принятого от канона (удержание истекло или отменено): пометка держится, пока
     // реестр помнит день, а не один снимок.
     const lastT=Number(last(series).t),degraded=etfDegradation(prevEtf?.data,series);
     errors.push(...degraded.notes);
-    const missing=registry.filter(x=>Number(x.t)>lastT);
+    const lastDay=dayKey(lastT),missing=registry.filter(x=>dayKey(x.t)>lastDay);
     if(missing.length)errors.push(`ряд короче принятого от канона: ${missing.map(x=>dayKey(x.t)).join(", ")} в ряд не вошли`);
     if(!live)errors.push(`зеркала The Block недоступны, история взята из кэша прошлого прогона (${canon.length} дн)`);
     return{data:series,observed_at:iso(lastT),source,source_url:SOURCE_URLS.theblock,
@@ -2127,7 +2139,10 @@ function buildRegimeBirthV1({previous:prev,now,price,regimeMeta,metrics,blocks,d
     if(!candidate||!before){out[horizon]=null;continue;}
     if(candidate===before){
       const carried=prev.regime_birth?.[horizon];
-      out[horizon]=carried&&typeof carried==="object"&&carried.candidate===candidate?carried:null;
+      // Запись с меткой времени позже этого такта (часы сервера шагнули назад, испорченное состояние)
+      // не переносится: самопроверка живого кандидата отвергла бы снимок, а состояние при отказе не
+      // продвигается — та же запись вернулась бы на каждом такте до смены кандидата.
+      out[horizon]=carried&&typeof carried==="object"&&carried.candidate===candidate&&!(Date.parse(carried.t)>now)?carried:null;
       continue;
     }
     const record={t:iso(now),candidate,from_candidate:before,price:num(price)};
@@ -2195,14 +2210,36 @@ function buildValuationLevelsV1({mvrvSeries,priceSeries,windowDays=4*365}){
 
 // ПРЕДУПРЕЖДЕНИЯ О ДАННЫХ: несогласованность рядов и потеря резервов. На decision.quality не влияют.
 const ruGenitive=n=>({2:"двух",3:"трёх",4:"четырёх",5:"пяти"})[n]||String(n);
-function buildDataWarningsV1({etfLegs=null,flowSupplyCheck=null}={}){
+// Сколько резерв должен отсутствовать подряд, чтобы об этом стоило сказать. Зеркала The Block
+// моргают: за 07.08–09.10.2026 одно из них не отвечало в 73 тактах из 5 999, почти всегда один-два
+// такта подряд. При мёртвом SosoValue каждое такое моргание — «одна нога из трёх» на 15–30 минут;
+// предупреждение, которое появляется и исчезает раз в двое суток, перестают читать. Порог — во
+// времени, а не в снимках: смысл не меняется вместе с тактом сбора.
+const ETF_REDUNDANCY_CONFIRM_MS = 45 * 60_000;
+// Отказавшая нога несёт `since` — момент первого отказа в идущей серии. Он переносится из прошлого
+// снимка, пока нога лежит, и сбрасывается первым же удачным ответом. Метка из будущего и нечитаемая
+// метка заменяются текущим моментом: серия начинается заново, а не «длится» по испорченному состоянию.
+function annotateEtfLegOutagesV1(legs,previousLegs,now){
+  if(!Array.isArray(legs))return legs;
+  const before=new Map((Array.isArray(previousLegs)?previousLegs:[]).filter(x=>x&&typeof x==="object").map(x=>[x.name,x]));
+  return legs.map(leg=>{
+    if(!leg||typeof leg!=="object"||leg.state!=="fail")return leg;
+    const old=before.get(leg.name),t=old?.state==="fail"?Date.parse(old.since||""):NaN;
+    return{...leg,since:finite(t)&&t<=now?iso(t):iso(now)};
+  });
+}
+function buildDataWarningsV1({etfLegs=null,flowSupplyCheck=null,now=NOW}={}){
   const out=[],mismatch=exchangeFlowSupplyWarning(flowSupplyCheck);
   if(mismatch)out.push(mismatch);
   if(Array.isArray(etfLegs)&&etfLegs.length){
-    const alive=etfLegs.filter(x=>x?.state==="ok").length,total=etfLegs.length;
-    // Резерв — это вторая живая нога. Одна живая из трёх выглядела как state:"ok".
-    if(alive<2)out.push({source:"etf",code:"redundancy_lost",alive,total,
-      text:alive?`Потоки ETF идут с одного источника из ${ruGenitive(total)}`:`Ни один из ${ruGenitive(total)} источников потоков ETF не ответил`,affects:["etf_regime"]});
+    const failed=etfLegs.filter(x=>x?.state!=="ok"),alive=etfLegs.length-failed.length,total=etfLegs.length;
+    // Резерв — это вторая живая нога. Одна живая из трёх выглядела как state:"ok". Резерва нет с
+    // момента, когда отказавших ног стало total−1: это (total−1)-й по порядку отказ идущих серий.
+    if(alive<2){
+      const starts=failed.map(x=>{const t=Date.parse(x?.since||"");return finite(t)&&t<=now?t:now;}).sort((a,b)=>a-b),since=starts[Math.min(starts.length,total-1)-1]??now;
+      if(now-since>=ETF_REDUNDANCY_CONFIRM_MS)out.push({source:"etf",code:"redundancy_lost",alive,total,since:iso(since),
+        text:alive?`Потоки ETF идут с одного источника из ${ruGenitive(total)}`:`Ни один из ${ruGenitive(total)} источников потоков ETF не ответил`,affects:["etf_regime"]});
+    }
   }
   return out;
 }
@@ -2323,6 +2360,7 @@ function compute(){
   const mvrvV1=optional("mvrv_series",()=>chooseWholeSeries("CapMVRVCur","MVRV",{fallbackSource:"bitcoin-data.com",fallbackUrls:[SOURCE_URLS.bitcoindata]}).series)||[];
   const valuationLevels=optional("valuation_levels",()=>buildValuationLevelsV1({mvrvSeries:mvrvV1,priceSeries:marketSeries("price")}));
   // Состав источника ETF по ногам уже лежит в sources.etf.legs; негодный — снимается оттуда же.
+  if(Array.isArray(sourceStates.etf?.legs))sourceStates.etf.legs=annotateEtfLegOutagesV1(sourceStates.etf.legs,previous?.sources?.etf?.legs,NOW);
   if(sourceStates.etf?.legs!==undefined&&optional("etf_legs",()=>sourceStates.etf.legs)===null)delete sourceStates.etf.legs;
   const dataWarnings=optional("data_warnings",()=>buildDataWarningsV1({etfLegs:sourceStates.etf?.legs,flowSupplyCheck:datasets.coinmetrics?.flow_supply_check??exchangeFlowSupplyCheck(data("coinmetrics"))}));
   const variantInputs=optional("variant_inputs",()=>buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,decision,metrics,blocks,detectors,
@@ -2399,7 +2437,7 @@ export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS,
   // buildMetrics, что стоит под замком, а не её копию (scripts/collector-etf-episode.mjs).
   buildMetrics, datasets as collectorDatasets,
   exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS,
-  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, buildVariantInputsV1, VALUATION_LEVELS,
+  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS,
   collect, compute, monitorCallArguments, fetchCoinMetrics };
 
 function atomicJson(path,value){

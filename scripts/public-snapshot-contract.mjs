@@ -250,6 +250,7 @@ function dataWarningsProblems(value) {
     if (!isObject(w) || ![w.source, w.code, w.text].every(isText)) { out.push(`${path}: нужны source, code и text`); return; }
     if (!Array.isArray(w.affects) || !w.affects.every(isText)) out.push(`${path}.affects: список id карточек`);
     for (const key of ["value", "threshold", "alive", "total"]) if (w[key] !== undefined && !isNumber(w[key])) out.push(`${path}.${key}: число`);
+    if (w.since !== undefined && !(isText(w.since) && Number.isFinite(Date.parse(w.since)))) out.push(`${path}.since: момент, с которого условие выполняется`);
   });
   return out;
 }
@@ -264,8 +265,8 @@ function etfLegsProblems(value) {
     const path = `sources.etf.legs[${i}]`;
     if (!isObject(leg) || !isText(leg.name) || names.has(leg.name)) { out.push(`${path}: нужно уникальное name`); return; }
     names.add(leg.name);
-    if (leg.state === "ok") { if (leg.error !== undefined && leg.error !== null) out.push(`${path}: у живой ноги не бывает error`); }
-    else if (leg.state === "fail") { if (!isText(leg.error)) out.push(`${path}: у отказавшей ноги обязана быть причина`); }
+    if (leg.state === "ok") { if (leg.error !== undefined && leg.error !== null) out.push(`${path}: у живой ноги не бывает error`); if (leg.since !== undefined) out.push(`${path}: у живой ноги не бывает since`); }
+    else if (leg.state === "fail") { if (!isText(leg.error)) out.push(`${path}: у отказавшей ноги обязана быть причина`); if (leg.since !== undefined && !(isText(leg.since) && Number.isFinite(Date.parse(leg.since)))) out.push(`${path}.since: момент первого отказа серии`); }
     else out.push(`${path}.state: ok или fail`);
   });
   return out;
