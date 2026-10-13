@@ -7,7 +7,7 @@ import {
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request,
   closedDaysOnly, krakenDatedBasis, oiPurgeWindow,
   updateCanonRegistry, carryCanonDays, ETF_CANON_HOLD_TTL, ETF_CANON_HOLD_MAX_DAYS, ETF_CANON_REGISTRY_TTL, ETF_LEG_NAMES, parseEtfFlowJson,
-  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC,
+  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, validateMvrvDeep, MVRV_DEEP_MIN_POINTS,
   buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS
 } from "./fetch-snapshot.mjs";
 import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES,
@@ -882,6 +882,12 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   ok(wrapped&&/The Block API: Internal error/.test(wrapped.message),"отказ, упакованный в HTTP 200, обязан быть ошибкой, а не пустым рядом");
   let gone=null;try{parseEtfFlowJson(JSON.stringify({error:"gone",message:"This endpoint was retired."}));}catch(e){gone=e;}
   ok(gone&&/series not found/.test(gone.message),"тело ответа снятого эндпоинта не принимается за ряд");
+  // ОТСУТСТВИЕ ЗНАЧЕНИЯ — НЕ НУЛЕВОЙ ПОТОК (ревью 13.10.2026, Н12). Result:null — день, который канон ещё не
+  // посчитал; Number(null) делал из него день с потоком 0. Дни ниже — будни 08–14.10.2026, полдень UTC.
+  const rowsWith=extra=>{try{return parseEtfFlowJson(JSON.stringify({Series:{"Total Net Flow":{Data:[...points,...extra]}}}));}catch(e){return `исключение: ${e.message}`;}};
+  eq(rowsWith([{Timestamp:1791460800,Result:null},{Timestamp:1791547200,Result:""},{Timestamp:1791806400,Result:"  "},{Timestamp:1791892800},{Timestamp:1791979200,Result:false}]),want,"строка без числа в Result в ряд не входит: null, пустая строка, пробелы, нет поля, не число");
+  eq(rowsWith([{Timestamp:null,Result:5e8},{Timestamp:"",Result:5e8},{Result:5e8},null]),want,"строка без метки времени и пустой элемент в ряд не входят — и разбор не роняют");
+  eq(rowsWith([{Timestamp:1791460800,Result:0},{Timestamp:"1791547200",Result:"-12500000"}]),[...want,{t:1791460800000,v:0},{t:1791547200000,v:-12500000}],"настоящий нулевой поток и числа, записанные строкой, остаются в ряду");
   ok(/\/api\/tbco\/charts\/chart\/etfs\/bitcoin\/spot-bitcoin-etf-total-net-flow$/.test(ETF_BLOCK_MIRRORS[0].url),"канонический chart-API обязан стоять на действующем пути: прежний /api/charts/… отвечает HTTP 410");
 }
 // ===== Правки аудита 10.10.2026: сверка Coin Metrics и новые публикуемые поля =====
@@ -1157,6 +1163,23 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   ok(/,fetchMvrvDeep,/.test(call)&&/decisionRelevant:false/.test(call)&&/cacheAware:true/.test(call)&&/minFetchInterval:1\*HOUR/.test(call)&&/maxObservedAge:5\*DAY/.test(call),`вызов loadDataset("mvrv_deep") изменился: ${call}`);
   ok(src.indexOf('loadDataset("mvrv_deep"')>src.indexOf('loadDataset("coinmetrics"'),"mvrv_deep обязан грузиться после основного пакета Coin Metrics");
   ok(selfSrc.includes("mvrv_deep:24*5"),"гейт публикации обязан знать возраст набора mvrv_deep");
+}
+// ВАЛИДАТОР НАБОРА mvrv_deep (ревью 13.10.2026, Н6) — один для свежего ответа и для кэша. Раньше сверялась
+// только длина: ряд с переставленными или нечисловыми точками считался исправным и переезжал из состояния
+// в состояние, а самопроверка отвергала кандидата на каждом такте.
+{
+  const D=864e5,t0=Date.UTC(2015,0,1),good=Array.from({length:MVRV_DEEP_MIN_POINTS+5},(_,i)=>({t:t0+i*D,v:1+(i%7)/10}));
+  ok(validateMvrvDeep(good),"mvrv_deep: исправный ряд принимается");
+  ok(validateMvrvDeep(good.slice(0,MVRV_DEEP_MIN_POINTS)),"mvrv_deep: ряд ровно минимальной длины принимается");
+  ok(!validateMvrvDeep(good.slice(0,MVRV_DEEP_MIN_POINTS-1)),"mvrv_deep: ряд короче минимума отвергается");
+  const swapped=good.slice();[swapped[100],swapped[101]]=[swapped[101],swapped[100]];
+  ok(!validateMvrvDeep(swapped),"mvrv_deep: ряд с двумя переставленными точками отвергается");
+  ok(!validateMvrvDeep(good.map((p,i)=>i===100?{...good[99]}:p)),"mvrv_deep: повтор дня отвергается — время обязано строго возрастать");
+  ok(!validateMvrvDeep(good.map((p,i)=>i===5?{t:p.t,v:"мусор"}:p)),"mvrv_deep: нечисловое значение отвергается");
+  ok(!validateMvrvDeep(good.map((p,i)=>i===5?{t:"x",v:p.v}:p)),"mvrv_deep: нечисловая метка времени отвергается");
+  ok(!validateMvrvDeep(good.map((p,i)=>i===5?{t:p.t,v:null}:p)),"mvrv_deep: пустое значение — не ноль");
+  ok(!validateMvrvDeep(good.map((p,i)=>i===5?null:p)),"mvrv_deep: пустой элемент отвергается и проверку не роняет");
+  for(const bad of [null,undefined,"x".repeat(5000),5,{},{length:5000}])ok(!validateMvrvDeep(bad),`mvrv_deep: не массив (${String(JSON.stringify(bad)).slice(0,20)}) отвергается`);
 }
 // ТЕНЕВАЯ КАРТОЧКА «OI · СУТОЧНЫЙ СБРОС»: ЦЕНА И OI ОТ ОДНОЙ БАЗЫ. Раньше OI сравнивался со снимком
 // 22 часа назад, а цена — с полуночью UTC (в 09:53 это 9,9 часа) под общей подписью «24ч».

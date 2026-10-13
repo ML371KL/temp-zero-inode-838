@@ -7,17 +7,20 @@
 //
 // Сети нет: MOCK=1 строит все наборы данных детерминированным генератором. Набор не зависит от дня
 // недели и часа прогона — все метки времени в подставленных состояниях отсчитываются от «сейчас».
+// Часть сценариев идёт БЕЗ синтетики (offlineTick): настоящий collect() с загрузчиками, которым вместо
+// сети отвечает HTTP 503, на состоянии прошлого такта — так проверяется, что сборщик делает с кэшем.
 // Запускается из live-regression-test (входит в npm run check); можно и отдельно:
 //   node scripts/collector-e2e-test.mjs
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, cpSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { optionalSnapshotProblemsV1, optionalSnapshotBytesV1, OPTIONAL_FIELD_MAX_BYTES } from "./public-snapshot-contract.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
+import { verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
 
 const collector=fileURLToPath(new URL("./fetch-snapshot.mjs",import.meta.url));
 const dir=mkdtempSync(join(tmpdir(),"btc21m-collector-e2e-"));
@@ -32,6 +35,27 @@ function tick({previous=null,env={}}={}){
   return{pub:JSON.parse(readFileSync(out,"utf8")),state:JSON.parse(readFileSync(state,"utf8")),stderr:r.stderr||""};
 }
 const card=(snap,id)=>snap.metrics.find(x=>x.id===id);
+// ТАКТ БЕЗ СЕТИ НА СОСТОЯНИИ ПРОШЛОГО ТАКТА. Сборщик запускается главным модулем — настоящие collect(),
+// compute() и запись снимка с состоянием, — но не в синтетике: работают загрузчики и loadDataset, а каждое
+// обращение к источнику получает HTTP 503. Всё, что попадёт в снимок, берётся из кэша прошлого состояния.
+// Следом кандидат проходит ту же проверку, что перед публикацией (REQUIRE_LIVE=1).
+const offlineDriver=join(dir,"offline.mjs");
+writeFileSync(offlineDriver,`
+import { fileURLToPath } from "node:url";
+const realSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(fn,_ms,...args)=>realSetTimeout(fn,0,...args);   // паузы между повторами запросов — без ожидания
+globalThis.fetch=async()=>new Response("{}",{status:503,headers:{"content-type":"application/json"}});
+process.argv[1]=fileURLToPath(process.env.MODULE_URL);   // сборщик исполняет свой главный блок
+await import(process.env.MODULE_URL);
+`);
+function offlineTick(previous){
+  const id=String(++seq).padStart(2,"0"),out=join(dir,`${id}.json`),state=join(dir,`${id}.state.json`),prev=join(dir,`${id}.prev.json`),absent=join(dir,"absent.json");
+  writeFileSync(prev,JSON.stringify(previous));
+  // Ключи провайдеров из окружения в прогон не передаются: сети нет, и в тексты ошибок им попадать незачем.
+  const r=spawnSync(process.execPath,[offlineDriver],{encoding:"utf8",env:{...process.env,MOCK:"",FRED_KEY:"",CM_API_KEY:"",SOSO_API_KEY:"",MODULE_URL:new URL("./fetch-snapshot.mjs",import.meta.url).href,OUT:out,STATE:state,PREVIOUS_STATE:prev,PREVIOUS_PUBLIC:absent}});
+  if(r.status!==0)throw new Error(`сборщик без сети упал (такт ${id}):\n${r.stdout||""}${r.stderr||""}`);
+  const v=spawnSync(process.execPath,[fileURLToPath(new URL("./self-test.mjs",import.meta.url))],{encoding:"utf8",env:{...process.env,REQUIRE_LIVE:"1",REQUIRE_COMPLETE:"",OUT:out,STATE:state}});
+  return{pub:JSON.parse(readFileSync(out,"utf8")),state:JSON.parse(readFileSync(state,"utf8")),verify:{status:v.status,text:`${v.stdout||""}${v.stderr||""}`}};
+}
 
 try{
   const cold=tick();
@@ -240,6 +264,131 @@ console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_met
     assert.equal(fallback.extras.variantInputs.series.mvrv.last.v,fallback.mvrvLast.reserve,"и вариантам идёт тот же резервный ряд");
     assert.equal(fallback.valuation_levels.mvrv,round4(fallback.mvrvLast.reserve),"и уровни оценки считаются по нему");
     assert.equal(fallback.extras.variantInputs.v1.mvrv_percentile,fallback.snap.metrics.find(x=>x.id==="mvrv_cycle").value_num);
+  }
+
+  // СЦЕНАРИИ БЕЗ СЕТИ. Состояние прошлого такта — такт на синтетике, признанный боевым (mock:false): его
+  // наборы годятся в кэш. Сети нет, поэтому каждый набор либо приходит из кэша, либо честно отсутствует.
+  const live=()=>{const s=structuredClone(cold.state);s.mock=false;return s;};
+  const base=offlineTick(live());
+  assert.equal(base.verify.status,0,`такт без сети на исправном состоянии обязан проходить гейт публикации:\n${base.verify.text}`);
+
+  // ---- Н7а. Отказали все три ноги потоков ETF, кэша канона нет: состав источника по ногам опубликован ----
+  // Прошлый пакет ETF каноном служить не может (его источник — не The Block), резерв тоже молчит: загрузчик
+  // отказывает целиком и уносит состояние ног с собой. Ряд при этом остаётся из прошлого пакета (stale), а
+  // кто из резервов жив сейчас, обязано быть видно: ноги — из самого отказа, а не из кэша.
+  {
+    assert.equal(String(live().datasets.etf.source).startsWith("The Block"),false,"фикстура: прошлый пакет ETF — не канон The Block");
+    const etf=base.pub.sources.etf;
+    assert.equal(etf.state,"stale");
+    assert.match(etf.error,/^ETF flows unavailable: /,"источник отказал целиком: ни зеркал, ни кэша канона, ни резерва");
+    assert.deepEqual(etf.legs?.map(l=>[l.name,l.state]),[["The Block","fail"],["The Block (tbstat)","fail"],["SosoValue","fail"]],"ноги публикуются и тогда, когда источник отказал целиком");
+    assert.ok(etf.legs.every(l=>/HTTP 503/.test(l.error)),"у каждой отказавшей ноги названа причина");
+    assert.ok(etf.legs.every(l=>l.since===base.pub.generated_at),"и начало серии отказов — этот такт");
+    assert.deepEqual(optionalSnapshotProblemsV1(base.pub),[],"ноги отказавшего источника проходят контракт снимка");
+    assert.deepEqual(base.pub.diagnostics,[]);
+  }
+
+  // ---- Н6. Испорченный кэш теневого набора: сборщик его не берёт, кандидат проходит гейт публикации ----
+  {
+    const now=Date.now(),day0=Math.floor(now/DAY)*DAY,at=t=>new Date(t).toISOString(),doc="https://example.org/doc";
+    const daily=(n,value)=>Array.from({length:n},(_,i)=>({t:day0-(n-i)*DAY,v:value(i)}));
+    // Пакет набора в той форме, в какой его кладёт в состояние loadDataset; загружен два часа назад.
+    const packet=(data,over={})=>({data,observed_at:at(day0-DAY),fetched_at:at(now-2*H),source:"фикстура",source_url:doc,source_urls:[doc],...over});
+    const swapTwo=rows=>{const a=rows.slice();[a[50],a[51]]=[a[51],a[50]];return a;};
+
+    const state=live(),recently=at(now-10*60_000);
+    // Исправные теневые наборы — контроль обоих путей кэша: «рано опрашивать» (квота) и «источник не ответил».
+    state.datasets.sth_onchain=packet({sth_rp:daily(200,i=>60000+i),sopr:daily(200,()=>1.001),lth_sopr:daily(200,()=>1.2)});
+    state.datasets.fred_JPNASSETS=packet(daily(60,i=>7e6+i));
+    // Испорченные: каждый — своим способом, и каждый до правки либо ронял сбор, либо отвергал кандидата.
+    state.datasets.mvrv_deep=packet(daily(2200,i=>1+i%7/10).map((p,i)=>i%9?p:{t:p.t,v:"мусор"}));   // порядок верен, значения — не числа
+    state.datasets.gold=packet(swapTwo(daily(300,i=>2000+i)));                                          // две точки переставлены
+    state.datasets.tga_daily=packet(daily(200,i=>800+i),{source_urls:doc});                              // список ссылок — строка
+    state.datasets.fred_DEXUSEU=packet(daily(60,()=>1.1),{fetched_at:at(now+3*DAY)});                    // загрузка «из будущего»
+    state.attempts={...state.attempts,sth_onchain:recently,mvrv_deep:recently};
+    const got=offlineTick(state),src=k=>got.pub.sources[k];
+    assert.equal(got.verify.status,0,`испорченный кэш теневого набора не имеет права отвергнуть кандидата:\n${got.verify.text}`);
+    assert.equal(src("sth_onchain").state,"ok","исправный кэш теневого набора по-прежнему переиспользуется, пока опрашивать рано");
+    assert.deepEqual(got.state.datasets.sth_onchain.data,state.datasets.sth_onchain.data);
+    assert.equal(src("fred_JPNASSETS").state,"stale","исправный кэш теневого набора по-прежнему выручает при отказе источника");
+    assert.deepEqual(got.state.datasets.fred_JPNASSETS.data,state.datasets.fred_JPNASSETS.data);
+    for(const [key,why] of [["mvrv_deep","нечисловые значения"],["gold","переставленные точки"],["tga_daily","негодный список ссылок"],["fred_DEXUSEU","метка загрузки из будущего"]]){
+      assert.equal(src(key).state,"fail",`${key} (${why}): испорченный кэш не берётся — источник честно отсутствует`);
+      assert.equal(key in got.state.datasets,false,`${key}: испорченный пакет не переезжает в новое состояние`);
+      assert.equal(src(key).decision_relevant,false);
+    }
+    assert.match(src("mvrv_deep").error,/source quota/,"mvrv_deep: опрашивать рано, а кэш негоден — причина названа, запроса не было");
+    // Решение от теневых наборов не зависит: режим, цель и качество — как в такте без них.
+    const decisive=s=>[s.regime,s.decision.target_pct,s.decision.base_target_pct,s.decision.binding_overlays,s.decision.quality];
+    assert.deepEqual(decisive(got.pub),decisive(base.pub),"порча теневых наборов не меняет ни решения, ни его качества");
+
+    // РЕШАЮЩИЙ НАБОР — КАК РАНЬШЕ. Его кэш этой проверкой не фильтруется: при отказе источника испорченный
+    // пакет возвращается как stale, и останавливает его гейт публикации — кандидат отвергается, на витрине
+    // остаётся прошлый снимок. Считать решение без набора молча нельзя.
+    const broken=live();broken.datasets.stablecoins.data=swapTwo(broken.datasets.stablecoins.data);
+    const held=offlineTick(broken);
+    assert.equal(held.pub.sources.stablecoins.state,"stale","решающий набор: кэш берётся как раньше");
+    assert.deepEqual(held.state.datasets.stablecoins.data,broken.datasets.stablecoins.data);
+    assert.notEqual(held.verify.status,0,"кандидат с испорченным решающим набором обязан быть отвергнут");
+    assert.match(held.verify.text,/unsorted dataset:stablecoins/);
+  }
+
+  // ---- Н7б. Монитор бросает исключение на новых параметрах: живая линия v1 и журнал решений не встают ----
+  // Сборщик исполняется из копии модулей, где на месте монитора стоит обёртка: настоящий монитор лежит рядом
+  // под другим именем, а обёртка отказывает, если получила хоть один из четырёх новых параметров (SPEC 1.3).
+  // Контроль — тот же такт настоящим монитором. Часы в обоих прогонах заморожены на одном моменте, поэтому
+  // решение, хэши и NAV сравниваются дословно.
+  {
+    const here=fileURLToPath(new URL(".",import.meta.url)),tree=join(dir,"tree"),modules=src=>["",".mjs"].includes(extname(src));   // каталоги и модули
+    cpSync(here,join(tree,"scripts"),{recursive:true,filter:modules});
+    cpSync(join(here,"..","docs"),join(tree,"docs"),{recursive:true,filter:src=>modules(src)||/monitor-graft-v1\.json$/.test(src)});
+    renameSync(join(tree,"scripts","forward-monitor-v1.mjs"),join(tree,"scripts","forward-monitor-v1.real.mjs"));
+    writeFileSync(join(tree,"scripts","forward-monitor-v1.mjs"),`export * from "./forward-monitor-v1.real.mjs";
+import { updateForwardMonitorV1 as realMonitor } from "./forward-monitor-v1.real.mjs";
+export function updateForwardMonitorV1(args){
+  const extras=["variantInputs","shadowValues","regimeBirth","tickDiff"].filter(name=>args[name]!=null);
+  if(extras.length)throw new Error("монитор не принял новые параметры: "+extras.join(", "));
+  return realMonitor(args);
+}
+`);
+    const driver=join(dir,"frozen.mjs"),statePath=join(dir,"frozen.prev.json"),frozenNow=Date.parse(cold.pub.generated_at)+15*60_000;
+    writeFileSync(statePath,JSON.stringify(cold.state));
+    writeFileSync(driver,`
+const now=Number(process.env.FAKE_NOW),RealDate=Date;
+globalThis.Date=class extends RealDate{constructor(...args){if(!args.length)super(now);else super(...args);}static now(){return now;}};
+const m=await import(process.env.MODULE_URL);
+await m.collect();
+const s=m.compute(),call=m.monitorCallArguments();
+console.log(JSON.stringify({decision:s.decision,regime:s.regime,diagnostics:s.diagnostics,extras:["variantInputs","shadowValues","regimeBirth","tickDiff"].filter(name=>call[name]!=null),
+  monitoring:{updated_at:s.monitoring.updated_at,policy_v1:s.monitoring.strategies.policy_v1,performance_v1:s.monitoring.performance.policy_v1,decision_log:s.monitoring.decision_log,
+    target_changes:s.monitoring.target_changes,state_changes:s.monitoring.state_changes,started_at:s.monitoring.started_at,reset_events:s.monitoring.reset_events||[]}}));
+`);
+    const drive=moduleUrl=>{
+      const r=spawnSync(process.execPath,[driver],{encoding:"utf8",maxBuffer:1<<26,env:{...process.env,MOCK:"1",FAKE_NOW:String(frozenNow),MODULE_URL:moduleUrl,PREVIOUS_STATE:statePath,PREVIOUS_PUBLIC:join(dir,"absent.json")}});
+      if(r.status!==0)throw new Error(`отказ монитора на новых параметрах уронил сбор:\n${r.stdout||""}${r.stderr||""}`);
+      return{...JSON.parse(r.stdout.trim().split("\n").at(-1)),stderr:r.stderr||""};
+    };
+    const control=drive(new URL("./fetch-snapshot.mjs",import.meta.url).href),broken=drive(pathToFileURL(join(tree,"scripts","fetch-snapshot.mjs")).href);
+    assert.deepEqual(control.extras,["variantInputs","shadowValues","regimeBirth","tickDiff"],"фикстура: на втором такте монитор получает все четыре новых параметра");
+    assert.deepEqual(control.diagnostics,[],"контроль: настоящий монитор новые параметры принимает");
+    assert.deepEqual(broken.diagnostics.map(x=>x.scope),["monitor_extras"],"отказ монитора на новых параметрах назван в диагностике снимка");
+    assert.match(broken.diagnostics[0].error,/монитор не принял новые параметры: variantInputs, shadowValues, regimeBirth, tickDiff/);
+    assert.match(broken.stderr,/optional calculation failed: monitor_extras/,"и в журнале прогона");
+    assert.deepEqual(broken.decision,control.decision,"решение — то же до последнего хэша");
+    assert.deepEqual(broken.regime,control.regime);
+    assert.deepEqual(broken.monitoring.policy_v1,control.monitoring.policy_v1,"линия policy_v1 (NAV, экспозиция, издержки) — та же");
+    assert.deepEqual(broken.monitoring.performance_v1,control.monitoring.performance_v1);
+    // Журнал решений не рвётся: новая запись — про это решение и ссылается на запись прошлого такта. Всё, что
+    // в ней есть, совпадает с записью настоящего монитора; нет в ней только того, что монитор пишет о теневых
+    // линиях, — в этом такте они не считались (поэтому и собственный хэш записи другой).
+    const before=cold.state.monitoring.decision_log,entry=broken.monitoring.decision_log.at(-1),reference=control.monitoring.decision_log.at(-1);
+    assert.equal(entry.previous_log_hash,before.at(-1).log_hash,"запись журнала ссылается на прошлый такт");
+    assert.equal(entry.decision_hash,broken.decision.decision_hash);
+    for(const key of Object.keys(entry))if(key!=="log_hash")assert.deepEqual(entry[key],reference[key],`запись журнала, поле ${key}: как у настоящего монитора`);
+    assert.equal(broken.monitoring.decision_log.length,before.length+1);
+    assert.deepEqual(verifyDecisionLogChainV1(broken.monitoring.decision_log),{ok:true,issues:[],records:before.length+1},"цепочка хэшей журнала цела");
+    assert.deepEqual([broken.monitoring.started_at,broken.monitoring.reset_events,broken.monitoring.target_changes,broken.monitoring.state_changes],[control.monitoring.started_at,control.monitoring.reset_events,control.monitoring.target_changes,control.monitoring.state_changes],"монитор не сброшен, счётчики те же");
+    assert.equal(broken.monitoring.updated_at,new Date(frozenNow).toISOString(),"монитор отработал этот такт");
   }
 
   console.log("Collector end-to-end scenarios OK");

@@ -225,14 +225,22 @@ if(!hasInternal){
   warn.push(staleInternal?`internal cache is from engine v${internalRaw.version} (current v${pkg.version}); deep dataset checks skipped until the next collector run`:"internal cache absent; deep dataset checks skipped");
 }else{
   for(const [k,d] of Object.entries(internal.datasets||{})){
+    // ТЕНЕВОЙ НАБОР НЕ ИМЕЕТ ПРАВА ОСТАНОВИТЬ ПАНЕЛЬ (ревью 13.10.2026, находка Н6). Эта проверка стоит и
+    // ПЕРЕД сбором — npm run check читает уже принятое состояние, — и испорченный пакет теневого набора
+    // держал её красной, пока файл не починят руками: до сбора, который такой кэш отбросит и перекачает
+    // (shadowCacheUsable в сборщике), дело не доходило. Поэтому у набора с decision_relevant:false вне
+    // REQUIRE_LIVE порча пакета — предупреждение. Для живого кандидата и для решающих наборов — отказ, как был.
+    const heals=process.env.REQUIRE_LIVE!=="1"&&s.sources?.[k]?.decision_relevant===false;
+    const flag=what=>heals?warn.push(`${what.replace("dataset","shadow dataset")} (heals on next collection):${k}`):fail.push(`${what}:${k}`);
     const dot=Date.parse(d?.observed_at||"");
     const dft=Date.parse(d?.fetched_at||"");
-    if(Number.isFinite(dot)&&dot>Date.now()+3600000)fail.push(`dataset observed_at in future:${k}`);
-    if(Number.isFinite(dft)&&dft>Date.now()+3600000)fail.push(`dataset fetched_at in future:${k}`);
-    if(!d||!isDate(d.observed_at)||!isDate(d.fetched_at))fail.push(`bad dataset metadata:${k}`);
-    if(d?.source_url&&!/^https:\/\//.test(d.source_url))fail.push(`bad dataset source_url:${k}`);
-    if(!Array.isArray(d?.source_urls)||!d.source_urls.length||d.source_urls.some(u=>!/^https:\/\//.test(u)))fail.push(`bad dataset source_urls:${k}`);
-    if(Array.isArray(d?.data)&&d.data.length&&d.data[0]?.t!==undefined&&!sorted(d.data))fail.push(`unsorted dataset:${k}`);
+    if(Number.isFinite(dot)&&dot>Date.now()+3600000)flag("dataset observed_at in future");
+    if(Number.isFinite(dft)&&dft>Date.now()+3600000)flag("dataset fetched_at in future");
+    if(!d||!isDate(d.observed_at)||!isDate(d.fetched_at))flag("bad dataset metadata");
+    if(d?.source_url&&!/^https:\/\//.test(d.source_url))flag("bad dataset source_url");
+    if(!Array.isArray(d?.source_urls)||!d.source_urls.length||d.source_urls.some(u=>!/^https:\/\//.test(u)))flag("bad dataset source_urls");
+    // Порядок сверяется без опоры на форму точки: мусорный элемент ряда — это «не упорядочен», а не падение проверки.
+    if(Array.isArray(d?.data)&&d.data.length&&d.data[0]?.t!==undefined&&!d.data.every((x,i,a)=>i===0||Number(x?.t)>=Number(a[i-1]?.t)))flag("unsorted dataset");
   }
 
   for(const id of ["WALCL","WTREGEN","RRPONTSYD","DFII10","DGS2","DGS10","DTB3","DTWEXBGS","BAMLH0A0HYM2","VIXCLS","VXVCLS","NASDAQ100"]){

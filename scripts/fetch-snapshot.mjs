@@ -354,8 +354,32 @@ function dailySeriesIsCurrent(observedAt,now=NOW){
  */
 function lastAttemptAt(packet){return packet?.probed_at||packet?.fetched_at||null;}
 
+// ГОДИТСЯ ЛИ КЭШ ТЕНЕВОГО НАБОРА (ревью 13.10.2026, находка Н6). Теневой набор не имеет права остановить
+// панель, а испорченный пакет в состоянии её останавливал: путь квоты и ответ «нового нет» брали кэш без
+// проверки, пакет переезжал в новое состояние, и самопроверка отвергала кандидата на каждом такте — до
+// суток, пока у источника не появится новый день (ряд mvrv_deep с двумя переставленными точками); пакет
+// с негодным списком ссылок ронял сбор целиком. Поэтому кэш теневого набора обязан пройти ту же проверку,
+// что и свежий ответ (validator), и те проверки пакета, которыми гейт публикации встретит кандидата
+// (self-test, блок наборов данных): метки времени — строки-даты не из будущего, ссылки — https, ряд
+// точек — по возрастанию времени. Не прошёл — кэша нет: набор честно отсутствует до следующей удачной
+// загрузки, и качество решения от этого не зависит.
+const httpsUrl=u=>typeof u==="string"&&/^https:\/\//.test(u);
+function shadowCacheUsable(packet,validator){
+  try{
+    if(!packet||typeof packet!=="object"||!validator(packet.data))return false;
+    const stamp=v=>typeof v==="string"&&finite(Date.parse(v))&&Date.parse(v)<=NOW+HOUR;
+    if(!stamp(packet.observed_at)||!stamp(packet.fetched_at))return false;
+    if(packet.source_url&&!httpsUrl(packet.source_url))return false;
+    if(!Array.isArray(packet.source_urls)||!packet.source_urls.length||!packet.source_urls.every(httpsUrl))return false;
+    const rows=packet.data;
+    return !(Array.isArray(rows)&&rows.length&&rows[0]?.t!==undefined)||rows.every((x,i)=>i===0||Number(x?.t)>=Number(rows[i-1]?.t));
+  }catch{return false;}
+}
+
 async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObservedAge=ttl,decisionRelevant=true,minFetchInterval=0,cacheAware=false}={}){
-  const cached=oldDataset(key,ttl,maxObservedAge);
+  // Кэш РЕШАЮЩЕГО набора берётся как раньше, без этой проверки: его порча — повод остановиться, а не
+  // посчитать решение без набора (гейт публикации отвергает такого кандидата, см. self-test).
+  const cachedRaw=oldDataset(key,ttl,maxObservedAge),cached=decisionRelevant||shadowCacheUsable(cachedRaw,validator)?cachedRaw:null;
   // Пропуск опроса — не то же самое, что провал опроса. Данные берутся из кэша, состояние
   // остаётся "ok", а `fetched_at` показывает НАСТОЯЩЕЕ время последней загрузки, и карточка
   // честно говорит «загрузка N ч назад». Условие свежести наблюдения то же самое, что у
@@ -433,7 +457,8 @@ async function loadDataset(key,source,ttl,loader,validator=v=>v!=null,{maxObserv
     // Состав источника по ногам (кто из резервов жив) публикуется рядом с общим состоянием.
     if(Array.isArray(packet.legs))sourceStates[key].legs=packet.legs;
   }catch(e){
-    const old=oldDataset(key,ttl,maxObservedAge);
+    // Запасной пакет — тот же проверенный кэш: негодный пакет теневого набора не возвращается и через stale.
+    const old=cached;
     if(old){const u=old.source_url||SOURCE_URLS[source],urls=uniqueHttps(old.source_urls?.length?old.source_urls:[u]);datasets[key]=old;sourceStates[key]={state:"stale",source:old.source||source,url:u,urls,observed_at:old.observed_at,fetched_at:old.fetched_at,error:String(e.message||e)};}
     else {const u=SOURCE_URLS[source];sourceStates[key]={state:"fail",source,url:u,urls:uniqueHttps([u]),observed_at:null,fetched_at:null,error:String(e.message||e)};}
     // Ноги — ТЕКУЩИЕ, из самого отказа: кэш отвечает за данные, а не за то, кто жив сейчас.
@@ -506,7 +531,12 @@ function parseEtfFlowJson(text){
   if(j&&j.ok===false)throw new Error(`The Block API: ${String(j.error||j.message||"отказ без объяснения").slice(0,80)}`);
   const jf=j?.data?.chart?.jsonFile||j?.chart?.jsonFile||j,data=jf?.Series?.["Total Net Flow"]?.Data;
   if(!Array.isArray(data))throw new Error("ETF net-flow series not found in payload");
-  const rows=data.map(d=>({t:Number(d.Timestamp)*1000,v:Number(d.Result)})).filter(x=>finite(x.t)&&finite(x.v)&&![0,6].includes(new Date(x.t).getUTCDay()));
+  // ОТСУТСТВИЕ ЗНАЧЕНИЯ — НЕ НУЛЕВОЙ ПОТОК (ревью 13.10.2026, Н12). Number(null) и Number("") дают 0: день,
+  // который канон ещё не посчитал (Result:null), входил в ряд днём с потоком 0, попадал в реестр канона и
+  // при отказе зеркала удерживался бы до 120 часов. Строка без числа в Result или в Timestamp отбрасывается
+  // ДО приведения типов; настоящий ноль и число, записанное строкой, остаются.
+  const present=v=>typeof v==="number"||(typeof v==="string"&&v.trim()!=="");
+  const rows=data.filter(d=>present(d?.Timestamp)&&present(d?.Result)).map(d=>({t:Number(d.Timestamp)*1000,v:Number(d.Result)})).filter(x=>finite(x.t)&&finite(x.v)&&![0,6].includes(new Date(x.t).getUTCDay()));
   return [...new Map(rows.map(x=>[x.t,x])).values()].sort((a,b)=>a.t-b.t);
 }
 // US spot-ETF net flows (USD/day). Оба эндпоинта The Block отдают ОДИН И ТОТ ЖЕ ряд: на 628
@@ -1193,10 +1223,11 @@ async function fetchMarket(){
   const price=normalizeToContract("price",candles.map(x=>({t:x.t,v:x.v}))).rows;
   // РЯД ОБЪЁМА — ТОЛЬКО ЗАКРЫТЫЕ СУТКИ (аудит 10.10.2026, находка 5-А). Последняя дневная свеча —
   // сутки, идущие сейчас: в 09:53 UTC в ней 13 % обычного дня. Она входила в 30-дневное среднее
-  // объёма, и показатель «объём 30д к предыдущим 30д» пилил внутри каждых суток: −3,7 п.п. сразу
-  // после полуночи UTC и ноль к их концу (балл семьи менялся 25 раз за 77 суток, 14 — с возвратом
-  // в тот же день) при порогах +10 и +15 %. Ценовой ряд НЕ трогается: его последняя точка — живая
-  // цена, от неё внутри замороженной секции считаются тренд, MA и реализованная волатильность.
+  // объёма, и показатель «объём 30д к предыдущим 30д» пилил внутри каждых суток: провал сразу после
+  // полуночи UTC и возврат к их концу. Размах показателя внутри суток по опубликованным снимкам
+  // 07.08–10.10.2026 (65 суток): медиана 3,3 п.п., у 90 % дней — до 7,6 п.п., при порогах +10 и +15 %.
+  // Ценовой ряд НЕ трогается: его последняя точка — живая цена, от неё внутри замороженной секции
+  // считаются тренд, MA и реализованная волатильность.
   const rawVolume=closedDaysOnly(candles.map(x=>({t:x.t,v:finite(x.quoteVolume)?x.quoteVolume:(finite(x.volume)?x.volume*x.v:null)})).filter(x=>finite(x.v)));
   const volume=safeContract("volume",rawVolume,errors);
   const marketCap=normalizeToContract("marketCap",price.map(p=>({t:p.t,v:p.v*estimatedSupply(p.t)}))).rows;
@@ -1323,6 +1354,10 @@ async function fetchCoinMetrics(){
 // Интервал между попытками и метка попытки, переживающая отказ, — в loadDataset (реестр attempts).
 const MVRV_DEEP_START = "2010-07-18";
 const MVRV_DEEP_MIN_POINTS = 2000;
+// Ряд годен, если это настоящий ряд: не короче минимума, точки — числа, время строго возрастает. Проверка
+// одна для свежего ответа и для кэша (loadDataset): раньше сверялась только длина, и ряд с переставленными
+// или нечисловыми точками считался исправным.
+const validateMvrvDeep=x=>Array.isArray(x)&&x.length>=MVRV_DEEP_MIN_POINTS&&x.every((p,i)=>finite(p?.t)&&finite(p?.v)&&(i===0||Number(p.t)>Number(x[i-1].t)));
 async function fetchMvrvDeep(cached){
   if(dailySeriesIsCurrent(cached?.observed_at))return UNCHANGED;
   const mainLast=Number(last(datasets.coinmetrics?.data?.CapMVRVCur||[])?.t),cachedAt=Date.parse(cached?.observed_at||"");
@@ -1549,7 +1584,7 @@ async function collect(){
   // Вся история MVRV для теневого кандидата v3 — ПОСЛЕ основного пакета Coin Metrics: загрузчик
   // сверяется с его последним днём. Час между попытками: до сети дело доходит раз в сутки (см.
   // fetchMvrvDeep), а чаще часа загрузчик не вызывается вовсе — и после отказа тоже.
-  await loadDataset("mvrv_deep","coinmetrics",4*DAY,fetchMvrvDeep,x=>x?.length>=MVRV_DEEP_MIN_POINTS,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:1*HOUR,cacheAware:true});
+  await loadDataset("mvrv_deep","coinmetrics",4*DAY,fetchMvrvDeep,validateMvrvDeep,{maxObservedAge:5*DAY,decisionRelevant:false,minFetchInterval:1*HOUR,cacheAware:true});
 }
 
 function metric(def){return{
@@ -2436,7 +2471,7 @@ export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS,
   // Для воспроизведения эпизодов на настоящем счёте: тест подставляет наборы данных и зовёт ту самую
   // buildMetrics, что стоит под замком, а не её копию (scripts/collector-etf-episode.mjs).
   buildMetrics, datasets as collectorDatasets,
-  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS,
+  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS, validateMvrvDeep,
   buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS,
   collect, compute, monitorCallArguments, fetchCoinMetrics };
 

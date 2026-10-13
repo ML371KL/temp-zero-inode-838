@@ -70,6 +70,52 @@ try{
     expectPass("cold-start snapshot",x=>{x.regime_birth=null;x.tick_diff=null;x.valuation_levels=null;x.data_warnings=[];});
     expectPass("malformed optional field in a published snapshot",x=>{x.tick_diff="мусор";},/optional field invalid: tick_diff[^\n]*heals on next collection/i);
     expectPass("failed optional calculation is reported",x=>{x.regime_birth=null;x.diagnostics=[{scope:"regime_birth",error:"TypeError: boom"}];},/optional calculations failed: regime_birth: TypeError: boom/i);
+
+    // ТЕНЕВОЙ НАБОР НЕ ИМЕЕТ ПРАВА ОСТАНОВИТЬ ПАНЕЛЬ (ревью 13.10.2026, Н6). Проверка опубликованной пары
+    // стоит ПЕРЕД сбором и читает уже принятое состояние: испорченный пакет теневого набора в нём —
+    // предупреждение, сборщик такой кэш отбросит и перекачает. Та же порча РЕШАЮЩЕГО набора и та же порча
+    // в живом кандидате — отказ, как был.
+    const now=Date.now(),at=t=>new Date(t).toISOString(),doc="https://example.org/doc";
+    // Семь проверок пакета — семь видов порчи: [порча, предупреждение для теневого набора, прежний текст отказа].
+    const damage=[
+      [(d,k)=>{const a=d[k].data;[a[10],a[11]]=[a[11],a[10]];},"unsorted shadow dataset","unsorted dataset"],
+      // Первым идёт пустой элемент: проверка порядка обязана назвать ряд неупорядоченным, а не упасть на нём.
+      [(d,k)=>{d[k].data=d[k].data.map((p,i)=>i===7?null:i>20&&i%5===0?{t:"x",v:null}:p);},"unsorted shadow dataset","unsorted dataset"],
+      [(d,k)=>{d[k]=null;},"bad shadow dataset metadata","bad dataset metadata"],
+      [(d,k)=>{d[k].observed_at=at(now+3*864e5);},"shadow dataset observed_at in future","dataset observed_at in future"],
+      [(d,k)=>{d[k].fetched_at=at(now+3*864e5);},"shadow dataset fetched_at in future","dataset fetched_at in future"],
+      [(d,k)=>{d[k].source_url="ftp://example.org";},"bad shadow dataset source_url","bad dataset source_url"],
+      [(d,k)=>{d[k].source_urls=doc;},"bad shadow dataset source_urls","bad dataset source_urls"],
+    ];
+    // В синтетике теневых наборов нет: пара дополняется восемью — в той форме, в какой их кладёт сборщик.
+    // Семь портятся каждый по-своему, восьмой (sth_onchain) остаётся исправным. Каждый прогон проверки —
+    // одна пара со всеми видами порчи сразу: проверка печатает все замечания, а не первое.
+    const shadowKeys=["gold","tga_daily","mvrv_deep","fred_ECBASSETSW","fred_JPNASSETS","fred_DEXUSEU","fred_DEXJPUS"];
+    const decisionKeys=["stablecoins","cftc","fred_DGS2","fred_DGS10","fred_VIXCLS","fred_VXVCLS","fred_NASDAQ100"];
+    const rows=()=>Array.from({length:300},(_,i)=>({t:now-(300-i)*864e5,v:2000+i}));
+    const withShadow=(x,state)=>{for(const k of [...shadowKeys,"sth_onchain"]){
+      x.sources[k]={state:"ok",source:"фикстура",url:doc,urls:[doc],observed_at:at(now-864e5),fetched_at:at(now-36e5),error:null,decision_relevant:false};
+      state.datasets[k]={data:k==="sth_onchain"?{sth_rp:rows(),sopr:rows(),lth_sopr:rows()}:rows(),observed_at:at(now-864e5),fetched_at:at(now-36e5),source:"фикстура",source_url:doc,source_urls:[doc]};
+    }};
+    const corruptEach=(datasets,keys)=>damage.forEach(([corrupt],i)=>corrupt(datasets,keys[i]));
+    const check=(mutate,env={})=>{
+      const x=structuredClone(base),state=structuredClone(stateBase);mutate(x,state);writeFileSync(path,JSON.stringify(x));writeFileSync(statePath,JSON.stringify(state));
+      const r=spawnSync(process.execPath,[fileURLToPath(new URL("./self-test.mjs",import.meta.url))],{encoding:"utf8",env:{...process.env,OUT:path,STATE:statePath,...env}});
+      return{status:r.status,text:(r.stdout||"")+(r.stderr||"")};
+    };
+    const has=(text,message,key)=>text.split("\n").some(line=>line.trim()===`- ${message}:${key}`);
+    // Опубликованная пара: испорченные теневые наборы — семь предупреждений и код 0; об исправном — ни слова.
+    const warned=check((x,state)=>{withShadow(x,state);corruptEach(state.datasets,shadowKeys);});
+    if(warned.status!==0)throw new Error(`a damaged shadow dataset must not block the published-pair check:\n${warned.text}`);
+    damage.forEach(([,warning],i)=>{if(!has(warned.text,`${warning} (heals on next collection)`,shadowKeys[i]))throw new Error(`damaged shadow dataset ${shadowKeys[i]} must be reported as «${warning}»:\n${warned.text}`);});
+    if(/:sth_onchain\s*$/m.test(warned.text))throw new Error(`healthy shadow dataset must not be reported:\n${warned.text}`);
+    // Решающие наборы: отказ прежний и теми же словами. Набор без пометки decision_relevant:false — решающий,
+    // сколько бы теневым он ни назывался (здесь — gold).
+    const blocked=check((x,state)=>{withShadow(x,state);delete x.sources.gold.decision_relevant;corruptEach(state.datasets,decisionKeys);damage[0][0](state.datasets,"gold");});
+    [...damage.map(([,,failure],i)=>[failure,decisionKeys[i]]),["unsorted dataset","gold"]].forEach(([failure,key])=>{if(blocked.status===0||!has(blocked.text,failure,key))throw new Error(`damaged decision dataset ${key} must still be rejected as «${failure}»:\n${blocked.text}`);});
+    // Живой кандидат: испорченный теневой пакет сборщик в него не кладёт, поэтому здесь это отказ, как был.
+    const liveDamaged=check((x,state)=>{x.mock=false;withShadow(x,state);corruptEach(state.datasets,shadowKeys);},{REQUIRE_LIVE:"1"});
+    damage.forEach(([,,failure],i)=>{if(liveDamaged.status===0||!has(liveDamaged.text,failure,shadowKeys[i]))throw new Error(`live candidate with damaged shadow dataset ${shadowKeys[i]} must be rejected as «${failure}»:\n${liveDamaged.text}`);});
   }
 } finally {try{unlinkSync(path)}catch{}try{unlinkSync(statePath)}catch{}try{unlinkSync(generatedBasePath)}catch{}try{unlinkSync(generatedStatePath)}catch{}}
 
