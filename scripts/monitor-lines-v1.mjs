@@ -90,44 +90,48 @@ export function updateTrancheStateV1(previous,{now,target,position}){
   return left===0?{state:null,position:goal}:{state:{...plan,left,next_at:nextSession()},position:Number(position)+Number(plan.tranche_pct)};
 }
 
-// Эпизоды расхождения целей линии и policy_v1 по дневным строкам монитора. Определение принадлежит
+// Эпизоды расхождения целей линии и базы по дневным строкам монитора. Определение принадлежит
 // контракту кандидата (countTargetDivergenceEpisodesV3: непрерывная серия дневных строк с разными
 // целями считается один раз; счёт по снимкам не годится — суточная линия отстаёт от каждой
 // внутридневной смены цели v1 на часы, и порог набирался бы за трое суток одной задержкой фикса).
+// База по умолчанию — policy_v1 (так считаются сравнения comparisons.*); приёмка кандидата v3 считает
+// против линии с теми же часами (acceptance_criteria.divergence_base).
 // Пока в модуле кандидата определения нет (заглушка), счёта нет вовсе — null, а не свой вариант.
-export function divergenceEpisodesV3(daily,line="policy_v3_shadow",counter=V3.countTargetDivergenceEpisodesV3){
+export function divergenceEpisodesV3(daily,line="policy_v3_shadow",counter=V3.countTargetDivergenceEpisodesV3,base="policy_v1"){
   if(typeof counter!=="function")return null;
-  const counted=counter(daily,{candidate:line,base:"policy_v1"});
+  const counted=counter(daily,{candidate:line,base});
   return finite(counted?.episodes)?{episodes:Number(counted.episodes),days:finite(counted.days)?Number(counted.days):null}:null;
 }
 
 // Машинная приёмка кандидата v3. Критерии и их определения — в контракте кандидата
 // (decision_record.acceptance_criteria и acceptance_definitions); монитор только считает. Пока хотя
 // бы одного ключа нет (контракт не наполнен) — статус collecting, числа всё равно публикуются.
-//  shadow_days_min — полные сутки от старта линии; min_target_changes_vs_v1 — эпизоды расхождения
-//  цели с v1 (без определения в модуле критерий не оценён, статус collecting);
+//  shadow_days_min — полные сутки от старта линии; min_divergence_episodes — эпизоды расхождения
+//  цели с линией divergence_base — правилами v1 на тех же часах (с самой policy_v1 суточная линия
+//  расходится на каждой внутридневной смене цели, и порог набирал бы один такт без смены правил;
+//  без определения в модуле критерий не оценён, статус collecting);
 //  timing_pp_not_worse_than_v1 — тайминг по определению контракта: чистая доходность линии минус
 //  чистая доходность её собственной постоянной доли, против того же числа у v1 на общем окне (true
 //  — не хуже; число — допуск в п.п.); max_drawdown_worse_pp_max — насколько глубже просадка по
 //  дневным закрытиям общего окна; falsify_net_return_gap_pp на окне не короче falsify_min_days —
 //  отклонение (знак порога не важен: отклоняет отставание больше его модуля).
-const ACCEPTANCE_KEYS_V3=["shadow_days_min","min_target_changes_vs_v1","timing_pp_not_worse_than_v1","max_drawdown_worse_pp_max","falsify_net_return_gap_pp","falsify_min_days"];
+const ACCEPTANCE_KEYS_V3=["shadow_days_min","divergence_base","min_divergence_episodes","timing_pp_not_worse_than_v1","max_drawdown_worse_pp_max","falsify_net_return_gap_pp","falsify_min_days"];
 export const acceptanceCriteriaV3=()=>POLICY_V3_CANDIDATE?.decision_record?.acceptance_criteria??null;
 export function evaluateAcceptanceV3({criteria=acceptanceCriteriaV3(),shadowDays=null,divergence=null,timingGapPp=null,drawdownWorsePp=null,netReturnGapPp=null}={}){
   const round=x=>finite(x)?Number(Number(x).toFixed(4))+0:null;
-  const numbers={shadow_days:finite(shadowDays)?Number(shadowDays):null,target_changes_vs_v1:finite(divergence?.episodes)?Number(divergence.episodes):null,divergence_days:finite(divergence?.days)?Number(divergence.days):null,timing_gap_pp_vs_v1:round(timingGapPp),max_drawdown_worse_pp:round(drawdownWorsePp),net_return_gap_pp_vs_v1:round(netReturnGapPp)};
+  const numbers={shadow_days:finite(shadowDays)?Number(shadowDays):null,divergence_base:typeof criteria?.divergence_base==="string"?criteria.divergence_base:null,divergence_episodes:finite(divergence?.episodes)?Number(divergence.episodes):null,divergence_days:finite(divergence?.days)?Number(divergence.days):null,timing_gap_pp_vs_v1:round(timingGapPp),max_drawdown_worse_pp:round(drawdownWorsePp),net_return_gap_pp_vs_v1:round(netReturnGapPp)};
   const missing=ACCEPTANCE_KEYS_V3.filter(key=>!isObject(criteria)||criteria[key]===undefined||criteria[key]===null);
   if(missing.length)return{...numbers,falsified:false,meets:null,status:"collecting",missing_criteria:missing};
   const timingRule=criteria.timing_pp_not_worse_than_v1,timingFloor=timingRule===true?0:finite(timingRule)&&typeof timingRule!=="boolean"?-Math.abs(Number(timingRule)):null;
   const days=numbers.shadow_days??0;
   const meets={
     shadow_days:days>=Number(criteria.shadow_days_min),
-    target_changes:numbers.target_changes_vs_v1===null?null:numbers.target_changes_vs_v1>=Number(criteria.min_target_changes_vs_v1),
+    divergence:numbers.divergence_episodes===null?null:numbers.divergence_episodes>=Number(criteria.min_divergence_episodes),
     timing:timingFloor===null?true:finite(timingGapPp)?Number(timingGapPp)>=timingFloor:null,
     drawdown:finite(drawdownWorsePp)?Number(drawdownWorsePp)<=Number(criteria.max_drawdown_worse_pp_max):null,
   };
   const falsified=finite(netReturnGapPp)&&Number(netReturnGapPp)<-Math.abs(Number(criteria.falsify_net_return_gap_pp))&&days>=Number(criteria.falsify_min_days);
-  const ready=meets.shadow_days&&meets.target_changes===true&&meets.timing===true&&meets.drawdown===true;
+  const ready=meets.shadow_days&&meets.divergence===true&&meets.timing===true&&meets.drawdown===true;
   return{...numbers,falsified,meets,status:falsified?"falsified":ready?"switch_ready_pending_owner":"collecting"};
 }
 export { policyV3CandidateMetadata };

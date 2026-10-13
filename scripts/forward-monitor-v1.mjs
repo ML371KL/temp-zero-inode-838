@@ -678,7 +678,9 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     const fresh=variantRun.ok?variantRun.published:{},v3Line=monitor.strategies.policy_v3_shadow,v3Meta=monitor.strategy_meta.policy_v3_shadow,v3Born=Date.parse(v3Meta?.started_at);
     const numbers=v3Line&&finite(v3Born)?(()=>{
       const lineDd=closeDrawdownPctV1(monitor.daily,"policy_v3_shadow",v3Born,1-Math.abs(Number(v3Meta.start_target_pct)||0)/100*costRate),policyDd=closeDrawdownPctV1(monitor.daily,"policy_v1",v3Born,v3Meta.base?.policy_v1_nav??null),cmp=monitor.comparisons.policy_v3_shadow;
-      return{shadowDays:Math.max(0,Math.floor((now-v3Born)/DAY)),divergence:cmp?.divergence??null,timingGapPp:cmp?.vs_null_gap_pp??null,drawdownWorsePp:finite(lineDd)&&finite(policyDd)?Math.abs(lineDd)-Math.abs(policyDd):null,netReturnGapPp:cmp?.net_return_gap_pp??null};
+      // Эпизоды расхождения приёмки — против линии с теми же часами, а не против policy_v1 (см. контракт кандидата).
+      const base=acceptanceCriteriaV3()?.divergence_base,divergence=typeof base==="string"&&monitor.strategies[base]?divergenceEpisodesV3(monitor.daily,"policy_v3_shadow",undefined,base):null;
+      return{shadowDays:Math.max(0,Math.floor((now-v3Born)/DAY)),divergence,timingGapPp:cmp?.vs_null_gap_pp??null,drawdownWorsePp:finite(lineDd)&&finite(policyDd)?Math.abs(lineDd)-Math.abs(policyDd):null,netReturnGapPp:cmp?.net_return_gap_pp??null};
     })():{};
     monitor.v3_candidate={target_pct:null,evaluated_at:null,...(monitor.v3_candidate||{}),...policyV3CandidateMetadata(),...(fresh.policy_v3_shadow?{...fresh.policy_v3_shadow,evaluated_at:at}:{}),acceptance:acceptanceCriteriaV3(),acceptance_status:evaluateAcceptanceV3(numbers)};
     monitor.variants={...(monitor.variants||{}),...Object.fromEntries(VARIANT_LINES_V1.filter(name=>name!=="policy_v3_shadow"&&fresh[name]).map(name=>[name,{...fresh[name],evaluated_at:at}]))};

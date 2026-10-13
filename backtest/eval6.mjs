@@ -78,6 +78,8 @@ const band = s => s == null ? "unknown" : s >= 20 ? "supportive" : s <= -20 ? "a
 
 function familyScore(r, i, f, o) {
   if (o.drop?.includes(f)) return null;
+  // override — балл семьи по дням, посчитанный снаружи (eval7.mjs: макросемьи по календарю публикации).
+  if (o.override?.[f]) { const v = o.override[f][i]; return v != null && Number.isFinite(Number(v)) ? v : null; }
   // macroLag — на сколько дней макровходы старше остальных. На бою дневные ряды FRED за день D выходят
   // днём D+1 после 13:30 UTC, то есть ПОСЛЕ суточного фикса 06:00 UTC: фикс читает макро за D−1.
   // Здесь, на дневной сетке, это цена одного возраста входов; вместе со временем исполнения — eval7.mjs.
@@ -185,7 +187,9 @@ const vol60 = i => { if (i < 60) return null; const r = []; for (let k = i - 59;
 const trendVol25 = i => { const s = sma(i, 200), v = vol60(i); return s != null && v != null && closes[i] >= s ? clamp(25 / v * 100, 0, 100) : 0; };
 
 // Набор переключателей кандидата v3 (раздел 6) — общий с eval7.mjs.
-const V3 = { noDeadRules: true, drop: ["institutional"], networkV3: true, exchangeV3: true, twoWindows: true, floor: "graduated" };
+// Семья CFTC у кандидата голосует, как в v1: история её вклад не различает (eval7.mjs, датировка отчёта),
+// и без её голоса живёт только отдельная линия v1_no_cftc.
+const V3 = { noDeadRules: true, networkV3: true, exchangeV3: true, twoWindows: true, floor: "graduated" };
 
 // Всё ниже — отчёт; при импорте из eval7.mjs он не строится.
 const DIRECT = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -238,6 +242,7 @@ const VARIANTS = [
   ["оценка: согласие двух окон", { twoWindows: true }], ["без правил, которые не могут сработать", { noDeadRules: true }], ["пол 40/60/80 по закрытиям", { floor: "graduated" }],
   ["пол 40/60/80 + удержание после ухода якоря", { floor: "graduated", carry: true }], ["пол 40/60/80 + хотя бы одна нога > 0", { floor: "graduated", onePositive: true }],
   ["кандидат v3 целиком", V3], ["v3 + удержание после ухода якоря", { ...V3, carry: true }],
+  ["v3 без голоса CFTC", { ...V3, drop: ["institutional"] }],
   ["v3, макровходы на день старше", { ...V3, macroLag: 1 }], ["v3, макровходы на три дня старше", { ...V3, macroLag: 3 }],
   ["v1, макровходы на день старше", { macroLag: 1 }],
 ];

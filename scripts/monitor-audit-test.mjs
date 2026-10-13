@@ -254,7 +254,10 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
   const episodes=divergenceEpisodesV3(m.daily,"policy_v3_shadow");
   assert.deepEqual(m.comparisons.policy_v3_shadow.divergence??null,episodes);
   if(episodes!==null)assert.deepEqual(episodes,{episodes:1,days:1},"цель кандидата 35 против 45 у v1 в дневной строке — один эпизод расхождения");
-  assert.equal(m.v3_candidate.acceptance_status.target_changes_vs_v1,episodes?.episodes??null);
+  // Приёмка считает эпизоды против линии с теми же часами (divergence_base контракта), а не против policy_v1.
+  const sameClock=divergenceEpisodesV3(m.daily,"policy_v3_shadow",undefined,POLICY_V3_CANDIDATE.decision_record.acceptance_criteria.divergence_base);
+  assert.deepEqual([m.v3_candidate.acceptance_status.divergence_base,m.v3_candidate.acceptance_status.divergence_episodes],["v1_daily_close",sameClock?.episodes??null]);
+  if(sameClock!==null)assert.deepEqual(sameClock,{episodes:1,days:1},"цель кандидата 35 против 45 у суточной линии v1 — один эпизод");
   assert.equal(m.strategies.policy_v3_shadow.target_changes_vs_v1,undefined,"счёта смен разности на снимках в учёте линии нет");
   assert.equal(m.v3_candidate.id,POLICY_V3_CANDIDATE.id);assert.equal(m.v3_candidate.target_pct,35);assert.equal(m.v3_candidate.evaluated_at,iso(T0+3*HOUR));
   assert.equal(m.v3_candidate.acceptance_status.status,"collecting");
@@ -338,17 +341,18 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
 {
   // Приёмка кандидата v3: критерии из контракта; без них — collecting и список недостающих ключей.
   const none=evaluateAcceptanceV3({criteria:null,shadowDays:100});
-  assert.equal(none.status,"collecting");assert.equal(none.missing_criteria.length,6);assert.equal(none.shadow_days,100);
-  const criteria={shadow_days_min:90,min_target_changes_vs_v1:4,timing_pp_not_worse_than_v1:true,max_drawdown_worse_pp_max:3,falsify_net_return_gap_pp:5,falsify_min_days:120};
+  assert.equal(none.status,"collecting");assert.equal(none.missing_criteria.length,7);assert.equal(none.shadow_days,100);
+  const criteria={shadow_days_min:90,divergence_base:"v1_daily_close",min_divergence_episodes:4,timing_pp_not_worse_than_v1:true,max_drawdown_worse_pp_max:3,falsify_net_return_gap_pp:5,falsify_min_days:120};
   assert.equal(evaluateAcceptanceV3({criteria:{...criteria,falsify_min_days:undefined},shadowDays:100}).status,"collecting");
   const ready={criteria,shadowDays:95,divergence:{episodes:6,days:15},timingGapPp:0.4,drawdownWorsePp:1,netReturnGapPp:0.8};
-  assert.deepEqual([evaluateAcceptanceV3(ready).target_changes_vs_v1,evaluateAcceptanceV3(ready).divergence_days],[6,15]);
+  assert.deepEqual([evaluateAcceptanceV3(ready).divergence_base,evaluateAcceptanceV3(ready).divergence_episodes,evaluateAcceptanceV3(ready).divergence_days],["v1_daily_close",6,15]);
+  assert.equal(evaluateAcceptanceV3({...ready,criteria:{...criteria,divergence_base:undefined}}).status,"collecting","без названной базы эпизодов приёмка не оценена");
   assert.equal(evaluateAcceptanceV3(ready).status,"switch_ready_pending_owner","выполненные критерии дают только pending-owner");
   assert.equal(evaluateAcceptanceV3({...ready,shadowDays:60}).status,"collecting");
   assert.equal(evaluateAcceptanceV3({...ready,divergence:{episodes:1,days:40}}).status,"collecting","кандидат, почти не расходившийся с v1, ничего не доказал: одна длинная серия — один эпизод");
   // Определения эпизодов в модуле нет — критерий не оценён, приёмка ждёт; фальсификация от него не зависит.
   const undefinedEpisodes=evaluateAcceptanceV3({...ready,divergence:null});
-  assert.deepEqual([undefinedEpisodes.status,undefinedEpisodes.meets.target_changes,undefinedEpisodes.target_changes_vs_v1],["collecting",null,null]);
+  assert.deepEqual([undefinedEpisodes.status,undefinedEpisodes.meets.divergence,undefinedEpisodes.divergence_episodes],["collecting",null,null]);
   assert.equal(evaluateAcceptanceV3({...ready,divergence:null,shadowDays:130,netReturnGapPp:-6}).status,"falsified");
   // Обёртка счёта: определение приходит из модуля кандидата; без него — null, а не собственный вариант.
   const rowsOf=pairs=>pairs.map(([line,base],i)=>({date:iso(T0+i*DAY).slice(0,10),targets:{policy_v3_shadow:line,policy_v1:base}}));

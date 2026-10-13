@@ -127,52 +127,66 @@ const targets = (variants, keys = LINE_KEYS) => keys.map(k => variants[k].target
   assert.equal(C.capitulation_floor_pct, POLICY_V1.allocation_overlays.capitulation_floor_pct);
   assert.equal(C.scoring.valuation.cheap_max_percentile, POLICY_V1.allocation_overlays.capitulation_max_mvrv_percentile);
   assert.deepEqual(C.daily_fix, { hour_utc: 6, confirm_fixes_down: 1, confirm_fixes_up: 2, missed_day_resets_streaks: true });
-  assert.deepEqual(C.scoring.non_voting_families, ["institutional"]);
+  assert.deepEqual(C.scoring.non_voting_families, [], "у кандидата голосуют все семьи v1");
+  assert.deepEqual(C.lines.v1_no_cftc.excluded_families, ["institutional"], "без голоса CFTC живёт только линия атрибуции");
   assert.deepEqual(C.scoring.removed_rules, ["euphoria_safety_cap", "distribution_detector"]);
   assert.deepEqual([C.scoring.valuation.deep_min_points, C.scoring.valuation.deep_max_age_days], [2000, 5]);
   const a = C.decision_record.acceptance_criteria;
-  assert.deepEqual([a.shadow_days_min, a.min_target_changes_vs_v1, a.timing_pp_not_worse_than_v1, a.max_drawdown_worse_pp_max, a.falsify_net_return_gap_pp, a.falsify_min_days], [180, 3, true, 5, -10, 180]);
+  assert.deepEqual([a.shadow_days_min, a.divergence_base, a.min_divergence_episodes, a.timing_pp_not_worse_than_v1, a.max_drawdown_worse_pp_max, a.falsify_net_return_gap_pp, a.falsify_min_days], [180, "v1_daily_close", 3, true, 5, -10, 180]);
+  // Эпизоды расхождения считаются против линии с теми же часами: с policy_v1 суточная линия расходится
+  // на каждой внутридневной смене цели, и порог набирал бы один такт без смены правил (ревью 13.10.2026).
+  assert.ok(Object.keys(C.lines).includes(a.divergence_base) && C.lines[a.divergence_base].tact === C.lines.policy_v3_shadow.tact, "база эпизодов расхождения — линия на тех же часах, что кандидат");
   assert.ok(a.switch_requires_all.length >= 6 && a.falsified_if.length > 20, "предзаявлены и приёмка, и фальсификация");
   assert.doesNotMatch(JSON.stringify(a), /sharpe/i, "разрыв Sharpe в критерии не входит: на 90 днях его шум 0,19");
   assert.ok(JSON.stringify(a).length < 1200, "критерии публикуются в каждом снимке — блок обязан оставаться коротким");
-  assert.deepEqual(Object.keys(C.decision_record.acceptance_definitions), ["shadow_days", "target_changes_vs_v1", "timing_pp", "max_drawdown_worse_pp", "net_return_gap_pp"]);
-  assert.deepEqual(C.decision_record.changes.map(x => x.id), ["daily_fix", "cftc_not_voting", "network_30d_means", "exchange_flow_from_reserve", "valuation_two_windows", "trend_closed_day", "floor_graduated", "dead_rules_removed"]);
+  assert.deepEqual(Object.keys(C.decision_record.acceptance_definitions), ["shadow_days", "divergence_episodes", "timing_pp", "max_drawdown_worse_pp", "net_return_gap_pp"]);
+  assert.deepEqual(C.decision_record.changes.map(x => x.id), ["daily_fix", "network_30d_means", "exchange_flow_from_reserve", "valuation_two_windows", "trend_closed_day", "floor_graduated", "dead_rules_removed"]);
   for (const change of C.decision_record.changes) for (const field of ["v1", "v3", "why", "numbers"]) assert.ok(change[field].length > 10, `изменение ${change.id}: поле ${field}`);
-  assert.deepEqual(C.decision_record.rejected.map(x => x.id), ["floor_carry_after_anchor", "strictly_positive_leg", "downgrade_anchor_on_macro", "sharpe_gap_criterion"]);
+  assert.deepEqual(C.decision_record.rejected.map(x => x.id), ["cftc_not_voting", "floor_carry_after_anchor", "strictly_positive_leg", "downgrade_anchor_on_macro", "sharpe_gap_criterion"]);
   for (const item of C.decision_record.rejected) assert.ok(/\d/.test(item.numbers) && item.outcome.length > 10, `отклонённое ${item.id} записано с числами`);
+  assert.ok(C.decision_record.expectation.length > 50, "ожидание от кандидата записано словами, до форварда");
   const ev = C.decision_record.evidence;
-  assert.equal(ev.rows.length, 9);
+  assert.deepEqual(ev.rows.map(r => r.role), ["base", "change", "change", "change", "change", "candidate", "rejected", "rejected", "separate_line", "rejected"]);
   for (const row of ev.rows) { assert.equal(row.values.length, ev.windows.length); for (const cell of row.values) assert.ok(cell.length === 3 && cell.every(Number.isFinite)); }
-  assert.deepEqual(clone(ev.rows.find(r => r.role === "candidate").values), [[47.4, 1.53, -40.4], [40.5, 1.38, -34.2], [23.4, 0.95, -14.1]]);
-  assert.deepEqual(clone(ev.rows.find(r => r.role === "base").values), [[43.0, 1.39, -40.8], [33.7, 1.15, -40.8], [17.5, 0.74, -15.5]]);
-  // Обе строки воспроизводит scripts/variants-history.mjs из архива backtest/ функциями этого же модуля.
-  assert.deepEqual(clone(ev.as_executed.values), [[46.5, 1.5, -40.4], [40.3, 1.38, -34.2], [23.4, 0.95, -14.1]]);
+  // Все строки, кроме двух отклонённых вариантов пола, воспроизводит scripts/variants-history.mjs функциями этого же модуля.
+  assert.deepEqual(clone(ev.as_executed.values), [[42.4, 1.38, -40.4], [33.2, 1.16, -38.6], [17.4, 0.75, -15.5]]);
   assert.match(C.decision_record.evidence_basis, /in-sample/);
   assert.match(C.decision_record.objective, /не меняя лестницу и дерево гейтов/);
   // Числа записи решения — не копия руками: они равны выводу воспроизводимых расчётов архива.
-  // backtest/eval6.mjs — дневная сетка, backtest/eval7.mjs — исполнение в час фикса по часовым ценам.
+  // backtest/eval6.mjs — дневная сетка по соглашению архива, backtest/eval7.mjs — часы кандидата с календарём публикации.
   const cell = x => [x.cagr, x.sharpe, x.maxDD];
   const grid = JSON.parse(readFileSync(new URL("../backtest/out/audit-2026-10-10.json", import.meta.url), "utf8")).v3_variants;
-  const GRID_ROW = { "v1 как есть": "v1 как есть", "без CFTC": "без CFTC", "сеть по 30-дневным средним": "сеть по 30-дневным средним", "биржи по остатку": "биржи по остатку", "оценка: согласие двух окон": "оценка: согласие двух окон", "пол 40/60/80 по закрытиям": "пол 40/60/80 по закрытиям", "кандидат v3 целиком": "кандидат v3 целиком", "v3 + удержание пола после ухода якоря": "v3 + удержание после ухода якоря", "пол + «хотя бы одна нога > 0»": "пол 40/60/80 + хотя бы одна нога > 0" };
+  const GRID_ROW = { "v3 + удержание пола после ухода якоря": "v3 + удержание после ухода якоря", "пол + «хотя бы одна нога > 0»": "пол 40/60/80 + хотя бы одна нога > 0" };
   const GRID_WINDOWS = ["2013-01…2026-07", "2018-06…2026-07", "эра ETF 2024-03…2026-07"];
-  for (const row of ev.rows) { const source = grid[GRID_ROW[row.variant]]; assert.ok(source, `строка «${row.variant}» есть в выводе eval6`); assert.deepEqual(clone(row.values), GRID_WINDOWS.map(w => cell(source[w])), `строка «${row.variant}» равна выводу eval6`); }
+  for (const row of ev.rows) { const source = grid[GRID_ROW[row.variant] ?? row.variant]; assert.ok(source, `строка «${row.variant}» есть в выводе eval6`); assert.deepEqual(clone(row.values), GRID_WINDOWS.map(w => cell(source[w])), `строка «${row.variant}» равна выводу eval6`); }
   const hourly = JSON.parse(readFileSync(new URL("../backtest/out/audit-2026-10-13-fix-hour.json", import.meta.url), "utf8"));
-  const HOUR_WINDOWS = ["2018-06…2026-07", "эра ETF 2024-03…2026-07"], HOUR_ROW = { "правила v1 на суточном фиксе": "v1 на суточном фиксе", "без CFTC": "без CFTC", "оценка: согласие двух окон": "оценка: согласие двух окон", "пол 40/60/80 по фиксам": "пол 40/60/80 по фиксам", "кандидат v3 целиком": "кандидат v3 целиком" };
-  const fix = ev.at_fix_hour;
+  const HOUR_WINDOWS = ["2018-06…2026-07", "эра ETF 2024-03…2026-07"], fix = ev.at_fix_hour;
   assert.deepEqual([...fix.windows], ["с 06.2018", "эра ETF (03.2024+)"]);
-  assert.deepEqual(fix.rows.map(r => r.role), ["base", "change", "change", "change", "candidate"]);
-  for (const row of fix.rows) assert.deepEqual(clone(row.values), HOUR_WINDOWS.map(w => cell(hourly.components_at_06h[HOUR_ROW[row.variant]][w])), `строка «${row.variant}» равна выводу eval7`);
-  assert.deepEqual(Object.keys(fix.fix_hours_utc), ["6", "15", "22", "24"]);
+  assert.deepEqual(fix.rows.map(r => r.role), ["base", "change", "change", "change", "change", "candidate", "separate_line", "rejected"]);
+  for (const row of fix.rows) { const source = hourly.components_at_06h[row.variant]; assert.ok(source, `строка «${row.variant}» есть в выводе eval7`); assert.deepEqual(clone(row.values), HOUR_WINDOWS.map(w => cell(source[w])), `строка «${row.variant}» равна выводу eval7`); }
+  assert.deepEqual(Object.keys(fix.fix_hours_utc), ["6", "12", "18", "23", "24"]);
   for (const [hour, values] of Object.entries(fix.fix_hours_utc)) assert.deepEqual(clone(values), HOUR_WINDOWS.map(w => cell(hourly.lines["кандидат v3"].by_publication[`${hour}h`][w])), `час фикса ${hour} равен выводу eval7`);
-  assert.deepEqual(clone(fix.rows.at(-1).values), clone(fix.fix_hours_utc[C.daily_fix.hour_utc]), "строка кандидата — его собственный час фикса");
-  // Возраст макровходов к часу фикса в расчёте — тот, что заявлен в контракте: до 15:00 UTC всё макро на день старше.
-  assert.deepEqual(hourly.publication_lag_days[`${C.daily_fix.hour_utc}h`], { stress: 1, conditions: 1, liquidity: 1 });
-  // Ревью 13.10.2026: контракт утверждал, что к 06:00 UTC приходит и FRED и фикс читает входы одного
-  // возраста. Это неверно — вчерашние спреды и VIX выходят около 13:30 UTC, ставки — около 21:15.
+  assert.deepEqual(clone(fix.rows.find(r => r.role === "candidate").values), clone(fix.fix_hours_utc[C.daily_fix.hour_utc]), "строка кандидата — его собственный час фикса");
+  assert.deepEqual(clone(fix.fresh_macro), HOUR_WINDOWS.map(w => cell(hourly.lines["кандидат v3"].fresh_macro[`${C.daily_fix.hour_utc}h`][w])));
+  // Расчёт сам сверил свой пересчёт макросемей с реконструкцией и час 24 — с дневной сеткой.
+  assert.deepEqual(hourly.self_check.macro_recomputation_vs_timeline.mismatches, { liquidity: 0, conditions: 0, stress: 0 });
+  // Ревью 13.10.2026. (1) Контракт утверждал, что к 06:00 UTC приходит и FRED и фикс читает входы одного
+  // возраста. (2) Первая правка назвала макро «на один рабочий день старше» и записала числа расчёта, в
+  // котором недельный индекс доллара и пятничные ряды доставались фиксу раньше публикации (45,5 / 1,51).
   const clock = C.decision_record.changes[0];
-  assert.ok(!clock.why.includes("одного возраста") && !clock.why.includes("одного\nвозраста"), "на фиксе макровходы старше остальных — контракт не вправе утверждать обратное");
-  assert.ok(clock.why.includes("на один рабочий день старше"));
-  assert.ok(clock.numbers.includes("45,5 / 1,51 / −33,0") && clock.numbers.includes("43,1 / 1,40 / −36,7"), "числа расчёта по часовым ценам записаны в обоснование такта");
+  assert.ok(!clock.why.includes("одного возраста") && !clock.why.includes("на один рабочий день старше"), "возраст макровходов на фиксе заявлен как есть");
+  assert.ok(clock.why.includes("3–10 суток") && clock.why.includes("в воскресенье и понедельник"), "недельный индекс доллара и выходные названы прямо");
+  const ru = v => String(v).replace("-", "−").replace(".", ","), triple = v => `${ru(v[0].toFixed(1))} / ${ru(v[1].toFixed(2))} / ${ru(v[2].toFixed(1))}`;
+  for (const hour of [6, 12, 18, 23]) assert.ok(clock.numbers.includes(triple(fix.fix_hours_utc[hour][0])), `обоснование такта несёт число расчёта для фикса в ${hour}:00`);
+  assert.ok(clock.numbers.includes(triple(fix.fresh_macro[0])), "и потолок свежего макро");
+  assert.ok(!JSON.stringify(C).includes("45,5 / 1,51") && !JSON.stringify(C).includes("43,1 / 1,40"), "чисел расчёта с завышенной свежестью макро в записи решения нет");
+  // Семья CFTC: история её вклад не различает — запись говорит это числами обоих расчётов.
+  const cftc = C.decision_record.rejected[0], dating = Object.entries(hourly.cftc_dating_at_06h).filter(([name]) => name.includes("сут. позже")).map(([, w]) => w);
+  const span = w => { const v = dating.map(x => x[w].cagr); return [Math.min(...v), Math.max(...v)]; };
+  assert.equal(dating.length, 9);
+  assert.ok(cftc.numbers.includes(`от ${ru(span(HOUR_WINDOWS[0])[0].toFixed(1))} до ${ru(span(HOUR_WINDOWS[0])[1].toFixed(1))} % годовых с 06.2018`) && cftc.numbers.includes(`от ${ru(span(HOUR_WINDOWS[1])[0].toFixed(1))} до ${ru(span(HOUR_WINDOWS[1])[1].toFixed(1))} % в эру ETF`), "размах по датировке отчёта CFTC — из вывода eval7");
+  const without = hourly.cftc_dating_at_06h["правила v1 без голоса CFTC"];
+  for (const w of HOUR_WINDOWS) assert.ok(without[w].cagr > span(w)[0] && without[w].cagr < span(w)[1], "результат без голоса семьи лежит внутри размаха по датировке: история вклад не различает");
   assert.ok(!JSON.stringify(C).includes("work/lead") && !JSON.stringify(C).includes("work\\\\lead"), "запись решения ссылается только на файлы репозитория");
 }
 
@@ -304,7 +318,7 @@ const fixture = JSON.parse(readFileSync(new URL("./variants-gate-fixture.json", 
     assert.equal(REAL.strategicCriticalV1Port(families), !!critical);
     assert.equal(REAL.macroShockStateV1Port(families.macro), shock);
     assert.equal(REAL.recoveryStateV1Port({ anchor: !!anchor, trend: families.cycle.trend, etf: families.demand.etf, exchangeSupply: families.demand.exchange_supply }).state, recovery);
-    if (REAL.strategicCandidateV1Port({ families, criticalOk: true, ...detectors, exclude: C.scoring.non_voting_families }) !== published) changedWithoutCftc += n;
+    if (REAL.strategicCandidateV1Port({ families, criticalOk: true, ...detectors, exclude: C.lines.v1_no_cftc.excluded_families }) !== published) changedWithoutCftc += n;
     seen.add(published);
     snapshots += n;
   }
@@ -649,7 +663,7 @@ checks.insufficientHolds = m => {
   assert.ok(outs[1].policy_v3_shadow.target_pct === null && outs[1].policy_v3_shadow.reason_codes.includes("trend_unavailable:price_missing"));
   // Необязательная семья (биржи при живых стейблкоинах) фикс не останавливает: блок усредняется по имеющимся.
   ({ outs } = drive(m, [[at(0, 6), {}], [at(1, 6), { cand: "deteriorating", state: "transition", s: { noReserve: true } }]]));
-  assert.deepEqual([outs[1].policy_v3_shadow.target_pct, outs[1].policy_v3_shadow.inputs.blocks.demand], [5 + 15, -50]);
+  assert.deepEqual([outs[1].policy_v3_shadow.target_pct, outs[1].policy_v3_shadow.inputs.blocks.demand], [5 + 15, -33.33], "среднее трёх оставшихся семей спроса: −1, −1 и нейтральный голос CFTC");
   assert.ok(outs[1].policy_v3_shadow.reason_codes.includes("exchange_supply_unavailable:exchange_supply_missing"));
 };
 
@@ -761,9 +775,10 @@ checks.twoWindowsInEngine = m => {
   assert.deepEqual([pricey.policy_v3_shadow.candidate, pricey.policy_v3_shadow.target_pct, pricey.policy_v3_shadow.inputs.families.valuation.v3], ["transition", 45, -1], "дорогая сторона — по одному окну, как в v1");
 };
 
-// 5.4. CFTC не голосует — ни в кандидате, ни в линии v1_no_cftc.
-checks.cftcDoesNotVote = m => {
-  const exclude = m.POLICY_V3_CANDIDATE.scoring.non_voting_families;
+// 5.4. CFTC голосует у кандидата, как в v1, и не голосует только у линии v1_no_cftc.
+checks.cftcVotesInCandidateOnly = m => {
+  const exclude = m.POLICY_V3_CANDIDATE.lines.v1_no_cftc.excluded_families;
+  assert.deepEqual([[...m.POLICY_V3_CANDIDATE.scoring.non_voting_families], [...exclude]], [[], ["institutional"]]);
   const bear = familiesOf("transition", { demand: { etf: -0.5, stablecoins: -0.5, institutional: -1 } }), bull = familiesOf("transition", { demand: { etf: 0.5, stablecoins: 0.5, institutional: 1 } });
   const gate = (families, ex) => m.strategicCandidateV1Port({ families, criticalOk: true, macroShockState: "calm", distributionState: "calm", recoveryState: "calm", exclude: ex });
   assert.deepEqual([gate(bear, []), gate(bear, exclude)], ["deteriorating", "transition"], "−1 от CFTC доводил спрос до −25; без него −16,7");
@@ -771,8 +786,11 @@ checks.cftcDoesNotVote = m => {
   assert.deepEqual([m.blockScoresV1Port(bear).demand, m.blockScoresV1Port(bear, exclude).demand], [-25, (-1 / 3) / 2 * 100]);
   const { outs } = drive(m, [[at(0, 6), { cand: "deteriorating", families: bear }], [at(1, 6), { cand: "deteriorating", families: bear }], [at(2, 6), { cand: "deteriorating", families: bear }]]);
   assert.deepEqual(outs.map(v => v.v1_daily_close.target_pct), [20, 20, 20]);
-  assert.deepEqual(outs.map(v => v.policy_v3_shadow.target_pct), [20, 20, 45], "кандидат видит «переходный» и принимает его на втором фиксе");
-  assert.deepEqual([outs[1].policy_v3_shadow.candidate, outs[1].policy_v3_shadow.inputs.families.institutional, outs[1].policy_v3_shadow.inputs.blocks.demand], ["transition", { v3: null, v1: -1 }, -16.67]);
+  assert.deepEqual(outs.map(v => v.policy_v3_shadow.target_pct), [20, 20, 20], "кандидат считает голос CFTC, как v1: спрос −25, режим «ухудшается»");
+  assert.deepEqual([outs[1].policy_v3_shadow.candidate, outs[1].policy_v3_shadow.inputs.blocks.demand, "institutional" in outs[1].policy_v3_shadow.inputs.families], ["deteriorating", -25, false], "семья, счёт которой кандидат не меняет, в сверке «v3 против v1» не числится");
+  // Положительный голос: у кандидата и у v1 спрос +25 и «конструктивный» кандидат режима, у линии без CFTC — +16,7 и «переходный».
+  const up = drive(m, [[at(0, 6), { cand: "constructive", state: "transition", families: bull }], [at(1, 6), { cand: "constructive", state: "transition", families: bull }]]).outs;
+  assert.deepEqual([up[1].policy_v3_shadow.candidate, up[1].policy_v3_shadow.inputs.blocks.demand, up[1].v1_no_cftc.candidate, up[1].v1_no_cftc.demand_block], ["constructive", 25, "transition", 16.67]);
   assert.deepEqual(outs.map(v => [v.v1_no_cftc.candidate, v.v1_no_cftc.demand_block]), [["transition", -16.67], ["transition", -16.67], ["transition", -16.67]]);
   // Семьи CFTC нет вовсе (источник лёг): блок по-прежнему среднее имеющихся.
   const missing = familiesOf("deteriorating", { demand: { institutional: null } });
@@ -877,9 +895,9 @@ checks.publishedShape = m => {
   const v3 = outs[1].policy_v3_shadow, yesterday = iso(at(0)).slice(0, 10);
   assert.deepEqual(Object.keys(v3), ["target_pct", "base_target_pct", "state", "candidate", "fix_at", "next_fix_at", "floor", "binding_overlays", "pending", "inputs", "reason_codes"]);
   assert.deepEqual(Object.keys(v3.inputs), ["blocks", "bands", "families", "mvrv_percentile", "mvrv_percentile_deep", "deep_window_used", "deep_points", "recovery", "macro_shock_state", "critical_ok", "observed", "observed_at", "notes"]);
-  assert.deepEqual(v3.inputs.blocks, { macro: -50, demand: -33.33, cycle: 20 });
+  assert.deepEqual(v3.inputs.blocks, { macro: -50, demand: -25, cycle: 20 });
   assert.deepEqual(v3.inputs.bands, { macro: "adverse", demand: "adverse", cycle: "supportive" });
-  assert.deepEqual(Object.keys(v3.inputs.families), ["network", "exchange_supply", "valuation", "trend", "institutional"]);
+  assert.deepEqual(Object.keys(v3.inputs.families), ["network", "exchange_supply", "valuation", "trend"]);
   assert.deepEqual(v3.inputs.families.network, { v3: 0, v1: 0, hashrate_30d_change_pct: 0, difficulty_90d_change_pct: 0 });
   assert.deepEqual(v3.inputs.families.exchange_supply, { v3: 0, v1: 0, change_7d_btc: 0, change_7d_percentile: 50, reserve_90d_change_pct: 0, reserve_90d_percentile: 50 });
   assert.deepEqual([v3.inputs.mvrv_percentile, v3.inputs.deep_window_used, v3.inputs.deep_points, v3.inputs.critical_ok, v3.inputs.notes], [20, true, 2400, true, []]);
@@ -907,6 +925,12 @@ checks.publishedShape = m => {
   const late = drive(m, [[at(0, 6), { cand: "defensive" }], [at(1, 6), { ...RECOVERY, series: lagging }]]).outs[1].policy_v3_shadow;
   assert.deepEqual([late.target_pct, late.inputs.notes, late.inputs.observed.mvrv, late.inputs.observed.closed_day], [40, ["mvrv_older_than_closed_day", "exchange_supply_older_than_closed_day"], iso(at(-1)).slice(0, 10), yesterday]);
   assert.ok(late.reason_codes.includes("mvrv_older_than_closed_day"));
+  // Отстала сама дневная свеча: в ряду цены нет вчерашнего закрытия — тренд по позавчерашнему, и это помечено.
+  const noYesterday = { ...seriesFor(at(1, 6), { deep: 20 }) };
+  noYesterday.price_daily = noYesterday.price_daily.filter(p => p.t < at(0));
+  const staleCandle = m.evaluateV3Inputs({ now: at(1, 6), inputs: mk(at(1, 6), { ...RECOVERY, series: noYesterday }) }).record;
+  assert.deepEqual([staleCandle.observed.closed_day, staleCandle.notes.includes("closed_day_older_than_yesterday")], [iso(at(-1)).slice(0, 10), true]);
+  assert.ok(!v3.inputs.notes.includes("closed_day_older_than_yesterday"), "вчерашняя свеча на месте — пометки нет");
   // Между фиксами публикуется решение фикса: те же входы, тот же пол.
   assert.deepEqual({ ...outs[2].policy_v3_shadow, reason_codes: null }, { ...v3, reason_codes: null });
   assert.deepEqual(outs[2].policy_v3_shadow.reason_codes, ["between_fixes", "base:defensive", "recovery_floor", "upgrade_pending:transition:1/2"]);
@@ -1024,7 +1048,9 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
     ["фикс при недостатке данных", "if (!REGIMES.includes(calc.candidate)) {", "if (false) {", 1, ["insufficientHolds"]],
     ["аварийный режим не обнуляет цель", "target_pct: inp.hard ? POLICY_V1.ladder.emergency : blind ? null : st.tg,", "target_pct: blind ? null : st.tg,", 2, ["emergencyImmediate"]],
     ["фикс во время аварии", "if (clock.due && inp.hard) tact = \"fix_deferred\";\n    else if (clock.due && !REGIMES.includes(inp.v1.candidate)) {", "if (clock.due && !REGIMES.includes(inp.v1.candidate)) {", 1, ["emergencyImmediate"]],
-    ["CFTC снова голосует", "non_voting_families: [\"institutional\"],", "non_voting_families: [],", 1, ["cftcDoesNotVote"]],
+    ["кандидат перестал считать голос CFTC", "non_voting_families: [],", "non_voting_families: [\"institutional\"],", 1, ["cftcVotesInCandidateOnly"]],
+    ["линия v1_no_cftc считает голос CFTC", "excluded_families: [\"institutional\"] },", "excluded_families: [] },", 1, ["cftcVotesInCandidateOnly"]],
+    ["кандидат теряет балл семьи CFTC", "exchange_supply: exchange.score, institutional: v1.demand.institutional },", "exchange_supply: exchange.score, institutional: null },", 1, ["cftcVotesInCandidateOnly"]],
     ["хешрейт точка к точке", "hashrate_mean_days: 30, lookback_days: 90, min_points_in_window: 20,", "hashrate_mean_days: 1, lookback_days: 90, min_points_in_window: 1,", 1, ["hashrateSmoothed"]],
     ["шкала хешрейта сдвинута", "leg_bands_pct: [-5, -15]", "leg_bands_pct: [-10, -15]", 1, ["hashrateSmoothed"]],
     ["рост остатка голосует «за»", "out.flow_leg = finite(p) ? (flow > 0 ? Math.min(lowGoodV1Port(p), 0) : lowGoodV1Port(p)) : null;", "out.flow_leg = finite(p) ? lowGoodV1Port(p) : null;", 1, ["exchangeEconomicZero", "exchangeMatchesReference"]],
@@ -1053,6 +1079,7 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
     ["обычные четыре дня отставания стресса помечаются", "> STRESS_MAX_LAG_DAYS * DAY) notes.push", ">= STRESS_MAX_LAG_DAYS * DAY) notes.push", 1, ["publishedShape"]],
     ["дата макровхода из будущего публикуется", "if (t !== null && t <= now) observed[key] = dateOf(t);", "if (t !== null) observed[key] = dateOf(t);", 1, ["publishedShape"]],
     ["даты макровходов не публикуются", "for (const key of MACRO_OBSERVED) {", "for (const key of []) {", 1, ["publishedShape"]],
+    ["отставшая дневная свеча не помечается", "notes.push(\"closed_day_older_than_yesterday\");", ";", 1, ["publishedShape"]],
   ];
   const used = new Set();
   for (const [name, from, to, occurrences, failing] of MUTATIONS) {
@@ -1068,7 +1095,7 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
 }
 
 // =====================================================================================
-// 8. Приёмка: эпизоды расхождения с v1 (критерий min_target_changes_vs_v1)
+// 8. Приёмка: эпизоды расхождения целей по дневным строкам (критерий min_divergence_episodes)
 // =====================================================================================
 {
   const rows = (pairs) => pairs.map(([candidate, base], i) => ({ date: iso(at(i)).slice(0, 10), targets: { policy_v3_shadow: candidate, policy_v1: base } }));
@@ -1087,8 +1114,10 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
 // 9. Закоммиченный снимок: входы, собранные из него, движок принимает без отказов
 // =====================================================================================
 // Снимок в репозитории меняется каждые 15 минут и бывает обеих форм: старой (рядов и состояния вариантов
-// в нём нет) и новой. Жёсткие ожидания поэтому стоят только там, где они следуют из самого снимка.
-{
+// в нём нет) и новой. Этот набор стоит в `npm run check`, а тот блокирует сбор на каждом такте: отказ
+// теневого расчёта на живом снимке не имеет права остановить конвейер (ревью 13.10.2026). Поэтому здесь
+// не утверждения, а диагностика — строка в журнале такта; поведение движка закрыто синтетикой выше.
+try {
   let snapshot = null;
   try { snapshot = JSON.parse(readFileSync(new URL("../docs/snapshot.json", import.meta.url), "utf8")); } catch { /* снимка нет — проверять нечего */ }
   const now = Date.parse(snapshot?.generated_at ?? "");
@@ -1113,6 +1142,8 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
       assert.equal(typeof second.variants.v1_daily_close.target_pct, "number");
     }
   }
+} catch (error) {
+  console.warn(`Policy v3 candidate: движок на закоммиченном снимке — ${String(error?.message || error).split("\n")[0].slice(0, 300)} (не блокирует)`);
 }
 
 console.log(`Policy v3 candidate OK: ${assertions.toLocaleString("en-US")} assertions — contract, v1 ports vs locked sections and published ledger, daily fix clock, hysteresis in fixes, four shadow lines, garbage tolerance, mutations`);

@@ -69,7 +69,7 @@ function familiesV1(r) {
 }
 // Вариант правила. mode: "audit" — подстановки как в расчёте аудита; "engine" — счёт модуля без подстановок.
 function build(o, mode = "audit") {
-  const exclude = o.noCftc ? POLICY_V3_CANDIDATE.scoring.non_voting_families : [], out = { target: [], state: [], candidate: [], detectors: [] };
+  const exclude = o.noCftc ? POLICY_V3_CANDIDATE.lines.v1_no_cftc.excluded_families : POLICY_V3_CANDIDATE.scoring.non_voting_families, out = { target: [], state: [], candidate: [], detectors: [] };
   let st = null, closes = 0;
   rows.forEach((r, i) => {
     const families = familiesV1(r), x = X[i];
@@ -92,10 +92,11 @@ function build(o, mode = "audit") {
   return out;
 }
 
-const WINDOWS = ["2013-01-01", "2018-06-01", "2024-03-01"], FULL = { noCftc: true, network: true, exchange: true, twoWindows: true, noDead: true, trend: true, floor: "graduated" };
+const WINDOWS = ["2013-01-01", "2018-06-01", "2024-03-01"], FULL = { network: true, exchange: true, twoWindows: true, noDead: true, trend: true, floor: "graduated" };
 const VARIANTS = [
   ["v1 как есть", {}], ["без CFTC", { noCftc: true }], ["сеть по 30-дневным средним", { network: true }], ["биржи по остатку", { exchange: true }],
   ["оценка: согласие двух окон", { twoWindows: true }], ["пол 40/60/80 по закрытиям", { floor: "graduated" }], ["кандидат v3 целиком", FULL],
+  ["v3 без голоса CFTC", { ...FULL, noCftc: true }],
 ];
 const cell = v => `${v[0].toFixed(1).padStart(5)} /${v[1].toFixed(2).padStart(5)} /${v[2].toFixed(1).padStart(6)}`;
 const result = { rows: rows.length, from: rows[0].date, to: rows.at(-1).date, audit_scheme: [], engine_scheme: [], legs: {}, engine: {} };

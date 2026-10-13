@@ -186,7 +186,7 @@ console.log("\n5. policy_v3_shadow на окне");
 console.log("   " + JSON.stringify(v3Summary));
 result.attribution.v3_vs_v1 = printSegments("policy_v3_shadow против v1 как опубликована (вклад доли × ход BTC, отрезки от 0,15 п.п.)", cold.books.policy_v3_shadow, published, "v3", "v1");
 result.attribution.v3_vs_daily = printSegments("policy_v3_shadow против v1_daily_close — вклад изменений счёта и пола поверх суточного такта", cold.books.policy_v3_shadow, cold.books.v1_daily_close, "v3", "сут.");
-// Критерий приёмки min_target_changes_vs_v1: эпизоды расхождения по дневным строкам (определение контракта)
+// Критерий приёмки min_divergence_episodes: эпизоды расхождения по дневным строкам (определение контракта)
 // против числа смен разности целей на снимках — оно считает и задержку суточного фикса в несколько часов.
 {
   const dailyRows = new Map();
@@ -200,6 +200,10 @@ result.attribution.v3_vs_daily = printSegments("policy_v3_shadow против v1
     result.divergence_vs_v1[key] = { ...episodes, gap_changes_on_snapshots: gapChanges };
     console.log(`      ${key.padEnd(18)} ${pad(episodes.episodes, 3)} / ${pad(episodes.days, 3)} / ${pad(gapChanges, 3)}`);
   }
+  // Тот же счёт против линии с теми же часами — так его считает приёмка кандидата (divergence_base).
+  const base = POLICY_V3_CANDIDATE.decision_record.acceptance_criteria.divergence_base;
+  result.divergence_vs_same_clock = { base, ...countTargetDivergenceEpisodesV3([...dailyRows.values()], { candidate: "policy_v3_shadow", base }) };
+  console.log(`   policy_v3_shadow против ${base} (база приёмки): эпизодов ${result.divergence_vs_same_clock.episodes}, дней ${result.divergence_vs_same_clock.days}`);
 }
 if (flag("--fixes")) {
   console.log("   фикс              цена  v1 сост/канд/цель      v3 канд → сост  цель пол | M / D / C            | сеть б.п. оц. тренд (v3|v1) | MVRV 4г/глуб | recovery");
