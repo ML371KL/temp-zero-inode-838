@@ -264,7 +264,8 @@ calendar (candidate since 2018-06): fix at 06:00 — 40.3 / 1.34 / −28.1; at 1
 35.9 / 1.23 / −34.3. An early fix with older macro beats a late fix with fresher macro. Macro age
 is not free: with macro known on its observation date the 06:00 fix would give 41.2 / 1.37 / −30.7,
 and 24.6% a year against 20.9% in the ETF era; most of that is the weekly publication of the dollar
-index. On the 83 live days the hour of the fix alone moved the result of `v1_daily_close` from
+index. The same staleness applies to live v1, whose reconstruction read the index as a daily series; a
+daily dollar measure is the natural next repair of the macro block and is not part of this candidate. On the 83 live days the hour of the fix alone moved the result of `v1_daily_close` from
 +0.1% to +9.2%: one window cannot rank fix hours.
 
 Rejected with measurements, do not resurrect inside the candidate:
@@ -302,11 +303,11 @@ v2 and v3 are alternatives, not stages: at most one of them replaces v1, and v3 
 the v2 floor graduation.
 
 **Operational properties of the shadow lines.** The monitor executes a target only when the
-decision passes the panel's display gate. This includes the emergency override: with decision
-quality `paused` the panel shows the emergency strip together with "no new actions", and the
-monitor holds the previous share — it tracks what the panel told the owner to do. Whether the
-emergency override should bypass the quality gate is a rule of the frozen v1 action gate, not of
-the monitor. A run of the previous release (a rollback) leaves a gap in the accounting of the
+decision passes the panel's display gate. This includes the emergency override: when it coincides
+with failed critical coverage, the action gate hides the target; the dashboard prints both facts —
+the market-integrity breach and the missing inputs — and gives no instruction, and the monitor
+holds the previous share: it tracks what the panel told the owner to do. Whether the emergency
+override should bypass the quality gate is a rule of the frozen v1 action gate, not of the monitor. A run of the previous release (a rollback) leaves a gap in the accounting of the
 lines introduced with v2.14.0; on return they are restarted from that moment
 (`monitoring.line_restarts`), and the candidate's 180 shadow days are counted anew.
 
