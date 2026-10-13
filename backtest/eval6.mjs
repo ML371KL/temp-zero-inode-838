@@ -17,6 +17,7 @@
   Запуск: node backtest/eval6.mjs  →  out/audit-2026-10-10.json
 */
 import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const OUT = new URL("./out/", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const DATA = new URL("./data/", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -77,6 +78,12 @@ const band = s => s == null ? "unknown" : s >= 20 ? "supportive" : s <= -20 ? "a
 
 function familyScore(r, i, f, o) {
   if (o.drop?.includes(f)) return null;
+  // macroLag — на сколько дней макровходы старше остальных. На бою дневные ряды FRED за день D выходят
+  // днём D+1 после 13:30 UTC, то есть ПОСЛЕ суточного фикса 06:00 UTC: фикс читает макро за D−1.
+  // Здесь, на дневной сетке, это цена одного возраста входов; вместе со временем исполнения — eval7.mjs.
+  // lagBy — то же по семьям: { stress: 0, conditions: 1, liquidity: 1 } для фикса после публикации спредов и VIX.
+  const lagDays = o.lagBy?.[f] ?? (o.macroLag && FAMILIES.macro.includes(f) ? o.macroLag : 0);
+  if (lagDays) { const j = i - lagDays; if (j < 0 || rows[j].insufficientEra) return null; r = rows[j]; i = j; }
   if (f === "network" && o.networkV3 && finite(extra[i].network)) return extra[i].network;
   if (f === "exchange_supply") { if (o.exchangeV3 && finite(extra[i].exchange)) return extra[i].exchange; return finite(r.families.exchange_supply28) ? r.families.exchange_supply28 : r.families.exchange_supply ?? null; }
   if (f === "stress") return finite(r.families.stress28) ? r.families.stress28 : r.families.stress ?? null;
@@ -177,6 +184,12 @@ const sma = (i, n) => i >= n - 1 ? mean(closes.slice(i - n + 1, i + 1)) : null;
 const vol60 = i => { if (i < 60) return null; const r = []; for (let k = i - 59; k <= i; k++) r.push(Math.log(closes[k] / closes[k - 1])); return stdev(r) * Math.sqrt(365) * 100; };
 const trendVol25 = i => { const s = sma(i, 200), v = vol60(i); return s != null && v != null && closes[i] >= s ? clamp(25 / v * 100, 0, 100) : 0; };
 
+// Набор переключателей кандидата v3 (раздел 6) — общий с eval7.mjs.
+const V3 = { noDeadRules: true, drop: ["institutional"], networkV3: true, exchangeV3: true, twoWindows: true, floor: "graduated" };
+
+// Всё ниже — отчёт; при импорте из eval7.mjs он не строится.
+const DIRECT = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (DIRECT) {
 const WINDOWS = [["2013-01-01", null, "2013-01…2026-07"], ["2018-06-01", null, "2018-06…2026-07"], ["2022-01-01", "2022-12-31", "2022"], ["2023-01-01", "2024-12-31", "2023–2024"], ["2024-03-01", null, "эра ETF 2024-03…2026-07"], ["2025-01-01", null, "2025…2026-07"]];
 const report = { generated_for: "audit 2026-10-10", method: "единый ряд доходности для капитала и Sharpe; Sharpe сверх кэша; издержки 10 б.п. на полный оборот", windows: {} };
 const v1 = build();
@@ -220,12 +233,13 @@ for (const f of [null, "institutional", "network", "stablecoins", "exchange_supp
   report.leave_one_family_out[f ?? "все семьи (v1)"] = { "2018-06+": simulate(i => b.target[i], { from: "2018-06-01" }), "эра ETF": simulate(i => b.target[i], { from: "2024-03-01" }), "2013+": simulate(i => b.target[i], { from: "2013-01-01" }) };
 }
 // (6) варианты кандидата v3
-const V3 = { noDeadRules: true, drop: ["institutional"], networkV3: true, exchangeV3: true, twoWindows: true, floor: "graduated" };
 const VARIANTS = [
   ["v1 как есть", {}], ["без CFTC", { drop: ["institutional"] }], ["сеть по 30-дневным средним", { networkV3: true }], ["биржи по остатку", { exchangeV3: true }],
   ["оценка: согласие двух окон", { twoWindows: true }], ["без правил, которые не могут сработать", { noDeadRules: true }], ["пол 40/60/80 по закрытиям", { floor: "graduated" }],
   ["пол 40/60/80 + удержание после ухода якоря", { floor: "graduated", carry: true }], ["пол 40/60/80 + хотя бы одна нога > 0", { floor: "graduated", onePositive: true }],
   ["кандидат v3 целиком", V3], ["v3 + удержание после ухода якоря", { ...V3, carry: true }],
+  ["v3, макровходы на день старше", { ...V3, macroLag: 1 }], ["v3, макровходы на три дня старше", { ...V3, macroLag: 3 }],
+  ["v1, макровходы на день старше", { macroLag: 1 }],
 ];
 report.v3_variants = {};
 for (const [name, o] of VARIANTS) { const b = build(o); report.v3_variants[name] = Object.fromEntries(WINDOWS.map(([from, to, label]) => [label, simulate(i => b.target[i], { from, to })])); }
@@ -263,3 +277,6 @@ console.log("\nRecovery-пол:", JSON.stringify(report.recovery_floor.by_exit))
 console.log("Детекторы:", JSON.stringify(report.detectors));
 console.log("Режимы:", JSON.stringify(report.regimes));
 console.log("Блоки, ранговая корреляция с доходностью за 90 дней:", JSON.stringify(report.block_rank_correlation_fwd90));
+}
+
+export { rows, rf, build, simulate, V3, FAMILIES, DAY, finite, mean, stdev, clamp, r1, r2 };

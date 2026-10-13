@@ -1,0 +1,1514 @@
+{
+ "generated_for": "audit 2026-10-10, fix hour study 2026-10-13",
+ "method": "правила eval6 (build); позиция меняется в час фикса по часовым ценам Bitstamp; издержки 10 б.п. на полный оборот; Sharpe по суточным доходностям сверх кэша",
+ "publication_lag_days": {
+  "0h": {
+   "stress": 1,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "3h": {
+   "stress": 1,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "6h": {
+   "stress": 1,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "9h": {
+   "stress": 1,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "12h": {
+   "stress": 1,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "15h": {
+   "stress": 0,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "18h": {
+   "stress": 0,
+   "conditions": 1,
+   "liquidity": 1
+  },
+  "22h": {
+   "stress": 0,
+   "conditions": 0,
+   "liquidity": 0
+  },
+  "24h": {
+   "stress": 0,
+   "conditions": 0,
+   "liquidity": 0
+  }
+ },
+ "lines": {
+  "кандидат v3": {
+   "by_publication": {
+    "0h": {
+     "2022": {
+      "cagr": -5.1,
+      "vol": 12.2,
+      "sharpe": -0.52,
+      "maxDD": -11.9,
+      "avgExposure": 12.8,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 44.1,
+      "vol": 25.2,
+      "sharpe": 1.47,
+      "maxDD": -40.6,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1315.5,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 27.5,
+      "vol": 20.2,
+      "sharpe": 1.1,
+      "maxDD": -18.2,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1338.2,
+      "changesPerYear": 40.9
+     }
+    },
+    "3h": {
+     "2022": {
+      "cagr": -4.5,
+      "vol": 12.3,
+      "sharpe": -0.47,
+      "maxDD": -10.4,
+      "avgExposure": 12.8,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 45.4,
+      "vol": 25.2,
+      "sharpe": 1.51,
+      "maxDD": -35.1,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1315.5,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 26.1,
+      "vol": 20.1,
+      "sharpe": 1.05,
+      "maxDD": -17.5,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1348.7,
+      "changesPerYear": 41.3
+     }
+    },
+    "6h": {
+     "2022": {
+      "cagr": -4.8,
+      "vol": 12.6,
+      "sharpe": -0.48,
+      "maxDD": -11.1,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 45.5,
+      "vol": 25.2,
+      "sharpe": 1.51,
+      "maxDD": -33,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1315.5,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 25,
+      "vol": 19.9,
+      "sharpe": 1.01,
+      "maxDD": -17.6,
+      "avgExposure": 38.2,
+      "turnoverPerYear": 1348.7,
+      "changesPerYear": 41.3
+     }
+    },
+    "9h": {
+     "2022": {
+      "cagr": -10.2,
+      "vol": 12.3,
+      "sharpe": -0.97,
+      "maxDD": -12.9,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.6,
+      "vol": 25.2,
+      "sharpe": 1.46,
+      "maxDD": -39.3,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1315.5,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 25.1,
+      "vol": 19.9,
+      "sharpe": 1.01,
+      "maxDD": -17.8,
+      "avgExposure": 38.2,
+      "turnoverPerYear": 1348.7,
+      "changesPerYear": 41.3
+     }
+    },
+    "12h": {
+     "2022": {
+      "cagr": -10.9,
+      "vol": 11.6,
+      "sharpe": -1.11,
+      "maxDD": -13.4,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.9,
+      "vol": 25.1,
+      "sharpe": 1.47,
+      "maxDD": -38.8,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1315.5,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 25.4,
+      "vol": 20,
+      "sharpe": 1.03,
+      "maxDD": -16.3,
+      "avgExposure": 38.2,
+      "turnoverPerYear": 1348.7,
+      "changesPerYear": 41.3
+     }
+    },
+    "15h": {
+     "2022": {
+      "cagr": -7,
+      "vol": 11.7,
+      "sharpe": -0.72,
+      "maxDD": -10.5,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 44.6,
+      "vol": 25.1,
+      "sharpe": 1.49,
+      "maxDD": -35.8,
+      "avgExposure": 33.8,
+      "turnoverPerYear": 1308.1,
+      "changesPerYear": 39
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 20.4,
+      "vol": 20,
+      "sharpe": 0.82,
+      "maxDD": -18.2,
+      "avgExposure": 38.2,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 39.6
+     }
+    },
+    "18h": {
+     "2022": {
+      "cagr": -9.6,
+      "vol": 11.5,
+      "sharpe": -0.99,
+      "maxDD": -12.7,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.4,
+      "vol": 25.1,
+      "sharpe": 1.46,
+      "maxDD": -36.7,
+      "avgExposure": 33.8,
+      "turnoverPerYear": 1308.1,
+      "changesPerYear": 39
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 22,
+      "vol": 20,
+      "sharpe": 0.89,
+      "maxDD": -15.4,
+      "avgExposure": 38.2,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 39.6
+     }
+    },
+    "22h": {
+     "2022": {
+      "cagr": -5.6,
+      "vol": 10.5,
+      "sharpe": -0.67,
+      "maxDD": -9.3,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 41.8,
+      "vol": 24.9,
+      "sharpe": 1.42,
+      "maxDD": -34.7,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 22.7,
+      "vol": 19.9,
+      "sharpe": 0.92,
+      "maxDD": -15.2,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "24h": {
+     "2022": {
+      "cagr": -5.7,
+      "vol": 10.2,
+      "sharpe": -0.71,
+      "maxDD": -9.4,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 40.8,
+      "vol": 24.9,
+      "sharpe": 1.39,
+      "maxDD": -34.9,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1310,
+      "changesPerYear": 39.3
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 23.8,
+      "vol": 19.9,
+      "sharpe": 0.97,
+      "maxDD": -15.5,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1317.1,
+      "changesPerYear": 40.5
+     }
+    }
+   },
+   "all_inputs_of_closed_day": {
+    "0h": {
+     "2022": {
+      "cagr": -5.1,
+      "vol": 12.2,
+      "sharpe": -0.53,
+      "maxDD": -12.2,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.3,
+      "vol": 25.2,
+      "sharpe": 1.45,
+      "maxDD": -40,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 26.6,
+      "vol": 20.2,
+      "sharpe": 1.07,
+      "maxDD": -19.1,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1312.9,
+      "changesPerYear": 40.5
+     }
+    },
+    "3h": {
+     "2022": {
+      "cagr": -5,
+      "vol": 12.3,
+      "sharpe": -0.51,
+      "maxDD": -10.6,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 44.4,
+      "vol": 25.2,
+      "sharpe": 1.48,
+      "maxDD": -35.2,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 25.9,
+      "vol": 20,
+      "sharpe": 1.05,
+      "maxDD": -18.6,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "6h": {
+     "2022": {
+      "cagr": -4.8,
+      "vol": 12.7,
+      "sharpe": -0.48,
+      "maxDD": -11.3,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 45.1,
+      "vol": 25.2,
+      "sharpe": 1.5,
+      "maxDD": -32.8,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 25.9,
+      "vol": 19.8,
+      "sharpe": 1.05,
+      "maxDD": -18.1,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "9h": {
+     "2022": {
+      "cagr": -10.3,
+      "vol": 12.3,
+      "sharpe": -0.98,
+      "maxDD": -13.1,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.5,
+      "vol": 25.2,
+      "sharpe": 1.46,
+      "maxDD": -39.2,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 26.1,
+      "vol": 19.8,
+      "sharpe": 1.06,
+      "maxDD": -18.5,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "12h": {
+     "2022": {
+      "cagr": -10.7,
+      "vol": 11.6,
+      "sharpe": -1.08,
+      "maxDD": -13.3,
+      "avgExposure": 12.7,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 44.2,
+      "vol": 25.1,
+      "sharpe": 1.48,
+      "maxDD": -38.5,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 26.3,
+      "vol": 19.8,
+      "sharpe": 1.07,
+      "maxDD": -17.3,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "15h": {
+     "2022": {
+      "cagr": -7.4,
+      "vol": 11.8,
+      "sharpe": -0.75,
+      "maxDD": -10.8,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 45.3,
+      "vol": 25.2,
+      "sharpe": 1.51,
+      "maxDD": -35.1,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 22,
+      "vol": 19.9,
+      "sharpe": 0.89,
+      "maxDD": -18.2,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "18h": {
+     "2022": {
+      "cagr": -10.1,
+      "vol": 11.5,
+      "sharpe": -1.03,
+      "maxDD": -13.1,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 44.5,
+      "vol": 25.1,
+      "sharpe": 1.49,
+      "maxDD": -36.5,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 23.3,
+      "vol": 20,
+      "sharpe": 0.94,
+      "maxDD": -15.4,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "22h": {
+     "2022": {
+      "cagr": -5.6,
+      "vol": 10.5,
+      "sharpe": -0.67,
+      "maxDD": -9.3,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 41.8,
+      "vol": 24.9,
+      "sharpe": 1.42,
+      "maxDD": -34.7,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1311.8,
+      "changesPerYear": 39.4
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 22.7,
+      "vol": 19.9,
+      "sharpe": 0.92,
+      "maxDD": -15.2,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1323.4,
+      "changesPerYear": 40.9
+     }
+    },
+    "24h": {
+     "2022": {
+      "cagr": -5.7,
+      "vol": 10.2,
+      "sharpe": -0.71,
+      "maxDD": -9.4,
+      "avgExposure": 12.6,
+      "turnoverPerYear": 955,
+      "changesPerYear": 36
+     },
+     "2018-06…2026-07": {
+      "cagr": 40.8,
+      "vol": 24.9,
+      "sharpe": 1.39,
+      "maxDD": -34.9,
+      "avgExposure": 33.9,
+      "turnoverPerYear": 1310,
+      "changesPerYear": 39.3
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 23.8,
+      "vol": 19.9,
+      "sharpe": 0.97,
+      "maxDD": -15.5,
+      "avgExposure": 38.1,
+      "turnoverPerYear": 1317.1,
+      "changesPerYear": 40.5
+     }
+    }
+   }
+  },
+  "v1 на суточном фиксе": {
+   "by_publication": {
+    "0h": {
+     "2022": {
+      "cagr": -4.6,
+      "vol": 16.1,
+      "sharpe": -0.33,
+      "maxDD": -16.9,
+      "avgExposure": 22,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.2,
+      "vol": 26.1,
+      "sharpe": 1.41,
+      "maxDD": -37.8,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1326.6,
+      "changesPerYear": 39.1
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 19.4,
+      "vol": 18.4,
+      "sharpe": 0.83,
+      "maxDD": -15.1,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1022.1,
+      "changesPerYear": 32.5
+     }
+    },
+    "3h": {
+     "2022": {
+      "cagr": -0.8,
+      "vol": 16,
+      "sharpe": -0.09,
+      "maxDD": -15.5,
+      "avgExposure": 22,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.7,
+      "vol": 26.1,
+      "sharpe": 1.42,
+      "maxDD": -36.8,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1326.6,
+      "changesPerYear": 39.1
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 20.2,
+      "vol": 18.4,
+      "sharpe": 0.87,
+      "maxDD": -15.4,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1022.1,
+      "changesPerYear": 32.5
+     }
+    },
+    "6h": {
+     "2022": {
+      "cagr": -0.2,
+      "vol": 16.5,
+      "sharpe": -0.05,
+      "maxDD": -17.2,
+      "avgExposure": 22,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.1,
+      "vol": 26.1,
+      "sharpe": 1.4,
+      "maxDD": -36.7,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1326.6,
+      "changesPerYear": 39.1
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 19.2,
+      "vol": 18.5,
+      "sharpe": 0.82,
+      "maxDD": -16.1,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1022.1,
+      "changesPerYear": 32.5
+     }
+    },
+    "9h": {
+     "2022": {
+      "cagr": 1.5,
+      "vol": 16.5,
+      "sharpe": 0.05,
+      "maxDD": -16.8,
+      "avgExposure": 22,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.5,
+      "vol": 26,
+      "sharpe": 1.42,
+      "maxDD": -34,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1326.6,
+      "changesPerYear": 39.1
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 19.4,
+      "vol": 18.6,
+      "sharpe": 0.83,
+      "maxDD": -15.4,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1022.1,
+      "changesPerYear": 32.5
+     }
+    },
+    "12h": {
+     "2022": {
+      "cagr": 3.5,
+      "vol": 16.2,
+      "sharpe": 0.18,
+      "maxDD": -15.6,
+      "avgExposure": 22,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.4,
+      "vol": 25.9,
+      "sharpe": 1.42,
+      "maxDD": -35.2,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1326.6,
+      "changesPerYear": 39.1
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 20.5,
+      "vol": 18.6,
+      "sharpe": 0.88,
+      "maxDD": -15.2,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1022.1,
+      "changesPerYear": 32.5
+     }
+    },
+    "15h": {
+     "2022": {
+      "cagr": -4.3,
+      "vol": 15.5,
+      "sharpe": -0.33,
+      "maxDD": -16.7,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 39.9,
+      "vol": 25.9,
+      "sharpe": 1.33,
+      "maxDD": -38.2,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1319.2,
+      "changesPerYear": 38.6
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 18.9,
+      "vol": 18.6,
+      "sharpe": 0.81,
+      "maxDD": -16.2,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 996.8,
+      "changesPerYear": 30.8
+     }
+    },
+    "18h": {
+     "2022": {
+      "cagr": -2.3,
+      "vol": 15.1,
+      "sharpe": -0.21,
+      "maxDD": -16,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 36.9,
+      "vol": 25.9,
+      "sharpe": 1.24,
+      "maxDD": -40.1,
+      "avgExposure": 36.5,
+      "turnoverPerYear": 1319.2,
+      "changesPerYear": 38.6
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 17.1,
+      "vol": 18.6,
+      "sharpe": 0.72,
+      "maxDD": -15.9,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 996.8,
+      "changesPerYear": 30.8
+     }
+    },
+    "22h": {
+     "2022": {
+      "cagr": 1.1,
+      "vol": 14.8,
+      "sharpe": 0.02,
+      "maxDD": -16.2,
+      "avgExposure": 21.7,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 36.4,
+      "vol": 25.7,
+      "sharpe": 1.23,
+      "maxDD": -41,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 16.7,
+      "vol": 18.5,
+      "sharpe": 0.71,
+      "maxDD": -16.5,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "24h": {
+     "2022": {
+      "cagr": 0.1,
+      "vol": 14.8,
+      "sharpe": -0.05,
+      "maxDD": -16.9,
+      "avgExposure": 21.7,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 34,
+      "vol": 25.8,
+      "sharpe": 1.16,
+      "maxDD": -42.6,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1355.5,
+      "changesPerYear": 39.9
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 17.8,
+      "vol": 18.5,
+      "sharpe": 0.76,
+      "maxDD": -16.9,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1049.5,
+      "changesPerYear": 32.5
+     }
+    }
+   },
+   "all_inputs_of_closed_day": {
+    "0h": {
+     "2022": {
+      "cagr": -5.4,
+      "vol": 16.1,
+      "sharpe": -0.38,
+      "maxDD": -16.4,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 42.8,
+      "vol": 26.2,
+      "sharpe": 1.39,
+      "maxDD": -38.3,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 20.1,
+      "vol": 18.6,
+      "sharpe": 0.85,
+      "maxDD": -15.1,
+      "avgExposure": 36.8,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "3h": {
+     "2022": {
+      "cagr": -1.2,
+      "vol": 16,
+      "sharpe": -0.12,
+      "maxDD": -14.8,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43.4,
+      "vol": 26.2,
+      "sharpe": 1.41,
+      "maxDD": -38.2,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 20.9,
+      "vol": 18.6,
+      "sharpe": 0.89,
+      "maxDD": -15.4,
+      "avgExposure": 36.8,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "6h": {
+     "2022": {
+      "cagr": -3.1,
+      "vol": 16.2,
+      "sharpe": -0.23,
+      "maxDD": -16.5,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 42.3,
+      "vol": 26.2,
+      "sharpe": 1.38,
+      "maxDD": -38.8,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 19.8,
+      "vol": 18.6,
+      "sharpe": 0.85,
+      "maxDD": -16.1,
+      "avgExposure": 36.8,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "9h": {
+     "2022": {
+      "cagr": -1.7,
+      "vol": 16.1,
+      "sharpe": -0.15,
+      "maxDD": -16,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43,
+      "vol": 26.1,
+      "sharpe": 1.4,
+      "maxDD": -36.1,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 21,
+      "vol": 18.7,
+      "sharpe": 0.89,
+      "maxDD": -15.4,
+      "avgExposure": 36.8,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "12h": {
+     "2022": {
+      "cagr": 0.2,
+      "vol": 15.9,
+      "sharpe": -0.03,
+      "maxDD": -15.5,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 43,
+      "vol": 25.9,
+      "sharpe": 1.41,
+      "maxDD": -36,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 22.1,
+      "vol": 18.6,
+      "sharpe": 0.94,
+      "maxDD": -15.2,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "15h": {
+     "2022": {
+      "cagr": -4.4,
+      "vol": 15.6,
+      "sharpe": -0.33,
+      "maxDD": -16.5,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 40.3,
+      "vol": 25.9,
+      "sharpe": 1.34,
+      "maxDD": -37.3,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 19.4,
+      "vol": 18.6,
+      "sharpe": 0.83,
+      "maxDD": -16.2,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "18h": {
+     "2022": {
+      "cagr": -3.7,
+      "vol": 15.2,
+      "sharpe": -0.3,
+      "maxDD": -17.2,
+      "avgExposure": 21.8,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 38.5,
+      "vol": 25.9,
+      "sharpe": 1.29,
+      "maxDD": -38.7,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 17.3,
+      "vol": 18.6,
+      "sharpe": 0.73,
+      "maxDD": -15.9,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "22h": {
+     "2022": {
+      "cagr": 1.1,
+      "vol": 14.8,
+      "sharpe": 0.02,
+      "maxDD": -16.2,
+      "avgExposure": 21.7,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 36.4,
+      "vol": 25.7,
+      "sharpe": 1.23,
+      "maxDD": -41,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1357.4,
+      "changesPerYear": 40
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 16.7,
+      "vol": 18.5,
+      "sharpe": 0.71,
+      "maxDD": -16.5,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1055.8,
+      "changesPerYear": 32.9
+     }
+    },
+    "24h": {
+     "2022": {
+      "cagr": 0.1,
+      "vol": 14.8,
+      "sharpe": -0.05,
+      "maxDD": -16.9,
+      "avgExposure": 21.7,
+      "turnoverPerYear": 1470,
+      "changesPerYear": 50
+     },
+     "2018-06…2026-07": {
+      "cagr": 34,
+      "vol": 25.8,
+      "sharpe": 1.16,
+      "maxDD": -42.6,
+      "avgExposure": 36.6,
+      "turnoverPerYear": 1355.5,
+      "changesPerYear": 39.9
+     },
+     "эра ETF 2024-03…2026-07": {
+      "cagr": 17.8,
+      "vol": 18.5,
+      "sharpe": 0.76,
+      "maxDD": -16.9,
+      "avgExposure": 36.9,
+      "turnoverPerYear": 1049.5,
+      "changesPerYear": 32.5
+     }
+    }
+   }
+  }
+ },
+ "days_target_differs_from_fresh": {
+  "кандидат v3": {
+   "6h": {
+    "days": 2966,
+    "differ": 58,
+    "share_pct": 2
+   },
+   "15h": {
+    "days": 2966,
+    "differ": 55,
+    "share_pct": 1.9
+   }
+  },
+  "v1 на суточном фиксе": {
+   "6h": {
+    "days": 2966,
+    "differ": 64,
+    "share_pct": 2.2
+   },
+   "15h": {
+    "days": 2966,
+    "differ": 57,
+    "share_pct": 1.9
+   }
+  }
+ },
+ "components_at_06h": {
+  "v1 на суточном фиксе": {
+   "2022": {
+    "cagr": -0.2,
+    "vol": 16.5,
+    "sharpe": -0.05,
+    "maxDD": -17.2,
+    "avgExposure": 22,
+    "turnoverPerYear": 1470,
+    "changesPerYear": 50
+   },
+   "2018-06…2026-07": {
+    "cagr": 43.1,
+    "vol": 26.1,
+    "sharpe": 1.4,
+    "maxDD": -36.7,
+    "avgExposure": 36.5,
+    "turnoverPerYear": 1326.6,
+    "changesPerYear": 39.1
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 19.2,
+    "vol": 18.5,
+    "sharpe": 0.82,
+    "maxDD": -16.1,
+    "avgExposure": 36.6,
+    "turnoverPerYear": 1022.1,
+    "changesPerYear": 32.5
+   }
+  },
+  "без CFTC": {
+   "2022": {
+    "cagr": -6.9,
+    "vol": 14.8,
+    "sharpe": -0.54,
+    "maxDD": -13.1,
+    "avgExposure": 16.6,
+    "turnoverPerYear": 1195,
+    "changesPerYear": 44
+   },
+   "2018-06…2026-07": {
+    "cagr": 47.4,
+    "vol": 25.8,
+    "sharpe": 1.53,
+    "maxDD": -37.3,
+    "avgExposure": 34.9,
+    "turnoverPerYear": 1455.8,
+    "changesPerYear": 41.2
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 26.7,
+    "vol": 20.3,
+    "sharpe": 1.06,
+    "maxDD": -17.6,
+    "avgExposure": 38.4,
+    "turnoverPerYear": 1445.7,
+    "changesPerYear": 40.9
+   }
+  },
+  "сеть по 30-дневным средним": {
+   "2022": {
+    "cagr": -0.5,
+    "vol": 16.5,
+    "sharpe": -0.06,
+    "maxDD": -17.4,
+    "avgExposure": 22.1,
+    "turnoverPerYear": 1440,
+    "changesPerYear": 48
+   },
+   "2018-06…2026-07": {
+    "cagr": 43.8,
+    "vol": 26.3,
+    "sharpe": 1.42,
+    "maxDD": -36.6,
+    "avgExposure": 36.7,
+    "turnoverPerYear": 1287.2,
+    "changesPerYear": 38.4
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 18.4,
+    "vol": 18.5,
+    "sharpe": 0.79,
+    "maxDD": -16.1,
+    "avgExposure": 36.6,
+    "turnoverPerYear": 988.4,
+    "changesPerYear": 32.5
+   }
+  },
+  "биржи по остатку": {
+   "2022": {
+    "cagr": -0.2,
+    "vol": 16.5,
+    "sharpe": -0.05,
+    "maxDD": -17.2,
+    "avgExposure": 22,
+    "turnoverPerYear": 1470,
+    "changesPerYear": 50
+   },
+   "2018-06…2026-07": {
+    "cagr": 43.3,
+    "vol": 26.1,
+    "sharpe": 1.41,
+    "maxDD": -36.7,
+    "avgExposure": 36.5,
+    "turnoverPerYear": 1332.8,
+    "changesPerYear": 39.4
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 19.9,
+    "vol": 18.4,
+    "sharpe": 0.86,
+    "maxDD": -16.1,
+    "avgExposure": 36.3,
+    "turnoverPerYear": 1043.2,
+    "changesPerYear": 33.3
+   }
+  },
+  "оценка: согласие двух окон": {
+   "2022": {
+    "cagr": 2.6,
+    "vol": 14.7,
+    "sharpe": 0.12,
+    "maxDD": -10.5,
+    "avgExposure": 18.2,
+    "turnoverPerYear": 1260,
+    "changesPerYear": 44
+   },
+   "2018-06…2026-07": {
+    "cagr": 40.4,
+    "vol": 25.6,
+    "sharpe": 1.35,
+    "maxDD": -32.2,
+    "avgExposure": 35.7,
+    "turnoverPerYear": 1249.1,
+    "changesPerYear": 37.3
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 19.2,
+    "vol": 18.5,
+    "sharpe": 0.82,
+    "maxDD": -16.1,
+    "avgExposure": 36.6,
+    "turnoverPerYear": 1022.1,
+    "changesPerYear": 32.5
+   }
+  },
+  "без правил, которые не могут сработать": {
+   "2022": {
+    "cagr": -0.2,
+    "vol": 16.5,
+    "sharpe": -0.05,
+    "maxDD": -17.2,
+    "avgExposure": 22,
+    "turnoverPerYear": 1470,
+    "changesPerYear": 50
+   },
+   "2018-06…2026-07": {
+    "cagr": 43.1,
+    "vol": 26.1,
+    "sharpe": 1.4,
+    "maxDD": -36.7,
+    "avgExposure": 36.5,
+    "turnoverPerYear": 1326.6,
+    "changesPerYear": 39.1
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 19.2,
+    "vol": 18.5,
+    "sharpe": 0.82,
+    "maxDD": -16.1,
+    "avgExposure": 36.6,
+    "turnoverPerYear": 1022.1,
+    "changesPerYear": 32.5
+   }
+  },
+  "пол 40/60/80 по фиксам": {
+   "2022": {
+    "cagr": -0.2,
+    "vol": 16.5,
+    "sharpe": -0.05,
+    "maxDD": -17.2,
+    "avgExposure": 22,
+    "turnoverPerYear": 1470,
+    "changesPerYear": 50
+   },
+   "2018-06…2026-07": {
+    "cagr": 42.2,
+    "vol": 25.9,
+    "sharpe": 1.39,
+    "maxDD": -36.7,
+    "avgExposure": 36.3,
+    "turnoverPerYear": 1311.8,
+    "changesPerYear": 40.9
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 18.9,
+    "vol": 18.3,
+    "sharpe": 0.81,
+    "maxDD": -16.1,
+    "avgExposure": 36.4,
+    "turnoverPerYear": 1005.2,
+    "changesPerYear": 33.7
+   }
+  },
+  "пол 40/60/80 + удержание после ухода якоря": {
+   "2022": {
+    "cagr": -0.2,
+    "vol": 16.5,
+    "sharpe": -0.05,
+    "maxDD": -17.2,
+    "avgExposure": 22,
+    "turnoverPerYear": 1470,
+    "changesPerYear": 50
+   },
+   "2018-06…2026-07": {
+    "cagr": 45.6,
+    "vol": 26.5,
+    "sharpe": 1.45,
+    "maxDD": -36.7,
+    "avgExposure": 37.3,
+    "turnoverPerYear": 1284.8,
+    "changesPerYear": 39.6
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 18.1,
+    "vol": 18.5,
+    "sharpe": 0.77,
+    "maxDD": -16.1,
+    "avgExposure": 36.6,
+    "turnoverPerYear": 992.6,
+    "changesPerYear": 32.5
+   }
+  },
+  "пол 40/60/80 + хотя бы одна нога > 0": {
+   "2022": {
+    "cagr": -0.2,
+    "vol": 16.5,
+    "sharpe": -0.05,
+    "maxDD": -17.2,
+    "avgExposure": 22,
+    "turnoverPerYear": 1470,
+    "changesPerYear": 50
+   },
+   "2018-06…2026-07": {
+    "cagr": 41.3,
+    "vol": 25.9,
+    "sharpe": 1.37,
+    "maxDD": -36.7,
+    "avgExposure": 36.3,
+    "turnoverPerYear": 1306.9,
+    "changesPerYear": 40.6
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 18.9,
+    "vol": 18.3,
+    "sharpe": 0.81,
+    "maxDD": -16.1,
+    "avgExposure": 36.4,
+    "turnoverPerYear": 1005.2,
+    "changesPerYear": 33.7
+   }
+  },
+  "кандидат v3 целиком": {
+   "2022": {
+    "cagr": -4.8,
+    "vol": 12.6,
+    "sharpe": -0.48,
+    "maxDD": -11.1,
+    "avgExposure": 12.7,
+    "turnoverPerYear": 955,
+    "changesPerYear": 36
+   },
+   "2018-06…2026-07": {
+    "cagr": 45.5,
+    "vol": 25.2,
+    "sharpe": 1.51,
+    "maxDD": -33,
+    "avgExposure": 33.9,
+    "turnoverPerYear": 1315.5,
+    "changesPerYear": 39.4
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 25,
+    "vol": 19.9,
+    "sharpe": 1.01,
+    "maxDD": -17.6,
+    "avgExposure": 38.2,
+    "turnoverPerYear": 1348.7,
+    "changesPerYear": 41.3
+   }
+  },
+  "v3 + удержание после ухода якоря": {
+   "2022": {
+    "cagr": -4.8,
+    "vol": 12.6,
+    "sharpe": -0.48,
+    "maxDD": -11.1,
+    "avgExposure": 12.7,
+    "turnoverPerYear": 955,
+    "changesPerYear": 36
+   },
+   "2018-06…2026-07": {
+    "cagr": 45,
+    "vol": 25.3,
+    "sharpe": 1.49,
+    "maxDD": -33,
+    "avgExposure": 34.1,
+    "turnoverPerYear": 1303.2,
+    "changesPerYear": 38.8
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 24.2,
+    "vol": 20.1,
+    "sharpe": 0.97,
+    "maxDD": -17.6,
+    "avgExposure": 38.4,
+    "turnoverPerYear": 1336.1,
+    "changesPerYear": 40
+   }
+  },
+  "v3 без согласия двух окон": {
+   "2022": {
+    "cagr": -7.5,
+    "vol": 14.7,
+    "sharpe": -0.58,
+    "maxDD": -13.1,
+    "avgExposure": 16.6,
+    "turnoverPerYear": 1165,
+    "changesPerYear": 42
+   },
+   "2018-06…2026-07": {
+    "cagr": 48.3,
+    "vol": 25.7,
+    "sharpe": 1.56,
+    "maxDD": -37,
+    "avgExposure": 34.8,
+    "turnoverPerYear": 1384.4,
+    "changesPerYear": 42.1
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 25,
+    "vol": 19.9,
+    "sharpe": 1.01,
+    "maxDD": -17.6,
+    "avgExposure": 38.2,
+    "turnoverPerYear": 1348.7,
+    "changesPerYear": 41.3
+   }
+  },
+  "v3 с полом v1 (80 % сразу)": {
+   "2022": {
+    "cagr": -4.8,
+    "vol": 12.6,
+    "sharpe": -0.48,
+    "maxDD": -11.1,
+    "avgExposure": 12.7,
+    "turnoverPerYear": 955,
+    "changesPerYear": 36
+   },
+   "2018-06…2026-07": {
+    "cagr": 45.8,
+    "vol": 25.4,
+    "sharpe": 1.51,
+    "maxDD": -33,
+    "avgExposure": 34,
+    "turnoverPerYear": 1330.3,
+    "changesPerYear": 38.1
+   },
+   "эра ETF 2024-03…2026-07": {
+    "cagr": 25.3,
+    "vol": 20.1,
+    "sharpe": 1.02,
+    "maxDD": -17.6,
+    "avgExposure": 38.3,
+    "turnoverPerYear": 1365.6,
+    "changesPerYear": 40
+   }
+  }
+ }
+}
