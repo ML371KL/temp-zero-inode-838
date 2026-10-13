@@ -29,7 +29,7 @@ let MONITOR_GRAFT_V1=null;
 try{MONITOR_GRAFT_V1=JSON.parse(readFileSync(new URL("../docs/monitor-graft-v1.json",import.meta.url),"utf8"));}catch{}
 import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, optionalFieldProblemsV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
-const VERSION = "2.13.0";
+const VERSION = "2.14.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
