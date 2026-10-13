@@ -265,8 +265,11 @@ const ACT_DOWN_H=24,WAIT_UP={demand_break:"слом спроса",deleveraging:"
 const trancheN=c=>Number.isInteger(c?.tranches)&&c.tranches>0&&c.tranches<11?c.tranches:null;
 const trancheRule=S=>{const c=S.monitoring?.assumptions?.tranched_execution||{},h=c.first_not_before_utc_hour;return{n:trancheN(c)||3,hour:fin(h)&&h>=0&&h<24?h:6}};
 function trancheOf(S,now,c){
-  const {n,hour}=trancheRule(S),at=[...Array(n)].map((_,k)=>(Math.floor(Date.parse(c.t)/864e5)+k+1)*864e5+hour*36e5).filter(x=>x>now);
-  return at.length?{left:at.length,n,next:at[0]}:null;
+  const {n,hour}=trancheRule(S),all=[...Array(n)].map((_,k)=>(Math.floor(Date.parse(c.t)/864e5)+k+1)*864e5+hour*36e5),at=all.filter(x=>x>now);
+  // Последний транш остаётся на экране сутки после своего срока: иначе призыв добирать исчезал в ту самую
+  // минуту, когда транш становился исполнимым.
+  if(!at.length)return now-all.at(-1)<864e5?{left:0,n,next:null,last:all.at(-1)}:null;
+  return{left:at.length,n,next:at[0]};
 }
 function leadOf(S,now){
   const t=S.decision?.target_pct;if(!fin(t))return null;
@@ -275,7 +278,7 @@ function leadOf(S,now){
   if(!c||c.to!==t)return{text:!c&&ev.length&&ev.every(e=>e.target_pct===t)?`${still}${dm(ev[0].t)} — действий нет`:`Цель ${pc(t)}${S.regime?.strategic==="emergency"?" — аварийный режим: выйти из позиции":""}`,cause:null};
   const up=c.to>c.from,wait=WAIT_UP[S.regime?.tactical],plan=up?trancheOf(S,now,c):null;
   if(up?!plan:!((now-Date.parse(c.t))/36e5<ACT_DOWN_H))return{text:`${still}${dm(c.t)} — действий нет`,cause:`Последняя смена: ${c.from} → ${pc(c.to)}${c.cause?" — "+c.cause:""}`};
-  return{text:`Цель ${up?"поднята":"снижена"} ${c.from} → ${pc(c.to)} ${dm(c.t)} — ${up?(wait?`добор отложен: ${wait}`:"добирать траншами"):c.to===0?"выйти сразу":"сократить сразу"}`,plan:up&&!wait?`Транши: осталось ${plan.left} из ${plan.n}, следующий не раньше ${dmt(plan.next)}`:null,cause:c.cause?`Причина: ${c.cause}`:null};
+  return{text:`Цель ${up?"поднята":"снижена"} ${c.from} → ${pc(c.to)} ${dm(c.t)} — ${up?(wait?`добор отложен: ${wait}`:"добирать траншами"):c.to===0?"выйти сразу":"долю выше цели сократить сразу"}`,plan:up&&!wait?(plan.next?`Транши: осталось ${plan.left} из ${plan.n}, следующий не раньше ${dmt(plan.next)}`:`Транши: последний из ${plan.n} — с ${dmt(plan.last)}`):null,cause:c.cause?`Причина: ${c.cause}`:null};
 }
 
 // ОВЕРЛЕИ: печатается то, что посчитано, — сами баллы и число дневных закрытий, без слов сильнее расчёта.
@@ -343,7 +346,7 @@ function tactOf(S){const h=objs(S.history).slice(-13).map(x=>Date.parse(x.t)).fi
 function triggersOf(S,now,w=whyOf(S)){
   const D=S.decision||{},target=D.target_pct,base=D.base_target_pct,b=arr(D.binding_overlays),reg=S.regime?.strategic,T=D.regime_targets_pct||{},first=[],hint=[];
   if(!fin(target))return[];
-  if(reg==="emergency")return[{dir:"",text:`выход: два снимка подряд без нарушения целостности; выше прежнего режима — после ${HY.risk_on_hold_hours}${NB}ч`}];
+  if(reg==="emergency")return[{dir:"",text:`выход: первый снимок без нарушения целостности возвращает прежний режим; выше него — после ${HY.risk_on_hold_hours}${NB}ч`}];
   const mvm=met(S,"mvrv_cycle"),mv=mvm.value_num,p=fin(mv)?Math.round(mv):"—",L=lvl(S),rec=recFacts(S),REC=recPct(S),at=(k,side)=>fin(L[k]?.price_usd)?` — ${side} ${kusd(L[k].price_usd)}`:"";
   const capOn=fin(mv)&&mv<=OV.capitulation_max_mvrv_percentile,tact=tactOf(S),tick=tact?` (≈${NB}${tact}${NB}мин)`:"",hold=`удержание ${HY.risk_on_hold_hours}${NB}ч`;
   if(b.includes("recovery_floor")&&fin(base))first.push({dir:"dn",pct:Math.max(base,capOn?OV.capitulation_floor_pct:0),more:true,text:`пол снимается одним снимком: подтверждений станет меньше двух (сейчас ${rec.hits} из 3) или MVRV ≥ ${REC}-го пц${at("recovery_anchor","выше")} (сейчас ${p}-й)`});

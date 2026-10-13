@@ -221,7 +221,7 @@ for(const [re,why] of [
     assert.match(leadUp,/^Цель поднята 5 → 20 % \d\d\.\d\d — добирать траншами$/,`после повышения цели фраза обязана звать добирать, а не сокращать: «${leadUp}»`);
     assert.match(plain(V.leadOf(up,now).cause),/^Причина: режим «защитный» → «ухудшается»$/,"причина смены восстанавливается из decision_events, пока нет журнала");
     const down=mk({now,strategic:"deteriorating",scores:weakDemand,events:[[400,"transition",45],[3,"deteriorating",20]]});
-    assert.match(plain(V.leadOf(down,now).text),/^Цель снижена 45 → 20 % \d\d\.\d\d — сократить сразу$/);
+    assert.match(plain(V.leadOf(down,now).text),/^Цель снижена 45 → 20 % \d\d\.\d\d — долю выше цели сократить сразу$/,"понижение не знает, сколько читатель успел добрать траншами: сокращается только доля выше цели");
     const steady=mk({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});
     assert.match(plain(V.leadOf(steady,now).text),/^Цель 45 % без изменений с \d\d\.\d\d — действий нет$/,"старая смена цели не имеет права оставаться приказом действовать");
     assert.match(plain(V.leadOf(steady,now).cause),/^Последняя смена: 20 → 45 %/);
@@ -230,14 +230,19 @@ for(const [re,why] of [
     assert.match(plain(V.leadOf(up,now).plan),/^Транши: осталось 3 из 3, следующий не раньше \d\d\.\d\d \d\d:\d\d$/,"после повышения названы остаток плана и срок следующего транша");
     const upAt=h=>mk({now,strategic:"deteriorating",scores:weakDemand,events:[[400,"defensive",5],[h,"deteriorating",20]]});
     assert.equal(plain(V.leadOf(upAt(47.5),now).plan).slice(0,24),"Транши: осталось 1 из 3,","позавчерашнее повышение: два транша позади, один впереди");
-    assert.match(plain(V.leadOf(upAt(71.5),now).text),/действий нет$/,"после третьего транша призыв добирать снят");assert.equal(V.leadOf(upAt(71.5),now).plan,undefined);
+    // Третий транш стал исполнимым в 06:00, «сейчас» 09:30: призыв обязан стоять весь день транша, а не исчезать в его срок.
+    assert.match(plain(V.leadOf(upAt(71.5),now).text),/добирать траншами$/,"в день последнего транша призыв добирать на месте");
+    assert.match(plain(V.leadOf(upAt(71.5),now).plan),/^Транши: последний из 3 — с \d\d\.\d\d \d\d:\d\d$/);
+    assert.match(plain(V.leadOf(upAt(95.5),now).text),/действий нет$/,"через сутки после третьего транша призыв добирать снят");assert.equal(V.leadOf(upAt(95.5),now).plan,undefined);
     const ruled=upAt(47.5);ruled.monitoring.assumptions={tranched_execution:{tranches:2,per:"utc_day",first_not_before_utc_hour:6}};
-    assert.match(plain(V.leadOf(ruled,now).text),/действий нет$/,"число траншей берётся из соглашения монитора, когда оно опубликовано");
+    assert.match(plain(V.leadOf(ruled,now).plan),/^Транши: последний из 2 — с /,"число траншей берётся из соглашения монитора, когда оно опубликовано");
+    const ruledLater=upAt(71.5);ruledLater.monitoring.assumptions=ruled.monitoring.assumptions;
+    assert.match(plain(V.leadOf(ruledLater,now).text),/действий нет$/,"через сутки после последнего транша по соглашению призыв снят");
     // Соглашение пишет другой поток: дробное, нулевое, строковое или огромное число траншей и час вне суток
     // не принимаются — остаются три транша с 06:00 UTC.
     for(const bad of [2.5,0,-1,"3",11,null]){const odd=upAt(47.5);odd.monitoring.assumptions={tranched_execution:{tranches:bad,first_not_before_utc_hour:99}};
       assert.equal(plain(V.leadOf(odd,now).plan).slice(0,24),"Транши: осталось 1 из 3,",`мусор в соглашении о траншах (${bad}) не принимается`);}
-    assert.match(plain(V.leadOf(mk({now,strategic:"deteriorating",scores:weakDemand,events:[[400,"transition",45],[V.ACT_DOWN_H-1,"deteriorating",20]]}),now).text),/сократить сразу$/);
+    assert.match(plain(V.leadOf(mk({now,strategic:"deteriorating",scores:weakDemand,events:[[400,"transition",45],[V.ACT_DOWN_H-1,"deteriorating",20]]}),now).text),/долю выше цели сократить сразу$/);
     assert.match(plain(V.leadOf(mk({now,strategic:"deteriorating",scores:weakDemand,events:[[400,"transition",45],[V.ACT_DOWN_H+1,"deteriorating",20]]}),now).text),/действий нет$/);
     // Журнал нового поля главнее decision_events и несёт причину сервера.
     const withLog=mk({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});
