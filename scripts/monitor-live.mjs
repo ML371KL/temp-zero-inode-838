@@ -10,7 +10,10 @@ const DEFAULT_URL="https://tzi-838.pages.dev/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
 const PACKAGE_VERSION=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8")).version;
-const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs"];
+// Сверяются все модули, которые читает страница или по которым ведётся теневой учёт: кандидат v3
+// и объявление теневых утверждений опубликованы рядом со страницей, и их расхождение с
+// репозиторием — тот же класс отказа выкладки, что и у остальных.
+const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs","policy-v3-candidate.mjs","shadow-hypotheses-v1.mjs"];
 const normalizedAsset=text=>String(text).replace(/\r\n/g,"\n");
 
 export async function validatePublishedAssetsV1(snapshotUrl,fetchImpl=fetch){
@@ -27,6 +30,19 @@ export async function validatePublishedAssetsV1(snapshotUrl,fetchImpl=fetch){
   return{ok:issues.length===0,issues,checked_assets:PUBLISHED_ASSETS.length};
 }
 
+// Окно релиза: свежий рассинхрон версий (checkout новее ещё-не-передеплоенной страницы) делает
+// расхождения/404 ассетов той же самой гонкой деплоя, а не инцидентом — новый файл появится
+// на Pages первым же прогоном публикации. Протухшая страница теряет этот грейс вместе с версионным.
+// Действует на все сверяемые модули одинаково, включая добавленные позже.
+export function releaseWindowAssetIssuesV1(snapshot,assets,now=Date.now()){
+  const releaseWindow=snapshot?.version!==PACKAGE_VERSION&&(now-Date.parse(snapshot?.generated_at||""))/36e5<=1.5;
+  return releaseWindow?{issues:[],suppressed:[...assets.issues]}:{issues:[...assets.issues],suppressed:[]};
+}
+
+// Инцидент открывают только ОПЕРАЦИОННЫЕ отказы: протухший снимок, несовпадение контракта или
+// хэшей, невоспроизводимое либо неисполнимое решение, нездоровый монитор, порванная цепь журнала.
+// Статусы результативности (health.performance_status, v2_review.*, приёмка кандидатов) сюда не
+// входят и входить не должны: это материал ревью владельца, а не поломка панели.
 export function validateSnapshotV1(snapshot,now=Date.now()){
   const issues=[];
   if(snapshot?.schema!==3)issues.push(`schema:${snapshot?.schema}`);
@@ -161,13 +177,9 @@ async function main(){
   }
   if(!process.env.SNAPSHOT_FILE||process.env.DASHBOARD_BASE_URL){
     const assets=await validatePublishedAssetsV1(process.env.DASHBOARD_BASE_URL?new URL("snapshot.json",process.env.DASHBOARD_BASE_URL).href:snapshotUrl);
-    // Окно релиза: свежий рассинхрон версий (checkout новее ещё-не-передеплоенной страницы) делает
-    // расхождения/404 ассетов той же самой гонкой деплоя, а не инцидентом — новый файл появится
-    // на Pages первым же прогоном публикации. Протухшая страница теряет этот грейс вместе с версионным.
-    const releaseWindow=snapshot?.version!==PACKAGE_VERSION&&(Date.now()-Date.parse(snapshot?.generated_at||""))/36e5<=1.5;
-    const assetIssues=releaseWindow?[]:assets.issues;
-    result.asset_checks=assets.checked_assets;result.issues.push(...assetIssues);
-    if(releaseWindow&&assets.issues.length)result.release_window_suppressed_assets=assets.issues;
+    const windowed=releaseWindowAssetIssuesV1(snapshot,assets);
+    result.asset_checks=assets.checked_assets;result.issues.push(...windowed.issues);
+    if(windowed.suppressed.length)result.release_window_suppressed_assets=windowed.suppressed;
     result.ok=result.issues.length===0;
   }
   await syncAlert(result);

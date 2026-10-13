@@ -76,6 +76,20 @@ else{
   if(s.monitoring.counter_semantics_version!==2)fail.push("forward monitor target-change counter semantics are obsolete");
   if(!Number.isInteger(s.monitoring.target_changes)||s.monitoring.target_changes<0||!Number.isInteger(s.monitoring.state_changes)||s.monitoring.state_changes<s.monitoring.target_changes)fail.push("forward monitor change counters invalid");
   if(!String(s.monitoring.assumptions?.cash_yield_source||"").includes("converted to effective annual yield"))fail.push("cash benchmark basis/conversion is not declared");
+  // Правки аудита 10.10.2026. Необязательные расчёты монитора дают только предупреждения и только за
+  // текущий прогон: их отказ не должен останавливать публикацию. Снимок прежней формы (без этих
+  // полей) обязан проходить без единого нового сообщения.
+  const mon=s.monitoring,ofThisRun=list=>(Array.isArray(list)?list:[]).filter(x=>x?.t===mon.updated_at);
+  for(const key of ["optional_errors","variant_errors"]){const now=ofThisRun(mon[key]);if(now.length)warn.push(`monitor ${key}: ${now.map(x=>[x.part,x.error].filter(Boolean).join(" — ")).join("; ").slice(0,300)}`);}
+  if(ofThisRun(mon.line_restarts).length)warn.push("monitor restarted shadow lines: the previous run was made without line accounting");
+  if(mon.strategy_meta!==undefined){
+    const noStart=Object.keys(mon.strategies||{}).filter(name=>!isDate(mon.strategy_meta?.[name]?.started_at));
+    if(noStart.length)warn.push(`monitor strategy_meta has no start for: ${noStart.join(", ")}`);
+    if(!Array.isArray(mon.target_change_log)||!mon.target_change_log.length)warn.push("monitor target_change_log is empty");
+    else if(mon.target_change_log.some((x,i,a)=>i>0&&!(Date.parse(x.t)>=Date.parse(a[i-1].t))))warn.push("monitor target_change_log is not sorted by time");
+    const unconfirmed=mon.backfill?.target_changes?.table_rows_unconfirmed;
+    if(Array.isArray(unconfirmed)&&unconfirmed.length)warn.push(`monitor backfill: ${unconfirmed.length} table rows are not confirmed by decision_events`);
+  }
 }
 if(!isDate(s.generated_at))fail.push("generated_at invalid");
 if(!isDate(s.price_observed_at))fail.push("price_observed_at invalid");

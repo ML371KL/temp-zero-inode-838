@@ -82,7 +82,7 @@ assert.deepEqual(sourceRevisionAlertsV1(advancingPrevious.vintages,advancingCurr
 const priceSeries=Array.from({length:250},(_,i)=>({t:Date.UTC(2025,10,12+i),v:80+i*.08}));
 let monitor=updateForwardMonitorV1({now:Date.parse(generatedAt),price:100,decision,inputSummary,sourceVintages:vintages,cashQuotePct:null,priceSeries});
 assert.equal(monitor.cash_yield_available,false,"missing cash yield must be disclosed, not presented as a real 0% quote");
-assert.deepEqual(Object.keys(monitor.strategies).sort(),["buy_and_hold","cash","fixed_50","policy_v1","policy_v2_shadow","previous_policy_shadow","static_theta","trend_vol_25"].sort(),"v2 shadow and static-theta strategies must be tracked alongside the frozen set");
+assert.deepEqual(Object.keys(monitor.strategies).sort(),["buy_and_hold","cash","fixed_50","policy_v1","policy_v1_tranched","policy_v2_shadow","previous_policy_shadow","static_theta","trend_vol_25"].sort(),"v2 shadow, static-theta and the tranched-execution line must be tracked alongside the frozen set; variant lines are born only when the variant engine gives them a target");
 assert.equal(monitor.strategies.policy_v1.current_target_pct,5);
 assert.equal(monitor.strategies.previous_policy_shadow.current_target_pct,10);
 assert.equal(monitor.decision_log.length,1);
@@ -144,11 +144,20 @@ const remoteAssets={
   "https://example.test/dashboard/policy-suite-v1.mjs":readFileSync(new URL("../docs/policy-suite-v1.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/action-gate-v1.mjs":readFileSync(new URL("../docs/action-gate-v1.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/policy-v2-candidate.mjs":readFileSync(new URL("../docs/policy-v2-candidate.mjs",import.meta.url),"utf8"),
+  "https://example.test/dashboard/policy-v3-candidate.mjs":readFileSync(new URL("../docs/policy-v3-candidate.mjs",import.meta.url),"utf8"),
+  "https://example.test/dashboard/shadow-hypotheses-v1.mjs":readFileSync(new URL("../docs/shadow-hypotheses-v1.mjs",import.meta.url),"utf8"),
 };
 const fetchAssets=async url=>new Response(remoteAssets[String(url)]??"",{status:String(url) in remoteAssets?200:404});
 assert.deepEqual((await validatePublishedAssetsV1("https://example.test/dashboard/snapshot.json",fetchAssets)).issues,[],"matching published HTML/modules must pass");
 const brokenFetch=async url=>new Response(String(url).endsWith("index.html")?"broken":remoteAssets[String(url)]??"",{status:200});
 assert.ok((await validatePublishedAssetsV1("https://example.test/dashboard/snapshot.json",brokenFetch)).issues.some(x=>x.startsWith("asset_content_mismatch:index.html")),"a broken published frontend must trip the external monitor");
+// Кандидат v3 и объявление теневых утверждений сверяются наравне с остальными модулями.
+{
+  const missingNew=async url=>/policy-v3-candidate|shadow-hypotheses-v1/.test(String(url))?new Response("",{status:404}):fetchAssets(url);
+  const checked=await validatePublishedAssetsV1("https://example.test/dashboard/snapshot.json",missingNew);
+  assert.deepEqual(checked.issues,["asset_http:policy-v3-candidate.mjs:404","asset_http:shadow-hypotheses-v1.mjs:404"],"an unpublished shadow module must trip the external monitor");
+  assert.equal(checked.checked_assets,9);
+}
 
 // Shadow v0: оверлеи не применяются в emergency (замороженная семантика v0, backtest/patch6.py).
 assert.equal(previousPolicyTargetV1({strategic:"emergency",recoveryState:"good",macroShockState:"calm",mvrvPercentile:5}),0,"v0 shadow must not lift emergency with recovery/capitulation floors");
@@ -256,5 +265,8 @@ assert.equal(graftForwardMonitorV1(archiveMonitor,graftPack),archiveMonitor,"an 
 const foreignEra={...structuredClone(eraMonitor),started_at:"2026-07-21T00:00:00.000Z"};
 assert.ok(graftForwardMonitorV1(foreignEra,graftPack).graft_skipped,"an unexpected genesis must be skipped, not blindly merged");
 assert.equal(graftForwardMonitorV1(null,graftPack).started_at,archiveMonitor.started_at,"absent previous must adopt the archive");
+
+// Правки аудита 2026-10-10 (M1–M9) — отдельным модулем, чтобы этот файл остался сценарным.
+await import("./monitor-audit-test.mjs");
 
 console.log("Forward monitor scenarios OK: server decision, costs, shadows, vintages, hash chain, graft, reset alarm, live alarm");
