@@ -149,6 +149,31 @@ const targets = (variants, keys = LINE_KEYS) => keys.map(k => variants[k].target
   assert.deepEqual(clone(ev.as_executed.values), [[46.5, 1.5, -40.4], [40.3, 1.38, -34.2], [23.4, 0.95, -14.1]]);
   assert.match(C.decision_record.evidence_basis, /in-sample/);
   assert.match(C.decision_record.objective, /не меняя лестницу и дерево гейтов/);
+  // Числа записи решения — не копия руками: они равны выводу воспроизводимых расчётов архива.
+  // backtest/eval6.mjs — дневная сетка, backtest/eval7.mjs — исполнение в час фикса по часовым ценам.
+  const cell = x => [x.cagr, x.sharpe, x.maxDD];
+  const grid = JSON.parse(readFileSync(new URL("../backtest/out/audit-2026-10-10.json", import.meta.url), "utf8")).v3_variants;
+  const GRID_ROW = { "v1 как есть": "v1 как есть", "без CFTC": "без CFTC", "сеть по 30-дневным средним": "сеть по 30-дневным средним", "биржи по остатку": "биржи по остатку", "оценка: согласие двух окон": "оценка: согласие двух окон", "пол 40/60/80 по закрытиям": "пол 40/60/80 по закрытиям", "кандидат v3 целиком": "кандидат v3 целиком", "v3 + удержание пола после ухода якоря": "v3 + удержание после ухода якоря", "пол + «хотя бы одна нога > 0»": "пол 40/60/80 + хотя бы одна нога > 0" };
+  const GRID_WINDOWS = ["2013-01…2026-07", "2018-06…2026-07", "эра ETF 2024-03…2026-07"];
+  for (const row of ev.rows) { const source = grid[GRID_ROW[row.variant]]; assert.ok(source, `строка «${row.variant}» есть в выводе eval6`); assert.deepEqual(clone(row.values), GRID_WINDOWS.map(w => cell(source[w])), `строка «${row.variant}» равна выводу eval6`); }
+  const hourly = JSON.parse(readFileSync(new URL("../backtest/out/audit-2026-10-13-fix-hour.json", import.meta.url), "utf8"));
+  const HOUR_WINDOWS = ["2018-06…2026-07", "эра ETF 2024-03…2026-07"], HOUR_ROW = { "правила v1 на суточном фиксе": "v1 на суточном фиксе", "без CFTC": "без CFTC", "оценка: согласие двух окон": "оценка: согласие двух окон", "пол 40/60/80 по фиксам": "пол 40/60/80 по фиксам", "кандидат v3 целиком": "кандидат v3 целиком" };
+  const fix = ev.at_fix_hour;
+  assert.deepEqual([...fix.windows], ["с 06.2018", "эра ETF (03.2024+)"]);
+  assert.deepEqual(fix.rows.map(r => r.role), ["base", "change", "change", "change", "candidate"]);
+  for (const row of fix.rows) assert.deepEqual(clone(row.values), HOUR_WINDOWS.map(w => cell(hourly.components_at_06h[HOUR_ROW[row.variant]][w])), `строка «${row.variant}» равна выводу eval7`);
+  assert.deepEqual(Object.keys(fix.fix_hours_utc), ["6", "15", "22", "24"]);
+  for (const [hour, values] of Object.entries(fix.fix_hours_utc)) assert.deepEqual(clone(values), HOUR_WINDOWS.map(w => cell(hourly.lines["кандидат v3"].by_publication[`${hour}h`][w])), `час фикса ${hour} равен выводу eval7`);
+  assert.deepEqual(clone(fix.rows.at(-1).values), clone(fix.fix_hours_utc[C.daily_fix.hour_utc]), "строка кандидата — его собственный час фикса");
+  // Возраст макровходов к часу фикса в расчёте — тот, что заявлен в контракте: до 15:00 UTC всё макро на день старше.
+  assert.deepEqual(hourly.publication_lag_days[`${C.daily_fix.hour_utc}h`], { stress: 1, conditions: 1, liquidity: 1 });
+  // Ревью 13.10.2026: контракт утверждал, что к 06:00 UTC приходит и FRED и фикс читает входы одного
+  // возраста. Это неверно — вчерашние спреды и VIX выходят около 13:30 UTC, ставки — около 21:15.
+  const clock = C.decision_record.changes[0];
+  assert.ok(!clock.why.includes("одного возраста") && !clock.why.includes("одного\nвозраста"), "на фиксе макровходы старше остальных — контракт не вправе утверждать обратное");
+  assert.ok(clock.why.includes("на один рабочий день старше"));
+  assert.ok(clock.numbers.includes("45,5 / 1,51 / −33,0") && clock.numbers.includes("43,1 / 1,40 / −36,7"), "числа расчёта по часовым ценам записаны в обоснование такта");
+  assert.ok(!JSON.stringify(C).includes("work/lead") && !JSON.stringify(C).includes("work\\\\lead"), "запись решения ссылается только на файлы репозитория");
 }
 
 // =====================================================================================
@@ -862,6 +887,18 @@ checks.publishedShape = m => {
   // Входы фикса — одного возраста: тренд, MVRV и остаток бирж — за вчера.
   assert.deepEqual(v3.inputs.observed, { closed_day: yesterday, mvrv: yesterday, mvrv_deep: yesterday, exchange_supply: yesterday, hashrate: iso(at(1)).slice(0, 10) });
   assert.deepEqual(Object.keys(v3.inputs.observed_at), ["mvrv", "coinmetrics", "etf", "network", "market"]);
+  // Даты макрокарточек: на фиксе они старше закрытого дня по построению и публикуются как есть.
+  {
+    const macro = (stressDaysBack, extra = {}) => { const inputs = mk(at(1, 6)); inputs.observed_at = { ...inputs.observed_at, macro_liquidity: iso(at(-5)), macro_conditions: iso(at(-11)), macro_stress: iso(at(0) - stressDaysBack * DAY), ...extra }; return m.evaluateV3Inputs({ now: at(1, 6), inputs }).record; };
+    const usual = macro(1);
+    assert.deepEqual([usual.observed.closed_day, usual.observed.macro_stress, usual.observed.macro_liquidity, usual.observed.macro_conditions], [iso(at(0)).slice(0, 10), iso(at(-1)).slice(0, 10), iso(at(-5)).slice(0, 10), iso(at(-11)).slice(0, 10)]);
+    assert.deepEqual(usual.notes.filter(x => x.startsWith("macro")), [], "обычное отставание макро на рабочий день и недельные ряды пометкой не считаются");
+    assert.deepEqual(macro(4).notes.filter(x => x.startsWith("macro")), [], "выходные с праздником — четыре дня — ещё не отставание");
+    assert.deepEqual(macro(5).notes.filter(x => x.startsWith("macro")), ["macro_stress_older_than_4d"]);
+    assert.equal(macro(-2).observed.macro_stress, undefined, "дата наблюдения из будущего не публикуется");
+    assert.equal(macro(1, { macro_stress: "мусор" }).observed.macro_stress, undefined);
+    assert.equal(macro(1, { macro_stress: 12345 }).observed.macro_stress, undefined, "дата приходит строкой; число — не дата");
+  }
   assert.deepEqual(v3.reason_codes, ["fix", "base:defensive", "recovery_floor", "upgrade_pending:transition:1/2"]);
   // Ончейн-вход опоздал к фиксу на сутки: фикс состоится, а разный возраст входов помечен.
   const lagging = { ...seriesFor(at(1, 6), { deep: 20 }) };
@@ -1012,6 +1049,10 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
     ["передача пола без включения", "const carry = !live && prev?.on === true &&", "const carry = !live &&", 1, ["handoffRules"]],
     ["v1_no_cftc без своего гистерезиса", "const decision = v1Decision(meta.state, inp);\n  const state = { state: meta.state,", "const decision = v1Decision(candidate, inp);\n  const state = { state: meta.state,", 1, ["noCftcHysteresis"]],
     ["холодный старт не от v1", "tg: inp.v1.target_pct ?? start.target_pct, fl:", "tg: 50, fl:", 1, ["coldStartFromV1"]],
+    ["отставший стресс не помечается", "> STRESS_MAX_LAG_DAYS * DAY) notes.push", "> 99 * DAY) notes.push", 1, ["publishedShape"]],
+    ["обычные четыре дня отставания стресса помечаются", "> STRESS_MAX_LAG_DAYS * DAY) notes.push", ">= STRESS_MAX_LAG_DAYS * DAY) notes.push", 1, ["publishedShape"]],
+    ["дата макровхода из будущего публикуется", "if (t !== null && t <= now) observed[key] = dateOf(t);", "if (t !== null) observed[key] = dateOf(t);", 1, ["publishedShape"]],
+    ["даты макровходов не публикуются", "for (const key of MACRO_OBSERVED) {", "for (const key of []) {", 1, ["publishedShape"]],
   ];
   const used = new Set();
   for (const [name, from, to, occurrences, failing] of MUTATIONS) {
@@ -1022,7 +1063,7 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
       used.add(check);
     }
   }
-  assert.deepEqual(Object.keys(checks).filter(name => !used.has(name)), ["publishedShape"], "у каждой поведенческой проверки есть мутация, которая её роняет");
+  assert.deepEqual(Object.keys(checks).filter(name => !used.has(name)), [], "у каждой поведенческой проверки есть мутация, которая её роняет");
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
 }
 

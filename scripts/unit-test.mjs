@@ -1002,14 +1002,14 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
 {
   const rows=[{t:1,v:2}];
   const got=buildVariantInputsV1({price:82766,hardOverride:null,regime:{strategic:"transition",tactical:"balanced"},regimeMeta:{strategic:{candidate:"transition"}},candidates:{criticalStrategic:true,criticalTactical:false},decision:{target_pct:45},
-    metrics:[{id:"mvrv_cycle",value_num:42.4,score:0}],detectors:[{id:"recovery",state:"watch"},{id:"macro_shock",state:"fired"}],
+    metrics:[{id:"mvrv_cycle",value_num:42.4,score:0},{id:"liquidity_regime",observed_at:"l"},{id:"system_stress",observed_at:"s"}],detectors:[{id:"recovery",state:"watch"},{id:"macro_shock",state:"fired"}],
     blocks:{macro:{strategic:{expected:["liquidity","conditions","stress"],families:{liquidity:0,conditions:-2,stress:-.5}}},demand:{strategic:{expected:["etf","stablecoins","exchange_supply","institutional"],families:{etf:-.5,stablecoins:0,institutional:0}}},cycle:{strategic:{expected:["valuation","network","activity","miners","trend"],families:{valuation:0,network:0,activity:.5,miners:0,trend:2}}}},
     series:{hashrate:rows,difficulty:rows,exchange_supply:rows,price_daily:rows,mvrv:rows,mvrv_deep:[]},observedAt:{mvrv:"m",coinmetrics:"c",etf:"e",network:"n",market:"k"}});
   eq(got,{price:82766,hard_override:false,
     v1:{state:"transition",candidate:"transition",critical_ok:true,target_pct:45,recovery_state:"watch",macro_shock_state:"fired",distribution_state:"calm",mvrv_percentile:42.4,valuation_score:0},
     families:{macro:{liquidity:0,conditions:-2,stress:-.5},demand:{etf:-.5,stablecoins:0,exchange_supply:null,institutional:0},cycle:{valuation:0,network:0,activity:.5,miners:0,trend:2}},
     series:{hashrate:rows,difficulty:rows,exchange_supply:rows,price_daily:rows,mvrv:rows,mvrv_deep:null},
-    observed_at:{mvrv:"m",coinmetrics:"c",etf:"e",network:"n",market:"k",mvrv_deep:null}},"входы вариантов — ровно по SPEC 1.4: семьи с null на месте отсутствующей, пустой глубокий ряд — null");
+    observed_at:{mvrv:"m",coinmetrics:"c",etf:"e",network:"n",market:"k",mvrv_deep:null,macro_liquidity:"l",macro_conditions:null,macro_stress:"s"}},"входы вариантов — ровно по SPEC 1.4: семьи с null на месте отсутствующей, пустой глубокий ряд — null; даты макрокарточек — с самих карточек, отсутствующая — null");
   const bare=buildVariantInputsV1({});
   eq([bare.price,bare.hard_override,bare.v1.state,bare.v1.critical_ok,bare.v1.target_pct,bare.v1.recovery_state,bare.series.mvrv_deep,bare.families],[null,false,null,false,null,"calm",null,{macro:{},demand:{},cycle:{}}],"пустой вход не роняет сборку и не выдумывает значений");
   eq(buildVariantInputsV1({hardOverride:"НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА"}).hard_override,true,"аварийный режим передаётся флагом");

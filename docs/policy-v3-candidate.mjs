@@ -45,8 +45,11 @@ export const POLICY_V3_CANDIDATE = deepFreeze({
     v1_floor_handoff: { kind: "attribution", tact: "every_snapshot", rule: "v1; recovery-пол после включения держится, пока подтверждений не меньше двух и нет макрошока" },
     v1_no_cftc: { kind: "attribution", tact: "every_snapshot", rule: "v1 без голоса семьи CFTC; гистерезис v1 на собственном кандидате" },
   },
-  // Суточный такт. К 06:00 UTC приходят вчерашние MVRV, потоки ETF и FRED: фикс читает входы одного
-  // возраста. Пропущенные сутки обнуляют счёт подтверждений — ненаблюдённый день ничего не подтверждает.
+  // Суточный такт. К 06:00 UTC на месте вчерашние MVRV, остаток бирж, потоки ETF и закрытая дневная свеча.
+  // Дневные ряды FRED за вчера выходят позже (спреды и VIX — около 13:30 UTC, ставки H.15 — около 21:15),
+  // поэтому макроблок на фиксе на один рабочий день старше остальных входов. Час выбран по расчёту на
+  // часовых ценах (backtest/eval7.mjs): раннее исполнение стоит дороже свежести макровходов.
+  // Пропущенные сутки обнуляют счёт подтверждений — ненаблюдённый день ничего не подтверждает.
   daily_fix: { hour_utc: 6, confirm_fixes_down: 1, confirm_fixes_up: 2, missed_day_resets_streaks: true },
   // Существующие числа — ссылками на контракты, которые их ввели.
   ladder: POLICY_V1.ladder,
@@ -64,7 +67,7 @@ export const POLICY_V3_CANDIDATE = deepFreeze({
   decision_record: {
     objective: "Убрать из решающего правила измерительные артефакты, найденные аудитом 10.10.2026, не меняя лестницу и дерево гейтов: счёт времени в снимках вместо суток, recovery-пол одним снимком, правило CFTC с порогом внутри шума, точечный хешрейт, потоки бирж, расходящиеся с остатком, и порог «дёшево», дрейфующий вместе с окном.",
     risk_budget: "На форварде кандидат вправе отличаться от v1 в пределах предзаявленного: просадка глубже просадки v1 не более чем на 5 п.п.; отставание по чистой доходности больше 10 п.п. на окне от 180 дней отклоняет кандидата.",
-    evidence_basis: "Реконструкция 2013–07.2026, исполнение на следующий день, 10 б.п. на полный оборот (расчёт аудита work/lead/hist9.mjs, воспроизведение — scripts/variants-history.mjs); боевое окно 19.07–10.10.2026, 6 694 снимка (work/lead/replay.mjs, replay2.mjs, воспроизведение — scripts/variants-replay.mjs). Реконструкция — in-sample: v1 калибровалась на той же истории. Подбор не проводился: состав кандидата выбран по логике измерения, а не по лучшему результату.",
+    evidence_basis: "Реконструкция 2013–07.2026, 10 б.п. на полный оборот: на дневной сетке с исполнением на следующем закрытии (backtest/eval6.mjs, воспроизведение функциями этого модуля — scripts/variants-history.mjs) и на часовых ценах с исполнением в час фикса (backtest/eval7.mjs); боевое окно 19.07–10.10.2026, 6 694 снимка (scripts/variants-replay.mjs). Реконструкция — in-sample: v1 калибровалась на той же истории. Подбор не проводился: состав кандидата выбран по логике измерения, а не по лучшему результату.",
     evidence: {
       metrics: ["годовая доходность, %", "Sharpe", "макс. просадка, %"],
       windows: ["с 2013", "с 06.2018", "эра ETF (03.2024+)"],
@@ -84,14 +87,31 @@ export const POLICY_V3_CANDIDATE = deepFreeze({
       // а до него голосует балл v1; движок считает обе ноги по одному ряду с 2011 года, сложность и тренд —
       // из рядов. Строка ниже — кандидат целиком так, как его исполняет движок.
       as_executed: { variant: "кандидат v3 целиком, как в движке", values: [[46.5, 1.50, -40.4], [40.3, 1.38, -34.2], [23.4, 0.95, -14.1]] },
+      // backtest/eval7.mjs: те же правила, но позиция меняется в час фикса по часовым ценам, а макровходы
+      // того возраста, какой доступен к этому часу. Таблица выше сравнивает правила на дневной сетке, где
+      // сделка идёт на следующем закрытии; эта — на часах, по которым кандидат живёт. Суточный фикс даёт
+      // раннее исполнение любому набору правил, поэтому база здесь — правила v1 на том же фиксе.
+      at_fix_hour: {
+        method: "исполнение в 06:00 UTC по часовым ценам; макровходы на день старше остальных, как на бою",
+        windows: ["с 06.2018", "эра ETF (03.2024+)"],
+        rows: [
+          { variant: "правила v1 на суточном фиксе", role: "base", values: [[43.1, 1.40, -36.7], [19.2, 0.82, -16.1]] },
+          { variant: "без CFTC", role: "change", values: [[47.4, 1.53, -37.3], [26.7, 1.06, -17.6]] },
+          { variant: "оценка: согласие двух окон", role: "change", values: [[40.4, 1.35, -32.2], [19.2, 0.82, -16.1]] },
+          { variant: "пол 40/60/80 по фиксам", role: "change", values: [[42.2, 1.39, -36.7], [18.9, 0.81, -16.1]] },
+          { variant: "кандидат v3 целиком", role: "candidate", values: [[45.5, 1.51, -33.0], [25.0, 1.01, -17.6]] },
+        ],
+        // Кандидат целиком при другом часе фикса; макровходы — по публикации к этому часу.
+        fix_hours_utc: { 6: [[45.5, 1.51, -33.0], [25.0, 1.01, -17.6]], 15: [[44.6, 1.49, -35.8], [20.4, 0.82, -18.2]], 22: [[41.8, 1.42, -34.7], [22.7, 0.92, -15.2]], 24: [[40.8, 1.39, -34.9], [23.8, 0.97, -15.5]] },
+      },
     },
     changes: [
       {
         id: "daily_fix",
         v1: "Режим пересчитывается на каждом снимке (с 07.08.2026 — каждые 15 минут): понижение — два снимка подряд, повышение — 48 часов и не меньше 12 снимков без единого встречного.",
         v3: "Режим, детекторы и оверлеи читаются раз в сутки, на первом снимке не раньше 06:00 UTC. Понижение принимается на этом же фиксе, повышение — на втором фиксе подряд с тем же кандидатом. Между фиксами цель не меняется; аварийный режим обнуляет её на любом снимке.",
-        why: "На истории режим считался раз в сутки, в бою — в снимках, и смысл гистерезиса менялся вместе с тактом сбора. К 06:00 UTC приходят вчерашние MVRV, потоки ETF и FRED, поэтому фикс читает входы одного возраста.",
-        numbers: "За 83 дня кандидат 12 раз менялся на один-два снимка и возвращался; семь таких переворотов обнулили идущий 48-часовой отсчёт повышения; оба понижения после перехода на 15-минутный такт подтверждены за 15 минут. Суточный пересчёт тех же сигналов v1 дал за окно +3,9 % при фиксе в 06:00 против +1,4 % у v1; час фикса на 83 днях неразличим: при фиксе в 00, 03, 09, 12, 15, 18 и 21 час те же сигналы дают +4,5, +9,2, +4,0, +4,4, +0,1, +1,9 и +4,3 %.",
+        why: "На истории режим считался раз в сутки, в бою — в снимках, и смысл гистерезиса менялся вместе с тактом сбора. К 06:00 UTC на месте вчерашние MVRV, остаток бирж, потоки ETF и закрытая дневная свеча. Дневные ряды FRED за вчера выходят позже — кредитные спреды и VIX около 13:30 UTC, ставки H.15 около 21:15 UTC, — поэтому макроблок на фиксе на один рабочий день старше остальных входов; даты наблюдений публикуются во входах фикса.",
+        numbers: "За 83 дня кандидат 12 раз менялся на один-два снимка и возвращался; семь таких переворотов обнулили идущий 48-часовой отсчёт повышения; оба понижения после перехода на 15-минутный такт подтверждены за 15 минут. Суточный пересчёт тех же сигналов v1 дал за окно +3,9 % при фиксе в 06:00 против +1,4 % у v1; час фикса на 83 днях неразличим: при фиксе в 00, 03, 09, 12, 15, 18 и 21 час те же сигналы дают +4,5, +9,2, +4,0, +4,4, +0,1, +1,9 и +4,3 %. На истории с 06.2018 по часовым ценам кандидат при фиксе в 06:00 с макровходами на день старше даёт 45,5 / 1,51 / −33,0; в 15:00, когда спреды и VIX уже свежие, — 44,6 / 1,49 / −35,8; в 22:00 со всеми свежими входами — 41,8 / 1,42 / −34,7; будь макровходы свежими уже в 06:00 — 45,1 / 1,50. Решение из-за возраста макро отличается в 2 % суток. Правила v1 на том же фиксе дают 43,1 / 1,40 / −36,7: большую часть разрыва дневной сетки (33,7 против 40,5) даёт время исполнения, а не правила.",
       },
       {
         id: "cftc_not_voting",
@@ -209,6 +229,7 @@ const DAY = 86_400_000, HOUR = 3_600_000;
 const DEGRADED = ["insufficient", "emergency"];
 const REGIMES = POLICY_V1.strategic_order.filter(x => !DEGRADED.includes(x));
 const SCORING = POLICY_V3_CANDIDATE.scoring, FIX = POLICY_V3_CANDIDATE.daily_fix;
+const MACRO_OBSERVED = ["macro_liquidity", "macro_conditions", "macro_stress"], STRESS_MAX_LAG_DAYS = 4;
 // Состав блоков и обязательные группы v1 (familyStats и strategicRequired запертой секции сборщика).
 const FAMILIES_V1 = deepFreeze({ macro: ["liquidity", "conditions", "stress"], demand: ["etf", "stablecoins", "exchange_supply", "institutional"], cycle: ["valuation", "network", "activity", "miners", "trend"] });
 const REQUIRED_GROUPS_V1 = deepFreeze([["macro", ["liquidity"]], ["macro", ["conditions"]], ["demand", ["etf"]], ["demand", ["stablecoins", "exchange_supply"]], ["cycle", ["trend"]], ["cycle", ["network"]]]);
@@ -512,7 +533,7 @@ function normalizeInputs(inputs) {
   if (families.cycle.valuation === null) families.cycle.valuation = num(v1.valuation_score);
   const state = str(v1.state), candidate = str(v1.candidate);
   const observed = {};
-  for (const key of ["mvrv", "coinmetrics", "etf", "network", "market"]) if (str(inputs.observed_at?.[key])) observed[key] = inputs.observed_at[key];
+  for (const key of ["mvrv", "coinmetrics", "etf", "network", "market", "macro_liquidity", "macro_conditions", "macro_stress"]) if (str(inputs.observed_at?.[key])) observed[key] = inputs.observed_at[key];
   return {
     hard: inputs.hard_override === true || (typeof inputs.hard_override === "string" && inputs.hard_override !== "") || state === "emergency" || candidate === "emergency",
     v1: { state, candidate, critical_ok: typeof v1.critical_ok === "boolean" ? v1.critical_ok : null, target_pct: num(v1.target_pct), recovery_state: str(v1.recovery_state), macro_shock_state: str(v1.macro_shock_state), distribution_state: str(v1.distribution_state), mvrv_percentile: num(v1.mvrv_percentile) },
@@ -564,6 +585,15 @@ function v3Inputs(now, inp) {
   // Отставший вход фикс не останавливает, но помечается: решение принято на входах разного возраста.
   const observed = { closed_day: dateOf(trend.closed_at), mvrv: dateOf(last(cleanSeries(inp.series.mvrv, now))?.t), mvrv_deep: dateOf(deep.observed_at), exchange_supply: dateOf(exchange.observed_at), hashrate: dateOf(network.hashrate_at) };
   for (const key of ["mvrv", "exchange_supply"]) if (observed.closed_day && observed[key] && observed[key] < observed.closed_day) notes.push(`${key}_older_than_closed_day`);
+  // Макровходы на фиксе старше закрытого дня по построению (FRED публикует вчерашний день после фикса),
+  // а в ликвидности и условиях есть недельные ряды: даты карточек публикуются как есть. Помечается
+  // только дневной вход — стресс — и только отставание сверх обычного: больше четырёх суток (выходные
+  // вместе с праздником дают ровно четыре). Полноту макроблока по-прежнему сторожит покрытие v1.
+  for (const key of MACRO_OBSERVED) {
+    const t = toMs(inp.observed_at[key]);
+    if (t !== null && t <= now) observed[key] = dateOf(t);
+  }
+  if (observed.closed_day && observed.macro_stress && Date.parse(observed.closed_day) - Date.parse(observed.macro_stress) > STRESS_MAX_LAG_DAYS * DAY) notes.push(`macro_stress_older_than_${STRESS_MAX_LAG_DAYS}d`);
   const record = {
     blocks: { macro: round(blocks.macro), demand: round(blocks.demand), cycle: round(blocks.cycle) },
     bands: { macro: bandV1Port(blocks.macro), demand: bandV1Port(blocks.demand), cycle: bandV1Port(blocks.cycle) },

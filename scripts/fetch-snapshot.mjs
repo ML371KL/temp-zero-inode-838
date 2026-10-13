@@ -2211,7 +2211,7 @@ function buildDataWarningsV1({etfLegs=null,flowSupplyCheck=null}={}){
 // те, что посчитала политика v1; ряды — из наборов данных, как они лежат в состоянии ({t — мс, v}).
 // critical_ok — покрытие СРЕДНЕСРОЧНОГО контура: именно оно в v1 переводит режим в «insufficient».
 function buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,decision,metrics,blocks,detectors,series:rows={},observedAt={}}){
-  const state=id=>(detectors||[]).find(x=>x.id===id)?.state||"calm",mvrv=(metrics||[]).find(x=>x.id==="mvrv_cycle");
+  const state=id=>(detectors||[]).find(x=>x.id===id)?.state||"calm",card=id=>(metrics||[]).find(x=>x.id===id),mvrv=card("mvrv_cycle");
   const families={};
   for(const block of ["macro","demand","cycle"]){
     const s=blocks?.[block]?.strategic||{};
@@ -2226,7 +2226,9 @@ function buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,d
       mvrv_percentile:num(mvrv?.value_num),valuation_score:num(mvrv?.score)},
     families,
     series:{hashrate:rows.hashrate||[],difficulty:rows.difficulty||[],exchange_supply:rows.exchange_supply||[],price_daily:rows.price_daily||[],mvrv:rows.mvrv||[],mvrv_deep:rowsOrNull(rows.mvrv_deep)},
-    observed_at:{mvrv:observedAt.mvrv??null,coinmetrics:observedAt.coinmetrics??null,etf:observedAt.etf??null,network:observedAt.network??null,market:observedAt.market??null,mvrv_deep:observedAt.mvrv_deep??null},
+    // Даты макрокарточек: суточный фикс кандидата читает их на день старше остальных входов и публикует возраст.
+    observed_at:{mvrv:observedAt.mvrv??null,coinmetrics:observedAt.coinmetrics??null,etf:observedAt.etf??null,network:observedAt.network??null,market:observedAt.market??null,mvrv_deep:observedAt.mvrv_deep??null,
+      macro_liquidity:card("liquidity_regime")?.observed_at??null,macro_conditions:card("financial_conditions")?.observed_at??null,macro_stress:card("system_stress")?.observed_at??null},
   };
 }
 // Аргумент последнего вызова монитора — тот самый объект, что ушёл в updateForwardMonitorV1. Нужен

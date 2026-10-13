@@ -184,7 +184,7 @@ const mvrvLast={main:m.collectorDatasets.coinmetrics.data.CapMVRVCur.at(-1)?.v??
 const snap=m.compute(),call=m.monitorCallArguments(),x={variantInputs:call.variantInputs,shadowValues:call.shadowValues,regimeBirth:call.regimeBirth,tickDiff:call.tickDiff};
 const brief=a=>a===null?null:{n:a.length,first:a[0],last:a[a.length-1]};
 console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_meta:snap.regime_meta,decision:snap.decision,blocks:snap.blocks,override:snap.override,detectors:snap.detectors,scores:snap.scores,
-  regime_birth:snap.regime_birth,tick_diff:snap.tick_diff,metrics:snap.metrics.map(q=>({id:q.id,vote:q.vote,score:q.score,value_num:q.value_num})),diagnostics:snap.diagnostics},
+  regime_birth:snap.regime_birth,tick_diff:snap.tick_diff,metrics:snap.metrics.map(q=>({id:q.id,vote:q.vote,score:q.score,value_num:q.value_num,observed_at:q.observed_at})),diagnostics:snap.diagnostics},
   parameters:Object.keys(call),mvrvLast,valuation_levels:snap.valuation_levels,mvrvCardSource:snap.metrics.find(q=>q.id==="mvrv_cycle").source,
   extras:{...x,variantInputs:{...x.variantInputs,series:Object.fromEntries(Object.entries(x.variantInputs.series).map(([k,v])=>[k,brief(v)]))}}}));
 `);
@@ -217,8 +217,10 @@ console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_met
       assert.ok(Number.isFinite(v.series[name].last.t)&&Number.isFinite(v.series[name].last.v),`ряд ${name}: точки {t,v}`);
     }
     assert.equal(v.series.mvrv_deep,null,"в синтетике глубокого ряда нет — честный null, а не пустой массив");
-    assert.deepEqual(Object.keys(v.observed_at),["mvrv","coinmetrics","etf","network","market","mvrv_deep"]);
+    assert.deepEqual(Object.keys(v.observed_at),["mvrv","coinmetrics","etf","network","market","mvrv_deep","macro_liquidity","macro_conditions","macro_stress"]);
     assert.ok(["mvrv","coinmetrics","etf","network","market"].every(k=>Number.isFinite(Date.parse(v.observed_at[k]))));
+    // Даты макровходов — те, что стоят на голосующих карточках этого же снимка (суточный фикс кандидата публикует их возраст).
+    for(const [key,id] of [["macro_liquidity","liquidity_regime"],["macro_conditions","financial_conditions"],["macro_stress","system_stress"]])assert.equal(v.observed_at[key],snap.metrics.find(x=>x.id===id).observed_at??null,`${key} — дата карточки ${id}`);
     const shadowIds=["tga_daily","g3_liquidity","gold_axis","sth_pricing","realized_pnl","options_structure","oi_purge_24h","hash_ribbons"];
     assert.deepEqual(Object.keys(extras.shadowValues),shadowIds,"значения восьми теневых карточек");
     for(const id of shadowIds)assert.equal(extras.shadowValues[id],snap.metrics.find(x=>x.id===id).value_num,`${id}: value_num карточки`);
