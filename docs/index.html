@@ -79,40 +79,55 @@ header{display:flex;gap:14px 24px;align-items:baseline;flex-wrap:wrap;padding-bo
 .btn{border:1.5px solid var(--ink);background:var(--card);padding:7px 14px;border-radius:3px;font:12px var(--mono);cursor:pointer}.btn:hover{background:var(--ink);color:var(--paper)}.btn:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--btc);outline-offset:2px}
 .banner{display:none;margin-top:12px;background:var(--blue);color:var(--on-brand);padding:8px 14px;font:12px var(--mono);border-radius:3px}.banner.show{display:block}
 .hero{margin-top:18px;background:var(--card);border:2px solid var(--ink);border-radius:6px;overflow:hidden;box-shadow:0 1px 0 var(--shadow)}
-.hero-top{min-height:100px;position:relative;border-bottom:1px solid var(--line);background:repeating-linear-gradient(90deg,transparent,transparent 25px,var(--grid-strong) 25px,var(--grid-strong) 26px);display:flex;align-items:center}
-#tape{position:absolute;inset:0;width:100%;height:100%}.verdict{position:relative;padding:16px 24px;font:700 30px/1.22 var(--serif);max-width:100%;text-shadow:0 0 14px var(--card);overflow-wrap:break-word}
+.hero-top{min-height:92px;position:relative;border-bottom:1px solid var(--line);background:repeating-linear-gradient(90deg,transparent,transparent 25px,var(--grid-strong) 25px,var(--grid-strong) 26px);display:flex;align-items:center}
+.vbox{padding:14px 24px;max-width:100%}.verdict{font:700 30px/1.22 var(--serif);overflow-wrap:break-word}
+/* Удержание стоит под самим заголовком: вердикт и то, что насчитано по свежим данным, читаются вместе. */
+.held{font:12.5px/1.45 var(--sans);color:var(--soft)}.held div{margin-top:4px}
+/* Пауза по возрасту гасит всё, что из старого снимка читалось бы как действующее. */
+.hero.aged .verdict{color:var(--soft)}body.aged .hero-grid,body.aged #blocks,body.aged #detectors{opacity:.5}
 .override{display:none;background:var(--bad);color:var(--on-brand);padding:8px 24px;font:12px var(--mono);letter-spacing:.3px}.override.show{display:block}
+/* ПОЛОСА РЕШЕНИЯ. Цвет кромки и числа — по цели, а не по названию режима: при поле восстановления цель 80 %
+   стояла красным под «защитным» вердиктом. */
+.strategy{display:grid;grid-template-columns:200px minmax(220px,1fr) minmax(300px,480px);border-bottom:1px solid var(--line);border-left:4px solid var(--neutral)}.strategy.good{border-left-color:var(--good)}.strategy.warn{border-left-color:var(--warn)}.strategy.bad{border-left-color:var(--bad)}
+.strategy>div{padding:12px 16px;min-width:0}.strategy .dial,.strategy .act{border-right:1px solid var(--line)}.strategy .act,.strategy .trig{display:flex;flex-direction:column;gap:6px}
+.eyebrow{font:10px var(--mono);letter-spacing:.9px;text-transform:uppercase;color:var(--soft)}
+.pct{font:700 38px var(--serif);letter-spacing:-1px;line-height:1;margin-top:8px}.pct.good{color:var(--good)}.pct.warn{color:var(--warn)}.pct.bad{color:var(--bad)}
+.ladder{display:flex;gap:8px;font:11px var(--mono);color:var(--soft);margin-top:8px}.ladder b{color:var(--ink)}.ladder u{text-decoration-style:dotted}
+.strategy .sub{font:12px var(--sans);color:var(--soft);margin-top:6px}.strategy .lead{font:600 16px/1.3 var(--serif)}
+.warnline{font:13px/1.45 var(--sans);color:var(--soft)}
+/* Триггеры — общей сеткой: стрелка, цель, условие. */
+.tg{display:grid;grid-template-columns:10px 46px 1fr;gap:7px;font:12.5px/1.42 var(--sans);color:var(--soft)}.tg b{font-family:var(--mono);color:var(--ink);text-align:right;white-space:nowrap}.up{color:var(--good)}.dn{color:var(--bad)}
+.strategy .ctx{font:11px/1.5 var(--mono);color:var(--soft)}.strategy .foot{grid-column:1/-1;border-top:1px dotted var(--line);padding:6px 16px;font:11px var(--mono);color:var(--soft)}.strategy .foot b{color:var(--ink);font-weight:600}
 .hero-grid{display:grid;grid-template-columns:1.15fr .85fr}
 /* Элементы grid по умолчанию имеют min-width:auto, поэтому колонка не может стать уже min-content
-   своего содержимого: подписи шкал (три штуки в ряд) требовали 445px и раздували верхний блок до
-   489px на 390-пиксельном экране — правый край с покрытием и текстами уезжал за вьюпорт. */
-.hero-grid>*{min-width:0}.gauges{padding:18px 22px;border-right:1px solid var(--line)}.explain{padding:18px 22px}
-.gauge{margin-bottom:17px}.gauge-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}.gauge-head b{font-family:var(--serif);font-size:16px}.gauge-head span{font:22px var(--mono)}.bar{height:13px;border:1.5px solid var(--ink);border-radius:8px;position:relative;background:linear-gradient(90deg,var(--bad) 0 30%,var(--warn) 30% 43%,var(--neutral) 43% 57%,var(--good-soft) 57% 70%,var(--good) 70% 100%)}.needle{position:absolute;top:-7px;width:2px;height:27px;background:var(--ink);left:50%;transition:left .6s}.needle:after{content:"";position:absolute;top:-5px;left:-4px;border:5px solid transparent;border-top-color:var(--ink)}/* Подписи полосы обязаны сжиматься, а не задавать минимальную ширину всего блока: каждая держится
-   у своего конца шкалы и переносится внутри себя, если места мало. */
-.labels{display:flex;justify-content:space-between;gap:8px;font:10px var(--mono);color:var(--soft);margin-top:5px}
-.labels span{min-width:0;overflow-wrap:anywhere}
-.labels span:nth-child(2){text-align:center}
-.labels span:last-child{text-align:right}
-.stats{display:flex;flex-wrap:wrap;gap:22px;margin-top:14px}.stat b{display:block;font:23px var(--mono)}.stat span{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--soft)}
-.behaviors{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.behavior{border:1px solid var(--line);border-radius:4px;padding:10px 12px;background:var(--card)}.behavior h4{font:11px var(--mono);text-transform:uppercase;letter-spacing:.6px;color:var(--soft);margin-bottom:5px}.behavior p{font-size:13px}
-.phase{margin-top:13px;color:var(--soft);font-size:13px}.phase b{color:var(--ink)}
-.explain h3{font:11px var(--mono);text-transform:uppercase;letter-spacing:.8px;color:var(--soft);margin-bottom:8px}.factor{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dotted var(--line);font-size:13px}
-/* Та же ловушка min-width:auto: длинное значение («−1 · ETF-поток частично похож на …») задавало
-   строке минимум ~445px, и на мобильном балл фактора обрезался краем блока. */
-.factor>span{min-width:0;overflow-wrap:anywhere}.factor span:last-child{font:12px var(--mono);white-space:nowrap}.factor.pos span:last-child{color:var(--good)}.factor.neg span:last-child{color:var(--bad)}.factor.neutral span:last-child{color:var(--neutral)}
-.ai{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--line);padding:10px 22px;background:var(--brand-soft)}.ai input,.ai select{font:12px var(--mono);padding:7px 8px;border:1px solid var(--line);border-radius:3px;background:var(--card)}.ai input.key{min-width:200px;flex:1;max-width:370px}.ai small{color:var(--soft)}.ai .remember{display:flex;gap:6px;align-items:center;font:12px var(--sans);color:var(--soft);white-space:nowrap;cursor:pointer;user-select:none}.ai .remember input{accent-color:var(--btc)}#aiOut{padding:14px 22px 18px;border-top:1px dashed var(--line);max-width:980px;font-size:14px;line-height:1.6}#aiOut[hidden]{display:none}#aiOut p{margin:8px 0}#aiOut h3{font:600 16.5px var(--serif);margin:16px 0 6px}#aiOut h4{font:600 14px var(--sans);margin:12px 0 5px}#aiOut ul{margin:8px 0 8px 22px}#aiOut li{margin:4px 0}#aiOut code{font:12.5px var(--mono);background:var(--neutral-bg);padding:1px 4px;border-radius:3px}
+   своего содержимого и на узком экране раздувает блок за вьюпорт. */
+.hero-grid>*{min-width:0;padding:16px 22px}.why{border-right:1px solid var(--line)}
+.hero h3{font:11px var(--mono);text-transform:uppercase;letter-spacing:.8px;color:var(--soft);margin-bottom:8px}
+.rule{font-size:13.5px;margin-bottom:10px}
+/* Блоки и семьи стоят в одной сетке: дорожка, балл семьи, пункты блока. Пункты семей в сумме дают балл блока. */
+.ax{display:grid;grid-template-columns:auto minmax(70px,1fr) auto auto;gap:5px 12px;align-items:center;font-size:13px}.ax.t{grid-template-columns:auto minmax(70px,1fr) auto}
+.ax .h{font:10px var(--mono);color:var(--soft);text-align:right}.ax .n{font-weight:650}.ax .v,.ax .c{font:12px var(--mono);text-align:right;white-space:nowrap}.ax b.c{font-size:13px}
+.ax .st{grid-column:1/-1;font-size:11.5px;color:var(--soft);margin-top:-3px}.ax .f{grid-column:1/3;padding-left:12px;color:var(--soft);min-width:0;overflow-wrap:anywhere}.ax .f b{color:var(--ink);font-weight:500}.ax .f.z{grid-column:1/-1;font-size:11.5px}
+.pos{color:var(--good)}.neg{color:var(--bad)}
+.trk{position:relative;height:12px;border-radius:6px}.trk i{position:absolute;top:-3px;bottom:-3px;width:1px;background:var(--soft);font-style:normal}.trk u{position:absolute;top:0;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:var(--ink);border:2px solid var(--card);transition:left .6s}.trk u.adverse{background:var(--bad)}.trk u.supportive{background:var(--good)}
+.trk.h{height:13px}.trk.h i{background:none;width:auto;top:0;transform:translateX(-50%);font:10px var(--mono);color:var(--soft)}
+.stats{display:flex;flex-wrap:wrap;gap:12px 22px;margin-top:16px}.stat b{display:block;font:21px var(--mono)}.stat span{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--soft)}
+.dw{font-size:12px;line-height:1.4;color:var(--warn);margin-top:8px}
+.ai{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--line);padding:10px 22px;background:var(--brand-soft)}.ai input,.ai select{font:12px var(--mono);padding:7px 8px;border:1px solid var(--line);border-radius:3px;background:var(--card)}.ai input.key{min-width:200px;flex:1;max-width:370px}.ai small{color:var(--soft)}.ai .remember{display:flex;gap:6px;align-items:center;font:12px var(--sans);color:var(--soft);white-space:nowrap;cursor:pointer;user-select:none}.ai .remember input{accent-color:var(--btc)}#aiOut{padding:14px 22px 18px;border-top:1px dashed var(--line);max-width:980px;font-size:14px;line-height:1.6}#aiOut[hidden]{display:none}#aiOut p{margin:8px 0}#aiOut h3{font:600 16.5px var(--serif);margin:16px 0 6px;text-transform:none;letter-spacing:0;color:var(--ink)}#aiOut h4{font:600 14px var(--sans);margin:12px 0 5px}#aiOut ul{margin:8px 0 8px 22px}#aiOut li{margin:4px 0}#aiOut code{font:12.5px var(--mono);background:var(--neutral-bg);padding:1px 4px;border-radius:3px}
 section.block{margin-top:30px}.block-head{display:flex;align-items:baseline;gap:12px;border-bottom:1.5px solid var(--ink);padding-bottom:6px;margin-bottom:13px}.block-head h2{font:700 19px var(--serif)}.block-head .sub{font:11px var(--mono);color:var(--soft)}.block-score{margin-left:auto;font:11px var(--mono);padding:3px 9px;border-radius:10px;border:1px solid var(--line);background:var(--neutral-bg)}
 /* min(…,100%) вместо фиксированного минимума: иначе колонка шире экрана растягивает документ
    (карточки детекторов с минимумом 330px давали горизонтальный скролл на 320-пиксельных экранах). */
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(285px,100%),1fr));gap:12px}.card{position:relative;overflow:hidden;min-height:190px;background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:13px 14px 10px;display:flex;flex-direction:column;gap:6px}.card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--neutral)}.card.s2:before,.card.s1:before{background:var(--good)}.card.s-1:before{background:var(--warn)}.card.s-2:before{background:var(--bad)}.card.na:before{background:var(--line)}.card.na{opacity:.82}.ctop{display:flex;justify-content:space-between;gap:8px}.cname{font-weight:650;font-size:13px;line-height:1.3;padding-left:6px;flex:1;min-width:0}.score{font:10.5px var(--mono);padding:2px 7px;border-radius:10px;background:var(--neutral-bg);white-space:nowrap;flex-shrink:0;align-self:flex-start;height:fit-content}.score.pos{background:var(--good-bg);color:var(--good)}.score.neg{background:var(--bad-bg);color:var(--bad)}.score.warn{background:var(--warn-bg);color:var(--warn)}.cvalue{font:23px var(--mono);padding-left:6px;letter-spacing:-.3px}.cvalue.text{font-size:16px;letter-spacing:0}.delta{font:11.5px var(--mono);color:var(--soft);padding-left:6px}.note{font-size:12px;color:var(--soft);line-height:1.42;padding-left:6px}.tags{display:flex;gap:5px;flex-wrap:wrap;padding-left:6px}.tag{font:9.5px var(--mono);padding:2px 5px;border-radius:8px;background:var(--neutral-bg);color:var(--soft)}.spark{height:35px;margin-top:auto;padding-left:6px}.spark canvas{width:100%;height:35px}.meta{display:flex;justify-content:space-between;gap:8px;border-top:1px dotted var(--line);padding:6px 0 0 6px;color:var(--soft);font:9.5px var(--mono)}.meta .links{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.meta a,.source a{text-decoration:none;border-bottom:1px dotted var(--soft)}.stale{color:var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(285px,100%),1fr));gap:12px}.card{position:relative;overflow:hidden;min-height:150px;background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:13px 14px 10px;display:flex;flex-direction:column;gap:6px}.card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--neutral)}.card.s2:before,.card.s1:before{background:var(--good)}.card.s-1:before{background:var(--warn)}.card.s-2:before{background:var(--bad)}.card.na:before{background:var(--line)}.card.na{opacity:.82}.ctop{display:flex;justify-content:space-between;gap:8px}.cname{font-weight:650;font-size:13px;line-height:1.3;padding-left:6px;flex:1;min-width:0}.score{font:10.5px var(--mono);padding:2px 7px;border-radius:10px;background:var(--neutral-bg);white-space:nowrap;flex-shrink:0;align-self:flex-start;height:fit-content}.score.pos{background:var(--good-bg);color:var(--good)}.score.neg{background:var(--bad-bg);color:var(--bad)}.score.warn{background:var(--warn-bg);color:var(--warn)}.cvalue{font:23px var(--mono);padding-left:6px;letter-spacing:-.3px}.cvalue.text{font-size:16px;letter-spacing:0}.delta{font:11.5px var(--mono);color:var(--soft);padding-left:6px}.card .dw{margin:0;padding-left:6px;font-size:11.5px}.note{font-size:12px;color:var(--soft);line-height:1.42;padding-left:6px}.spark{height:35px;margin-top:auto;padding-left:6px}.spark canvas{width:100%;height:35px}.meta{display:flex;justify-content:space-between;gap:8px;border-top:1px dotted var(--line);padding:6px 0 0 6px;color:var(--soft);font:9.5px var(--mono)}.meta .links{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.meta a,.source a{text-decoration:none;border-bottom:1px dotted var(--soft)}.stale{color:var(--warn)}
+/* Как считается карточка — по запросу: на самой карточке остаются число и короткая подпись. */
+.how summary{cursor:pointer;padding-left:6px;font:9.5px var(--mono);color:var(--soft)}.how .note{margin-top:5px}
 .det-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(330px,100%),1fr));gap:12px}.det{position:relative;overflow:hidden;background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:13px 14px;min-height:145px}.det:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--neutral)}.det.fired:before{background:var(--bad)}.det.watch:before{background:var(--warn)}.det.good:before{background:var(--good)}.det-head{display:flex;justify-content:space-between;gap:8px}.det h3{font-size:13px;padding-left:6px}.state{font:10px var(--mono);padding:3px 8px;border-radius:10px;background:var(--neutral-bg);white-space:nowrap;flex-shrink:0;height:fit-content}.fired .state{background:var(--bad);color:var(--on-brand)}.watch .state{background:var(--warn);color:var(--on-brand)}.good .state{background:var(--good);color:var(--on-brand)}.det .inputs{font:11.5px var(--mono);padding:8px 0 4px 6px}.det p{font-size:11.5px;color:var(--soft);padding-left:6px}.pts{margin-top:7px;padding-left:6px;font:11px var(--mono)}
-details.panel{margin-top:20px;background:var(--card);border:1.5px solid var(--line);border-radius:5px}details summary{cursor:pointer;padding:11px 16px;font:15px var(--serif);color:var(--soft)}.panel-body{border-top:1px solid var(--line);padding:14px 18px;overflow-x:auto}.method{max-width:1050px}.method h3{font:16px var(--serif);margin:16px 0 6px}.method p{color:var(--soft);margin:7px 0}.method b{color:var(--ink)}
-table{border-collapse:collapse;width:100%;font:11px var(--mono);margin-top:10px}th,td{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}th{background:var(--grid-strong)}td.num{text-align:right}.sources{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr));gap:8px}.source{border:1px solid var(--line);border-radius:4px;padding:9px 10px}.source b{font:12px var(--mono)}.source p{font-size:11px;color:var(--soft);margin-top:3px}
+details.panel{margin-top:20px;background:var(--card);border:1.5px solid var(--line);border-radius:5px}details.panel>summary{cursor:pointer;padding:11px 16px;font:15px var(--serif);color:var(--soft)}details.panel>summary span{font:12px var(--mono)}.panel-body{border-top:1px solid var(--line);padding:14px 18px;overflow-x:auto}.panel-body .btn{margin-top:10px}.method{max-width:1050px}.method h3{font:16px var(--serif);margin:16px 0 6px}.method p{color:var(--soft);margin:7px 0}.method b{color:var(--ink)}
+table{border-collapse:collapse;width:100%;font:11px var(--mono);margin-top:10px}th,td{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}th{background:var(--grid-strong)}td.num,th.num{text-align:right}td.num{white-space:nowrap}tr.grp th{background:none;border-width:0 0 1px;padding-top:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--soft)}
+.log{margin-top:0}.log td{white-space:nowrap}.log th:last-child,.log td:last-child{width:99%;min-width:220px;white-space:normal}.log td:last-child{font:12.5px var(--sans)}#monitoring{max-width:none}#monitoring p{max-width:1050px}#monitoring td:first-child{min-width:220px}
+.sources{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr));gap:8px}.source{border:1px solid var(--line);border-radius:4px;padding:9px 10px}.source b{font:12px var(--mono)}.source p{font-size:11px;color:var(--soft);margin-top:3px}
 footer{margin-top:34px;border-top:2px solid var(--ink);padding-top:12px;color:var(--soft);font-size:12px;max-width:1050px}
-@media(max-width:800px){.hero-grid{grid-template-columns:1fr}.gauges{border-right:0;border-bottom:1px solid var(--line)}.factor{flex-direction:column;gap:2px}.behaviors{grid-template-columns:1fr}.verdict{font-size:19px;padding:12px 14px}.station{font-size:20px}.headmeta{margin-left:0;width:100%;justify-content:space-between}.wrap{padding:14px 12px 50px}.ai{padding:10px 14px}#aiOut{padding:12px 14px 16px}}
-.strategy{display:grid;grid-template-columns:180px minmax(220px,1fr) minmax(300px,450px);background:var(--card);border-top:1px solid var(--line);border-bottom:1px solid var(--line);border-left:4px solid var(--neutral)}.strategy.good{border-left-color:var(--good)}.strategy.warn{border-left-color:var(--warn)}.strategy.bad{border-left-color:var(--bad)}.strategy .dial,.strategy .act{border-right:1px solid var(--line)}.strategy .dial,.strategy .act,.strategy .trig{padding:12px 16px}.strategy .act{display:flex;flex-direction:column;gap:6px;justify-content:center}.strategy .trig{display:flex;flex-direction:column;gap:7px;justify-content:center}.strategy .eyebrow{font:10px var(--mono);letter-spacing:.9px;text-transform:uppercase;color:var(--soft)}.strategy .num{display:flex;align-items:flex-end;gap:11px;margin-top:6px}.strategy .pct{font:700 38px var(--serif);letter-spacing:-1px;line-height:.9}.strategy .pct.good{color:var(--good)}.strategy .pct.warn{color:var(--warn)}.strategy .pct.bad{color:var(--bad)}.strategy .pct.neutral{color:var(--ink)}.strategy .meter{display:flex;align-items:flex-end;gap:3px;height:26px;padding-bottom:3px}.strategy .meter i{width:5px;border-radius:1px;background:var(--line)}.strategy .sub{font:12px var(--sans);color:var(--soft);margin-top:7px}.strategy .lead{font:600 16px var(--serif);color:var(--ink)}.strategy .hold{color:var(--soft);font-style:italic}
-.warnline{font:13px var(--sans);color:var(--soft);line-height:1.45}.strategy .warnline b{color:var(--ink)}.strategy .t{font:12.5px var(--mono);color:var(--soft)}.strategy .t b{color:var(--ink)}.strategy .ctx{font:11px var(--mono);color:var(--soft);padding-top:2px}.strategy .foot{grid-column:1/-1;border-top:1px dotted var(--line);padding:6px 16px;font:11px var(--mono);color:var(--soft)}@media(max-width:800px){.strategy{grid-template-columns:1fr}.strategy .dial,.strategy .act{border-right:0;border-bottom:1px solid var(--line)}}
-@media(prefers-reduced-motion:reduce){.needle{transition:none}}
+@media(max-width:800px){.hero-grid{grid-template-columns:1fr}.hero-grid>*{padding:14px}.why{border-right:0;border-bottom:1px solid var(--line)}.verdict{font-size:19px}.vbox{padding:12px 14px}.station{font-size:20px}.headmeta{margin-left:0;width:100%;justify-content:space-between}.wrap{padding:14px 12px 50px}.ai{padding:10px 14px}#aiOut{padding:12px 14px 16px}.strategy{grid-template-columns:1fr}.strategy .dial,.strategy .act{border-right:0;border-bottom:1px solid var(--line)}.log thead{display:none}.log tr{display:grid;grid-template-columns:repeat(3,auto) 1fr;gap:3px 12px;padding:7px 0;border-bottom:1px solid var(--line)}.log td{border:0;padding:0}.log td:last-child{grid-column:1/-1;width:auto;min-width:0}}
+@media(prefers-reduced-motion:reduce){.trk u{transition:none}}
 
 /* ── ХРОМ NEXUS: общий с хабом слой поверх станционной вёрстки ───────────── */
 html[data-theme="light"]{color-scheme:light}
@@ -153,22 +168,19 @@ html[data-theme="dark"] .btn{border-color:var(--line)}
   <div class="station"><b>МОНИТОР BITCOIN</b><small><span id="uiVersion">—</span> · рыночный цикл, потоки и режим риска · серверный снимок</small></div>
   <div class="headmeta"><span class="dots" id="dots"></span><span id="updated">загрузка…</span><button class="btn theme-btn" id="themeBtn" type="button" aria-label="Переключить тему" title="Светлая / тёмная тема"><span id="themeIcon" aria-hidden="true">◐</span><span id="themeWord">ТЕМА</span></button><button class="btn" id="refresh">Обновить</button></div>
 </header>
-<div class="stickybar" id="stickyBar"><span class="sb-dot"></span><span class="sb-label">ВЕРДИКТ</span><span id="sbText"></span></div>
+<div class="stickybar" id="stickyBar"><span class="sb-dot"></span><span class="sb-label">ЦЕЛЬ</span><span id="sbText"></span></div>
 <div class="banner" id="demoBanner">ДЕМОНСТРАЦИОННЫЙ СНИМОК: числа синтетические. Запустите GitHub Action (вкладка Actions → Run workflow), чтобы заменить их живыми данными. Ключ FRED не обязателен.</div>
-<div class="hero">
+<div class="hero" id="hero">
   <div class="override" id="override"></div>
-  <div class="hero-top"><canvas id="tape" role="img" aria-label="Лента истории режимных шкал за 90 снимков"></canvas><div class="verdict" id="verdict">ЗАГРУЗКА…</div></div>
-  <div class="hero-grid">
-    <div class="gauges">
-      <div class="gauge"><div class="gauge-head"><b>Среднесрочный режим</b><span id="strategicScore">—</span></div><div class="bar"><i class="needle" id="strategicNeedle"></i></div><div class="labels"><span>≤−60 сильный негатив</span><span>0 нейтрально</span><span>≥+60 сильный позитив</span></div></div>
-      <div class="gauge"><div class="gauge-head"><b>Краткосрочная структура</b><span id="tacticalScore">—</span></div><div class="bar"><i class="needle" id="tacticalNeedle"></i></div><div class="labels"><span>≤−60 сильное давление</span><span>0 нет преимущества</span><span>≥+60 сильная поддержка</span></div></div>
-      <div class="stats"><div class="stat"><b id="price">—</b><span>BTC / USD</span></div><div class="stat"><b id="coverS">—</b><span>покрытие среднесрок</span></div><div class="stat"><b id="coverT">—</b><span>покрытие краткосрок</span></div><div class="stat"><b id="detCount">—</b><span>активные детекторы</span></div><div class="stat"><b id="onchainCoverage">—</b><span>покрытие ончейн</span></div></div>
-      <div class="behaviors"><div class="behavior"><h4>Как вести себя в ближайшие дни–недели</h4><p id="shortBehavior">—</p></div><div class="behavior"><h4>Как вести себя на горизонте месяцев</h4><p id="mediumBehavior">—</p></div></div>
-      <div class="phase" id="phase"></div>
-    </div>
-    <div class="explain"><h3>Самые сильные семейства по баллу · сам вердикт задают гейты и детекторы</h3><div id="factors"></div></div>
-  </div>
+  <div class="hero-top"><div class="vbox"><div class="verdict" id="verdict">ЗАГРУЗКА…</div><div class="held" id="held"></div></div></div>
   <div class="strategy" id="strategy"></div>
+  <div class="hero-grid">
+    <div class="why"><h3>Среднесрочный режим · полосы блоков</h3><div id="why"></div></div>
+    <div><h3>Краткосрочная структура · входы гейта</h3><div id="tact"></div>
+      <div class="stats"><div class="stat"><b id="price">—</b><span id="priceAge">BTC / USD</span></div><div class="stat"><b id="coverS">—</b><span>покрытие среднесрок</span></div><div class="stat"><b id="coverT">—</b><span>покрытие краткосрок</span></div><div class="stat"><b id="onchainCoverage">—</b><span>покрытие ончейн</span></div><div class="stat"><b id="detCount">—</b><span>тревожные детекторы</span></div></div>
+      <div id="dataNote"></div>
+    </div>
+  </div>
   <div class="ai">
     <select id="aiDepth"><option value="deep" selected>ИИ-разбор · глубокий</option><option value="brief">ИИ-разбор · краткая сводка</option></select>
     <input id="aiModel" list="aiModels" value="anthropic/claude-fable-5" aria-label="Модель OpenRouter" placeholder="provider/model-name">
@@ -179,130 +191,429 @@ html[data-theme="dark"] .btn{border-color:var(--line)}
   </div>
   <div id="aiOut" hidden></div>
 </div>
+<details class="panel" id="logPanel" open><summary>Журнал смен цели<span id="logSum"></span></summary><div class="panel-body"><div id="changeLog"></div></div></details>
+<details class="panel" id="monPanel"><summary>Результат политики · форвард-наблюдение</summary><div class="panel-body method" id="monitoring"></div></details>
 <div id="blocks"></div>
 <section class="block"><div class="block-head"><h2>VI · Автодетекторы нелинейных событий</h2><span class="sub">не усредняются с обычными карточками · могут изменить режим</span></div><div class="det-grid" id="detectors"></div></section>
-<details class="panel"><summary>Как читать панель и как считается режим</summary><div class="panel-body method" id="method"></div></details>
-<details class="panel"><summary>Таблица вкладов всех индикаторов</summary><div class="panel-body"><div id="contrib"></div></div></details>
-<details class="panel"><summary>Forward/OOS-наблюдение и здоровье policy v1</summary><div class="panel-body method" id="monitoring"></div></details>
-<details class="panel"><summary>Источники и состояние данных</summary><div class="panel-body"><div class="sources" id="sources"></div></div></details>
-<footer><p><b>Дисклеймер.</b> Это исследовательский режимный индикатор, а не персональная инвестиционная рекомендация. Он переводит публичные данные в заранее описанные зоны и может ошибаться из-за задержек, пересмотров, сбоев источников и смены рыночной структуры. Не использовать плечо или крупные изменения позиции на основании одного снимка.</p><p style="margin-top:6px">Снимок рассчитан на обновление примерно раз в час. Дневные и недельные ряды естественным образом меняются реже.</p><p style="margin-top:6px">On-chain слой использует Coin Metrics при доступности и независимые Blockchain.com fallback’ы для MVRV, activity и miner revenue. Exchange-labelled series не подменяются. Перед коммерческой публикацией отдельно проверьте условия лицензирования поставщиков.</p></footer>
+<details class="panel" id="methodPanel"><summary>Как читать панель</summary><div class="panel-body method" id="method"></div></details>
+<details class="panel" id="contribPanel"><summary>Все индикаторы · балл и вклад в блок</summary><div class="panel-body"><div id="contrib"></div></div></details>
+<details class="panel" id="srcPanel"><summary>Источники и состояние данных</summary><div class="panel-body"><div class="sources" id="sources"></div></div></details>
+<footer><p id="foot"></p></footer>
 </div>
 <script type="module">
-import { POLICY_V1 } from "./policy-v1.mjs";
+import { POLICY_V1, applyStrategicDetectorPolicyV1 } from "./policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "./model-policy-v1.mjs";
 import { EXECUTION_POLICY_V1 } from "./execution-policy-v1.mjs";
 import { evaluateActionGateV1 } from "./action-gate-v1.mjs";
+/* VIEW:START — чистые функции «снимок → что показать»: без DOM, время приходит параметром.
+   static-audit исполняет этот блок в Node. Новые поля снимка необязательны: у каждого есть запасной путь. */
+const fin=Number.isFinite,arr=x=>Array.isArray(x)?x:[],objs=x=>arr(x).filter(o=>o&&typeof o==="object"),NB=String.fromCharCode(160),OV=POLICY_V1.allocation_overlays,RB=MODEL_POLICY_V1.regime_bands,HY=MODEL_POLICY_V1.hysteresis;
+// Двойное округление убирает «−0»: балл −0,4 печатается нулём без знака.
+const num=(v,d=0)=>fin(v)?Number(v.toFixed(d)).toFixed(d).replace("-","−").replace(".",","):"—";
+const sgn=(v,d=0)=>(fin(v)&&Number(v.toFixed(d))>0?"+":"")+num(v,d);
+const sc=v=>sgn(v,Number.isInteger(v)?0:1);
+const pc=(v,d=0)=>num(v,d)+NB+"%";
+const kusd=p=>`≈${NB}${num(p/1e3)}${NB}тыс.${NB}$`;
+const plural=(n,a,b,c)=>{const m=Math.abs(n)%100,k=m%10;return m>10&&m<20?c:k===1?a:k>1&&k<5?b:c};
+const hs=k=>`${k}${NB}${plural(k,"полушаг","полушага","полушагов")}`;
+const p2=x=>String(x).padStart(2,"0");
+// Время — по часам устройства, пояс подписан в шапке; дата дневного наблюдения — по UTC, как её датирует источник.
+const dm=t=>{const d=new Date(t);return`${p2(d.getDate())}.${p2(d.getMonth()+1)}`};
+const dmt=t=>{const d=new Date(t);return`${dm(t)} ${p2(d.getHours())}:${p2(d.getMinutes())}`};
+const dmU=t=>{const d=new Date(t);return`${p2(d.getUTCDate())}.${p2(d.getUTCMonth()+1)}`};
+const tzLabel=()=>{const o=-new Date().getTimezoneOffset(),a=Math.abs(o);return"UTC"+(o?`${o<0?"−":"+"}${Math.floor(a/60)}${a%60?":"+p2(a%60):""}`:"")};
+const ago=(t,now)=>{const m=Math.max(0,Math.round((now-Date.parse(t))/6e4));return!fin(m)?"—":m<120?`${m} мин`:m<2880?`${Math.floor(m/60)} ч`:`${Math.floor(m/1440)} дн`};
+const span=ms=>{const m=ms/6e4;return m<90?`${Math.round(m)}${NB}мин`:m<2880?`${Math.round(m/60)}${NB}ч`:`${num(m/1440,1)}${NB}дн`};
+const median=a=>{const s=[...a].sort((x,y)=>x-y),n=s.length;return n?n%2?s[n>>1]:(s[n/2-1]+s[n/2])/2:null};
+const SHORT={emergency:"аварийный",defensive:"защитный",deteriorating:"ухудшается",transition:"переходный",unconfirmed_positive:"спрос не подтв.",constructive:"конструктивный"};
+const TSHORT={demand_break:"слом спроса",deleveraging:"делеверидж",fragile:"хрупкая структура",overheated_supported:"плечо перегрето",short_squeeze:"сквиз шортов",spot_led:"спот ведёт",balanced:"нейтральная структура",insufficient:"нет данных",emergency:"аварийный режим"};
+const OVL={recovery_floor:"пол восстановления",capitulation_floor:"пол капитуляции",euphoria_safety_cap:"потолок эйфории"};
+const BLK={macro:"Макро",demand:"Спрос",cycle:"Цикл"},BANDS=["adverse","neutral","supportive"];
+const BAND={adverse:"неблагоприятная",neutral:"нейтральная",supportive:"благоприятная"},BAND_TO={adverse:"неблагоприятную",neutral:"нейтральную",supportive:"благоприятную"},BAND_OF={adverse:"неблагоприятной",neutral:"нейтральной",supportive:"благоприятной"};
+const DETN={integrity:"целостность рынка",leverage:"плечо",demand_break:"слом спроса",macro_shock:"макрошок",distribution:"дистрибуция",short_squeeze:"сквиз",recovery:"восстановление"},DSTATE={calm:"спокойно",watch:"наблюдение",fired:"сработал",good:"выполнен"};
+const met=(S,id)=>objs(S.metrics).find(x=>x.id===id)||{},det=(S,id)=>objs(S.detectors).find(x=>x.id===id)||{};
+// Уровни цены у порогов оценки приходят из снимка; сами перцентили — константы замороженной v1.
+const lvl=S=>Object.fromEntries(arr(S.valuation_levels?.levels).filter(x=>x&&x.key).map(x=>[x.key,x]));
+const recPct=S=>lvl(S).recovery_anchor?.percentile??25,gatePct=S=>lvl(S).valuation_gate?.percentile??82;
+// Подтверждения детектора восстановления — те же три балла, что считает движок (балл ≥ 0).
+const recFacts=S=>{const parts=[["тренд","trend_regime"],["ETF","etf_regime"],["биржи","exchange_supply"]].map(([l,id])=>({l,s:met(S,id).score}));return{parts,hits:parts.filter(x=>x.s!=null&&fin(x.s)&&x.s>=0).length}};
+
+// ЖУРНАЛ СМЕН ЦЕЛИ: monitoring.target_change_log; чего в нём нет — восстанавливается из decision_events.
+function causeOf(a,b){
+  const out=[],x=arr(a.o).filter(o=>OVL[o]),y=arr(b.o).filter(o=>OVL[o]);
+  if(a.s&&b.s&&a.s!==b.s)out.push(`режим «${SHORT[a.s]||a.s}» → «${SHORT[b.s]||b.s}»`);
+  for(const o of y)if(!x.includes(o))out.push(`включён ${OVL[o]}`);
+  for(const o of x)if(!y.includes(o))out.push(`снят ${OVL[o]}`);
+  return out.join(", ");
+}
+const events=S=>arr(S.monitoring?.decision_events).filter(e=>e&&fin(Date.parse(e.t))&&fin(e.target_pct));
+function changeLog(S){
+  const L=arr(S.monitoring?.target_change_log).filter(x=>x&&fin(Date.parse(x.t))&&fin(x.from_pct)&&fin(x.to_pct)).map(x=>({t:x.t,from:x.from_pct,to:x.to_pct,price:fin(x.price)?x.price:null,cause:(x.cause?.text||causeOf({s:x.strategic_from,o:x.overlays_from},{s:x.strategic_to,o:x.overlays_to}))+(x.gate==="closed"?" · при паузе панели":"")}));
+  // Журнал главнее событий; события дополняют то, что было ДО его первой записи (журнал может начаться с выкладки).
+  const ev=events(S),t0=Math.min(...L.map(r=>Date.parse(r.t))),rows=[...L];
+  for(let i=1;i<ev.length;i++)if(ev[i].target_pct!==ev[i-1].target_pct&&Date.parse(ev[i].t)<t0-1e3)rows.push({t:ev[i].t,from:ev[i-1].target_pct,to:ev[i].target_pct,price:null,cause:causeOf({s:ev[i-1].strategic,o:ev[i-1].binding_overlays},{s:ev[i].strategic,o:ev[i].binding_overlays})});
+  rows.sort((a,b)=>Date.parse(a.t)-Date.parse(b.t));
+  rows.forEach((r,i)=>{r.life=rows[i+1]?Date.parse(rows[i+1].t)-Date.parse(r.t):null});
+  return rows;
+}
+
+// ФРАЗА-ДЕЙСТВИЕ — из направления и возраста последней смены цели, а не из названия режима: приказ
+// сокращать стоял 83 часа после ПОВЫШЕНИЯ цели с 5 до 20 %. Повышение исполняется траншами по соглашению,
+// которым монитор меряет линию «исполнение траншами» (monitoring.assumptions.tranched_execution: три транша,
+// по одному в сутки, первый не раньше 06:00 UTC следующих суток). Понижение — сразу: призыв живёт сутки.
+const ACT_DOWN_H=24,WAIT_UP={demand_break:"слом спроса",deleveraging:"делеверидж",overheated_supported:"плечо перегрето"};
+const trancheN=c=>Number.isInteger(c?.tranches)&&c.tranches>0&&c.tranches<11?c.tranches:null;
+const trancheRule=S=>{const c=S.monitoring?.assumptions?.tranched_execution||{},h=c.first_not_before_utc_hour;return{n:trancheN(c)||3,hour:fin(h)&&h>=0&&h<24?h:6}};
+function trancheOf(S,now,c){
+  const {n,hour}=trancheRule(S),at=[...Array(n)].map((_,k)=>(Math.floor(Date.parse(c.t)/864e5)+k+1)*864e5+hour*36e5).filter(x=>x>now);
+  return at.length?{left:at.length,n,next:at[0]}:null;
+}
+function leadOf(S,now){
+  const t=S.decision?.target_pct;if(!fin(t))return null;
+  const c=changeLog(S).at(-1),ev=events(S),still=`Цель ${pc(t)} без изменений с `;
+  // Журнал, не сходящийся с текущей целью, молчит: лучше цель без истории, чем чужая дата.
+  if(!c||c.to!==t)return{text:!c&&ev.length&&ev.every(e=>e.target_pct===t)?`${still}${dm(ev[0].t)} — действий нет`:`Цель ${pc(t)}${S.regime?.strategic==="emergency"?" — аварийный режим: выйти из позиции":""}`,cause:null};
+  const up=c.to>c.from,wait=WAIT_UP[S.regime?.tactical],plan=up?trancheOf(S,now,c):null;
+  if(up?!plan:!((now-Date.parse(c.t))/36e5<ACT_DOWN_H))return{text:`${still}${dm(c.t)} — действий нет`,cause:`Последняя смена: ${c.from} → ${pc(c.to)}${c.cause?" — "+c.cause:""}`};
+  return{text:`Цель ${up?"поднята":"снижена"} ${c.from} → ${pc(c.to)} ${dm(c.t)} — ${up?(wait?`добор отложен: ${wait}`:"добирать траншами"):c.to===0?"выйти сразу":"сократить сразу"}`,plan:up&&!wait?`Транши: осталось ${plan.left} из ${plan.n}, следующий не раньше ${dmt(plan.next)}`:null,cause:c.cause?`Причина: ${c.cause}`:null};
+}
+
+// ОВЕРЛЕИ: печатается то, что посчитано, — сами баллы и число дневных закрытий, без слов сильнее расчёта.
+function overlayLines(S){
+  const b=arr(S.decision?.binding_overlays),mv=met(S,"mvrv_cycle").value_num,p=fin(mv)?Math.round(mv):"—",out=[];
+  if(S.regime?.strategic==="emergency")return out;
+  if(b.includes("recovery_floor")){const r=recFacts(S),cl=S.monitoring?.v2_candidate?.recovery_closes;
+    out.push(`Пол восстановления ${pc(OV.recovery_floor_pct)}: MVRV ${p}-й пц (< ${recPct(S)}) · ${r.parts.map(x=>`${x.l} ${fin(x.s)?sc(x.s):"—"}`).join(" · ")} — ${r.hits} из 3 не ниже нуля${fin(cl)?` · дневных закрытий с подтверждением: ${cl}`:""}`);}
+  else if(det(S,"recovery").state==="good"&&det(S,"macro_shock").state==="fired")out.push("Детектор восстановления выполнен, но макрошок его блокирует — цель не поднята");
+  if(b.includes("capitulation_floor"))out.push(`Пол капитуляции ${pc(OV.capitulation_floor_pct)}: MVRV ${p}-й пц (≤ ${OV.capitulation_max_mvrv_percentile})`);
+  if(b.includes("euphoria_safety_cap"))out.push(`Потолок эйфории ${pc(OV.euphoria_cap_pct)}: MVRV ${p}-й пц (≥ ${OV.euphoria_min_mvrv_percentile})`);
+  return out;
+}
+
+// ПОЛОСЫ БЛОКОВ. Режим задают полосы ±20 трёх блоков, а не их взвешенное среднее: стрелка среднего
+// стояла в «нейтральной» зоне в 66 % снимков с вердиктом «ухудшается».
+const bandOf=s=>!fin(s)?"unknown":s>=RB.supportive_min?"supportive":s<=RB.adverse_max?"adverse":"neutral";
+// Полушаг — 0,5 балла одной семьи; в блоке из n семей он сдвигает балл блока на 25/n пунктов.
+function hop(s,n,to){const dir=BANDS.indexOf(to)>BANDS.indexOf(bandOf(s))?1:-1;for(let k=1;k<=8*n;k++)if(bandOf(Math.round((s+dir*k*25/n)*1e6)/1e6)===to)return k;return null}
+function blockRows(S){
+  return Object.keys(BLK).map(key=>{
+    const st=S.blocks?.[key]?.strategic||{},fam=st.families||{},ids=Object.keys(fam).filter(f=>fin(fam[f])),n=ids.length,score=fin(st.score)?st.score:null,band=bandOf(score);
+    const card=f=>objs(S.metrics).find(x=>x.block===key&&x.family===f&&x.vote&&x.strategic)||{};
+    const near=score==null||!n?null:(band==="neutral"?["adverse","supportive"]:["neutral"]).map(to=>({to,k:hop(score,n,to)})).filter(x=>x.k).sort((a,b)=>a.k-b.k)[0]||null;
+    return{key,label:BLK[key],score,band,n,near,families:ids.map(f=>{const m=card(f);return{id:m.id||f,name:m.name||f,score:fam[f],value:wordOf(m),contrib:50*fam[f]/n,stale:!!m.stale}}),missing:arr(st.expected).filter(f=>!ids.includes(f)).map(f=>card(f).name||f)};
+  });
+}
+// Копия дерева гейтов v1 — только для подсказок «что изменит цель». Ей верят, пока она на этом же снимке
+// воспроизводит кандидата сервера; иначе подсказки называют соседние ступени без условий.
+const treeV1=(M,D,C)=>{const a=[M,D,C].filter(x=>x==="adverse").length;return a>=2?"defensive":D==="adverse"?"deteriorating":a?"transition":D==="supportive"&&(C==="supportive"||M==="supportive")?"constructive":M==="supportive"&&C==="supportive"&&D==="neutral"?"unconfirmed_positive":"transition"};
+const lofty=r=>r==="constructive"||r==="unconfirmed_positive";
+function candOf(S,b){
+  let r=treeV1(b.macro,b.demand,b.cycle);const v=met(S,"mvrv_cycle").score;
+  if((v==null||v<=-1)&&lofty(r))r="transition";
+  return applyStrategicDetectorPolicyV1({strategic:r,macroShockState:det(S,"macro_shock").state,distributionState:det(S,"distribution").state,recoveryState:det(S,"recovery").state});
+}
+function whyOf(S){
+  const rows=blockRows(S),cur=Object.fromEntries(rows.map(r=>[r.key,r.band])),cand=S.regime_meta?.strategic?.candidate;
+  const ok=Object.hasOwn(SHORT,cand)&&cand!=="emergency"&&candOf(S,cur)===cand;let rule=null;
+  if(ok){
+    const adv=rows.filter(r=>r.band==="adverse").map(r=>r.label),sup=rows.filter(r=>r.band==="supportive").map(r=>r.label),mv=met(S,"mvrv_cycle");let r=treeV1(cur.macro,cur.demand,cur.cycle);
+    rule=(adv.length>1?`неблагоприятны ${adv.join(" и ")}`:adv.length?`неблагоприятен только ${adv[0]}`:lofty(r)?`благоприятны ${sup.join(" и ")}${r==="unconfirmed_positive"?", Спрос нейтрален":""}`:"неблагоприятных блоков нет, пары благоприятных тоже")+` → «${SHORT[r]}»`;
+    if((mv.score==null||mv.score<=-1)&&lofty(r)){r="transition";rule+=`; гейт оценки (${mv.score==null?"нет данных MVRV":`MVRV ${Math.round(mv.value_num)}-й пц`}) → «переходный»`}
+    if(r!==cand)rule+=`; ${det(S,"recovery").state==="good"&&cand==="transition"?"детектор восстановления":det(S,"macro_shock").state==="fired"?"макрошок":"детектор дистрибуции"} → «${SHORT[cand]}»`;
+  }
+  return{rows,ok,rule,cand};
+}
+// Ближайшие по числу полушагов сочетания полос, при которых сервер дал бы цель выше и ниже текущей.
+function routesOf(S,rows){
+  const T=S.decision?.regime_targets_pct||{},target=S.decision?.target_pct,opt=rows.map(r=>r.score==null||!r.n?[{b:r.band,k:0}]:BANDS.map(b=>({b,k:b===r.band?0:hop(r.score,r.n,b)})).filter(o=>o.k!=null));
+  const better=(x,y,nearer)=>!y||x.k<y.k||(x.k===y.k&&(x.moves.length<y.moves.length||(x.moves.length===y.moves.length&&nearer)));let up=null,down=null;
+  for(const m of opt[0])for(const d of opt[1])for(const c of opt[2]){
+    const k=m.k+d.k+c.k,reg=candOf(S,{macro:m.b,demand:d.b,cycle:c.b}),t=T[reg];if(!k||!fin(t))continue;
+    const x={pct:t,reg,k,moves:[m,d,c].map((o,i)=>({label:rows[i].label,to:o.b,k:o.k})).filter(o=>o.k)};
+    if(t>target&&better(x,up,up&&t<up.pct))up=x;
+    if(t<target&&better(x,down,down&&t>down.pct))down=x;
+  }
+  return{up,down};
+}
+// Такт снимков — из данных: зашитое в текст число пережило переход с часа на 15 минут.
+function tactOf(S){const h=objs(S.history).slice(-13).map(x=>Date.parse(x.t)).filter(fin),d=[];for(let i=1;i<h.length;i++)d.push((h[i]-h[i-1])/6e4);return d.length<3?null:Math.round(median(d))}
+
+// ЧТО ИЗМЕНИТ ЦЕЛЬ. При связывающем поле первым стоит его снятие: во всех трёх эпизодах пола 80 % экран
+// называл нижним триггером только аварийный режим, а цель уходила на 45 → 5 и на 20 одним снимком.
+function triggersOf(S,now,w=whyOf(S)){
+  const D=S.decision||{},target=D.target_pct,base=D.base_target_pct,b=arr(D.binding_overlays),reg=S.regime?.strategic,T=D.regime_targets_pct||{},first=[],hint=[];
+  if(!fin(target))return[];
+  if(reg==="emergency")return[{dir:"",text:`выход: два снимка подряд без нарушения целостности; выше прежнего режима — после ${HY.risk_on_hold_hours}${NB}ч`}];
+  const mvm=met(S,"mvrv_cycle"),mv=mvm.value_num,p=fin(mv)?Math.round(mv):"—",L=lvl(S),rec=recFacts(S),REC=recPct(S),at=(k,side)=>fin(L[k]?.price_usd)?` — ${side} ${kusd(L[k].price_usd)}`:"";
+  const capOn=fin(mv)&&mv<=OV.capitulation_max_mvrv_percentile,tact=tactOf(S),tick=tact?` (≈${NB}${tact}${NB}мин)`:"",hold=`удержание ${HY.risk_on_hold_hours}${NB}ч`;
+  if(b.includes("recovery_floor")&&fin(base))first.push({dir:"dn",pct:Math.max(base,capOn?OV.capitulation_floor_pct:0),more:true,text:`пол снимается одним снимком: подтверждений станет меньше двух (сейчас ${rec.hits} из 3) или MVRV ≥ ${REC}-го пц${at("recovery_anchor","выше")} (сейчас ${p}-й)`});
+  else if(b.includes("capitulation_floor")&&fin(base))first.push({dir:"dn",pct:base,text:`пол снимается, когда MVRV выше ${OV.capitulation_max_mvrv_percentile}-го пц${at("capitulation_floor","выше")} (сейчас ${p}-й)`});
+  // Удерживаемый кандидат: режим уже насчитан и ждёт подтверждения.
+  const meta=S.regime_meta?.strategic||{},cand=meta.candidate,ct=cand&&cand!==reg?T[cand]:null;let up=null,dn=null;
+  if(fin(ct)&&ct>target)up={dir:"up",pct:ct,text:`уже насчитан «${SHORT[cand]}»${meta.hold_until?` — не раньше ${dmt(meta.hold_until)}`:""}`};
+  if(fin(ct)&&ct<target)dn={dir:"dn",pct:ct,text:`уже насчитан «${SHORT[cand]}» — вступит следующим снимком${tick}`};
+  if(w.ok){const r=routesOf(S,w.rows),txt=x=>x.moves.map(m=>`${m.label} — в ${BAND_TO[m.to]} (${hs(m.k)})`).join(", ");
+    if(!up&&r.up)up={dir:"up",pct:r.up.pct,text:`${txt(r.up)} · ${hold}`};
+    if(!dn&&r.down)dn={dir:"dn",pct:r.down.pct,text:`${txt(r.down)} · двумя снимками подряд${tick}`};
+  }else{const O=POLICY_V1.strategic_order,i=O.indexOf(reg),shut=x=>lofty(x)&&(!fin(mv)||mv>=gatePct(S));
+    if(!up)for(let k=i+1;i>=0&&k<O.length;k++)if(!shut(O[k])&&fin(T[O[k]])&&T[O[k]]>target){up={dir:"up",pct:T[O[k]],text:`режим «${SHORT[O[k]]}» · ${hold}`};break}
+    if(!dn)for(let k=i-1;k>0;k--)if(fin(T[O[k]])&&T[O[k]]<target){dn={dir:"dn",pct:T[O[k]],more:true,text:`ухудшение режима · двумя снимками подряд${tick}`};break}
+  }
+  if(!up&&target<POLICY_V1.ladder.unconfirmed_positive&&(mvm.score==null||mvm.score<=-1))hint.push({dir:"",text:`цели выше закрыты гейтом оценки: ${mvm.score==null?"нет данных MVRV":`MVRV ${p}-й пц (≥ ${gatePct(S)})`}`});
+  // Полы, до которых недалеко: якорь по MVRV уже выполнен. Подсказка стоит в любом режиме ниже пола.
+  const quiet=det(S,"recovery").state!=="good"&&det(S,"macro_shock").state!=="fired";
+  if(!b.includes("recovery_floor")&&quiet&&target<OV.recovery_floor_pct&&fin(mv)&&mv<REC)hint.push({dir:"up",pct:OV.recovery_floor_pct,text:`пол восстановления: MVRV уже ниже ${REC}-го пц, нужно два неотрицательных балла из трёх (сейчас ${rec.hits})`});
+  if(!capOn&&target<OV.capitulation_floor_pct&&fin(mv)&&mv<REC)hint.push({dir:"up",pct:OV.capitulation_floor_pct,text:`пол капитуляции: MVRV ≤ ${OV.capitulation_max_mvrv_percentile}-го пц${at("capitulation_floor","ниже")} (сейчас ${p}-й)`});
+  const out=[...first,...(up?[up]:[]),...hint,...(dn?[dn]:[])];
+  return out.length?out:[{dir:"dn",pct:POLICY_V1.ladder.emergency,text:"аварийный режим: нарушение целостности рынка"}];
+}
+// Уровни цены, на которых включаются полы и гейт оценки; без valuation_levels — те же пороги в перцентилях.
+function levelsText(S){
+  const m=met(S,"mvrv_cycle"),L=lvl(S),out=[];
+  if(fin(m.value_num))out.push(`MVRV ${Math.round(m.value_num)}-й пц${m.observed_at?` на ${dmU(m.observed_at)}`:""}`);
+  for(const [k,label,side,pctTxt] of [["capitulation_floor",`пол ${pc(OV.capitulation_floor_pct)}`,"ниже",`≤ ${OV.capitulation_max_mvrv_percentile}-го пц`],["recovery_anchor","якорь восстановления","ниже",`< ${recPct(S)}-го пц`],["valuation_gate","гейт оценки","выше",`≥ ${gatePct(S)}-го пц`]])
+    out.push(`${label} — ${fin(L[k]?.price_usd)?`${side} ${kusd(L[k].price_usd)}`:pctTxt}`);
+  return out.map(x=>x.replaceAll(" ",NB)).join(" · "); // перенос строки — только между пунктами
+}
+// Окно честного нуля тайминга: «с начала», а когда оно закрылось (старт ушёл из дневных строк) — 365 дней.
+const nullWindow=S=>{const t=S.monitoring?.timing_null||{};return[t.since_start,t.d365].find(w=>w&&fin(w.policy_net_return_pct)&&fin(w.null_net_return_pct))||null};
+const windowLabel=(S,n)=>n===S.monitoring?.timing_null?.since_start||!fin(n.days)?"":`за ${num(n.days)}${NB}дн.`;
+// РЕЗУЛЬТАТ на первом экране: политика, постоянная средняя доля (честный ноль тайминга) и BTC.
+function resultText(S){
+  const mon=S.monitoring||{},n=nullWindow(S),P=mon.performance||{};
+  const it=n?[["политика",n.policy_net_return_pct],["постоянная средняя доля",n.null_net_return_pct],["BTC",n.hodl_net_return_pct]]:fin(P.policy_v1?.net_return_pct)?[["политика",P.policy_v1.net_return_pct],["50/50",P.fixed_50?.net_return_pct],["BTC",P.buy_and_hold?.net_return_pct]]:null,from=n?.from||mon.started_at,rolling=n?windowLabel(S,n):"";
+  return it?`${rolling?rolling+": ":from?`с ${dm(from)}: `:""}${it.filter(x=>fin(x[1])).map(([l,v])=>`${l} ${sgn(v,1)}${NB}%`).join(" · ")}`:null;
+}
+
+// ТАКТИКА: то, что входит в тактический гейт, — плечо, быстрый спрос, качество цены. Прежняя шкала
+// усредняла их с макро и циклом, которых в гейте нет. Пороги — из замороженной секции сборщика
+// (в контрактах их нет): при policy v3 сверить.
+const TG={fragile:-35,calm:-10,led:15,market:-20};
+function tactRows(S){
+  const L=S.blocks?.leverage?.tactical?.score,K=S.blocks?.market?.tactical?.score,q=["etf_regime","stablecoin_regime","exchange_supply","us_spot_premium"].map(id=>met(S,id).score).filter(x=>x!=null&&fin(x)),Q=q.length?q.reduce((a,x)=>a+x,0)/q.length*50:null;
+  return[{label:"Плечо",v:fin(L)?L:null,marks:[TG.fragile,TG.calm],zone:["warn",-100,TG.fragile],cls:fin(L)&&L<=TG.fragile?"adverse":"",note:`хрупко при ≤ ${num(TG.fragile)}`},
+    {label:"Быстрый спрос",v:Q,marks:[0,TG.led],zone:["good",TG.led,100],cls:Q!=null&&Q>=TG.led?"supportive":"",note:`«спот ведёт» при ≥ ${sgn(TG.led)}`},
+    {label:"Качество цены",v:fin(K)?K:null,marks:[TG.market],zone:["warn",-100,TG.market],cls:fin(K)&&K<TG.market?"adverse":"",note:`норма при ≥ ${num(TG.market)}`}];
+}
+
+// КОНТУР ДАННЫХ: предупреждения о данных и запоздавшие голосующие входы; нехватку обязательных называет пауза.
+const dataMissing=S=>{const m=S.scores?.critical_missing||{};return[...arr(m.strategic),...arr(m.tactical)].map(g=>String(g).split(" | ").map(id=>met(S,id.trim()).name||id.trim()).join(" или ")).join("; ")};
+function dataNotes(S){
+  const out=arr(S.data_warnings).filter(x=>x&&x.text).map(x=>x.text),late=objs(S.metrics).filter(m=>m.vote&&m.stale).map(m=>m.name);
+  if(late.length)out.push(`Цель посчитана на запоздавших данных: ${late.join(", ")}`);
+  return out;
+}
+// Источник, потерявший резерв (живых ног меньше двух), — жёлтый, даже если данные пришли.
+const SRC_STATES=["ok","partial","stale","fail","mock"];
+const srcState=s=>{const k=SRC_STATES.includes(s?.state)?s.state:"fail",legs=arr(s?.legs);return k==="ok"&&legs.length&&legs.filter(l=>l?.state==="ok").length<2?"partial":k};
+const warnMap=S=>{const o={};for(const x of arr(S.data_warnings))for(const id of arr(x?.affects))if(x.text)(o[id]??=[]).push(x.text);return o};
+
+// УДЕРЖАНИЕ: опубликованный режим отстаёт от насчитанного. Причина рождения кандидата — из regime_birth.
+function birthText(b){
+  if(!b)return"";const out=[];
+  const all=Object.entries(b.blocks||{}).filter(([,x])=>x&&fin(x.to)),crossed=all.filter(([,x])=>x.band_from&&x.band_to&&x.band_from!==x.band_to);
+  const fam=arr(b.families).filter(f=>f&&fin(f.to)&&(!crossed.length||crossed.some(([k])=>k===f.block))).slice(0,3).map(f=>`«${f.name||f.id}» ${fin(f.from)?sc(f.from)+" → ":""}${sc(f.to)}`);
+  const blk=(crossed.length?crossed:all).map(([k,x])=>`${BLK[k]||k} ${fin(x.from)?num(x.from,1)+" → ":""}${num(x.to,1)}`);
+  if(blk.length)out.push(blk.join(", ")+(fam.length?` (${fam.join("; ")})`:""));else if(fam.length)out.push(fam.join("; "));
+  for(const d of arr(b.detectors))if(d&&d.id)out.push(`детектор «${DETN[d.id]||d.id}»: ${DSTATE[d.from]||d.from} → ${DSTATE[d.to]||d.to}`);
+  if(b.note==="coverage")out.push("изменилось покрытие данных");
+  return out.join("; ");
+}
+function holdOf(S){
+  const out=[],O=POLICY_V1.strategic_order;
+  const one=(title,names,meta,state,birth,ordered)=>{const c=meta?.candidate;if(!c||c===state||!Object.hasOwn(names,c)||!Object.hasOwn(names,state))return;
+    const b=birth&&birth.candidate===c?birth:null,since=b?.t||meta.since,why=birthText(b),soon=!meta.hold_until&&ordered&&O.indexOf(c)<O.indexOf(state);
+    out.push(`${title}${soon?": по свежим данным уже":" удерживается: по свежим данным"} «${names[c]}»${since?` — кандидат с ${dmt(since)}`:""}${why?`, причина: ${why}`:""}${meta.hold_until?` · не раньше ${dmt(meta.hold_until)}`:soon?" · вступит следующим снимком":""}`)};
+  one("Среднесрок",SHORT,S.regime_meta?.strategic,S.regime?.strategic,S.regime_birth?.strategic,true);
+  one("Тактика",TSHORT,S.regime_meta?.tactical,S.regime?.tactical,S.regime_birth?.tactical,false);
+  return out;
+}
+
+// ПАУЗА. Устаревание бывает двух родов, и вкладка их различает: «сервер не публикует» — свежий запрос
+// вернул тот же старый снимок; «вкладка не обновлялась» — запросы не проходили.
+const POLL_MS=5*60*1000,ISSUE={policy_hash_mismatch:"хэш политики не совпал",missing_target_for_actionable_regime:"нет цели при действующем режиме",decision_paused:"решение на паузе"};
+function pauseOf(S,gate,net,now,limitH){
+  const miss=dataMissing(S),issues=arr(S.monitoring?.health?.operational_issues).map(x=>ISSUE[x]||x).join(", ");
+  switch(gate.code){
+    case"snapshot_stale":return net?.okAt&&now-net.okAt>2*POLL_MS?{stale:true,tab:true,lead:`Вкладка не обновлялась с ${dmt(net.okAt)}`,sub:`${net.err?`Нет связи с сервером (${net.err}).`:"Перечитываю снимок."} На экране снимок от ${dmt(S.generated_at)}; цель скрыта.`}
+      :{stale:true,lead:`Сервер не публикует снимки: последний от ${dmt(S.generated_at)} (${ago(S.generated_at,now)} назад)`,sub:`Цель скрыта: снимок старше ${limitH}${NB}ч.`};
+    case"time_invalid":return{stale:true,lead:"Время снимка неизвестно",sub:"Цель скрыта."};
+    case"snapshot_in_future":return{stale:true,lead:"Время снимка — в будущем: проверьте часы устройства",sub:"Цель скрыта."};
+    case"decision_missing":return{lead:"В снимке нет решения сервера",sub:"Цель появится со следующим снимком."};
+    case"operational_status_not_healthy":return{lead:`Монитор остановил действие${issues?": "+issues:""}`,sub:"Цель скрыта до исправного снимка."};
+    // Авария при неполных данных: гейт цель скрывает, но совет «ничего не предпринимать» под плашкой
+    // о нарушении целостности рынка недопустим — экран называет оба факта.
+    default:return{lead:S.override?"Аварийный режим: целостность рынка нарушена":"Цель скрыта: не хватает данных",sub:miss?`Нет данных: ${miss}.`:"Решение сервера приостановлено."};
+  }
+}
+const toneOf=t=>!fin(t)?"neutral":t>=80?"good":t>=40?"neutral":t>=20?"warn":"bad";
+
+// КАРТОЧКИ. При балле ±0,5 слово движка («нейтрально», «смешанно») спорило с бейджем, хотя полшага
+// входят в блок полным весом: бейдж называет его слабым, а на месте слова стоят числа из delta.
+const badge=s=>{if(s==null)return"нет данных";const a=Math.abs(s);return`${sc(s)} ${a<.25?"нейтрально":s>0?(a>=1.5?"сильная поддержка":a>=1?"поддержка":"слабая поддержка"):a>=1.5?"разлом":a>=1?"напряжение":"слабое напряжение"}`};
+// Слово движка подменяется только там, где значение карточки и есть это слово (value_num равен баллу):
+  // числовое значение («42-й перцентиль») остаётся. Одно правило для карточки, строки семьи и таблицы.
+const isWeak=m=>!!(m&&m.vote&&Math.abs(m.score)===.5&&m.value_num===m.score);
+const wordOf=m=>isWeak(m)?(m.score>0?"слабая поддержка":"слабое напряжение"):m?.value;
+const DELTA_FIX={etf_5d:" суммы в BTC",etf_20d:" суммы в BTC"};
+const NOTE_FIX={mvrv_cycle:t=>t.replace("(реконструкция 2019–2026: +27.7% в среднем за 90д)","(реконструкция 2019–2026: три дна, 129 дней; в среднем +27,7 % за 90 дней, рост после 65 % дней)")};
+function cardFace(m){const weak=isWeak(m);return{value:weak?m.delta||wordOf(m):m.value,delta:weak?"":(m.delta||"")+(m.delta&&DELTA_FIX[m.id]||""),text:weak||String(m.value).length>24,note:NOTE_FIX[m.id]?NOTE_FIX[m.id](String(m.note||"")):m.note}}
+
+function executionPolicySentence(rule){const E=EXECUTION_POLICY_V1,n=trancheN(rule);const upgrades={tranches_from_next_session:n?`вверх — ${({2:"двумя",3:"тремя",4:"четырьмя"})[n]||n} траншами, по одному в сутки со следующего дня`:"вверх — траншами со следующего дня"}[E.upgrades]||"вверх — по контракту";const downgrades={immediate:"вниз — сразу"}[E.downgrades]||"вниз — по контракту";const cash={income_instrument:"свободный кэш — в доходный инструмент"}[E.unallocated_cash]||"свободный кэш — по контракту";const leverage={prohibited:"без плеча"}[E.leverage]||"плечо — по контракту";return`Исполнение: ${upgrades}, ${downgrades} · ${E.rebalance_on_step_change?"действие — на смене ступени":"по контрактному графику"}, вне смены — при отклонении от цели больше ${E.off_cycle_rebalance_drift_pp} п.п. · ${cash} · ${leverage}`}
+
+// ТАБЛИЦА МОНИТОРА: группы по роли стратегии, честный ноль тайминга отдельной строкой, сравнение на общем окне.
+const KIND={live:"Живая политика",benchmark:"Ориентиры",candidate:"Кандидаты",attribution:"Атрибуция",execution:"Исполнение"},KIND0={policy_v1:"live",policy_v2_shadow:"candidate"};
+// Подписи линий приходят из strategy_meta; эти — для снимка прежней формы, где его ещё нет.
+const STRAT={policy_v1:"политика v1",previous_policy_shadow:"прежняя политика v0",policy_v2_shadow:"кандидат v2",buy_and_hold:"BTC купить и держать",fixed_50:"постоянные 50 %",cash:"кэш",trend_vol_25:"тренд и волатильность 25 %"};
+const OPS={healthy:"исправен",paused:"пауза"},PERF={collecting:"идёт сбор",operational_only:"только операционный контроль",preliminary:"предварительная",investigate:"расследование",retire_candidate:"кандидат на остановку",first_meaningful_review:"первый полный рубеж"};
+function monitorModel(S){
+  const mon=S.monitoring||{},P=mon.performance||{},meta=mon.strategy_meta||{},cmp=mon.comparisons||{},pol=P.policy_v1,first=objs(mon.daily)[0]?.nav||{},th=mon.v2_theta||{};
+  const startOf=id=>meta[id]?.started_at||(id in first?mon.started_at:objs(mon.daily).find(d=>fin(d.nav?.[id]))?.t)||null;
+  // static_theta до фиксации — сглаженная копия политики, а не «нуль тайминга»: подписана тем, что она есть.
+  const label=id=>id==="static_theta"?(fin(th.pct)?`постоянная доля Θ, зафиксирована на ${th.fixed_at_day}-й день`:`сглаженная доля политики, до фиксации на ${mon.next_review_day||90}-й день`):(meta[id]?.label||STRAT[id]||id)+(id==="policy_v1"?" · мгновенный переход к цели":"");
+  // Годовой Sharpe по d суткам известен с ошибкой ≈ √(365/d). В шапке — ошибка окна политики; у линии, чьё окно
+  // заметно короче (ошибка больше в полтора раза и выше), она печатается рядом с числом. Сравнение округлённых
+  // чисел не годится: 87 точек политики и 85 закрытых суток ориентира дают «2,0» и «2,1» — и «±» в каждой строке.
+  // Считается с первых закрытых суток: у линии, рождённой в день выкладки, их две, и число там — чистый шум.
+  const seRaw=d=>fin(d)&&d>=1?Math.sqrt(365/d):null,se0=seRaw(mon.observation_days),se=se0?num(se0,1):null;
+  const seOwn=d=>{const x=seRaw(d);return x&&(!se0||x>=1.5*se0)?`${NB}±${NB}${num(x,1)}`:""};
+  const rows=Object.entries(P).filter(([,p])=>p).map(([id,p])=>{const st=startOf(id),late=!!(st&&mon.started_at&&Date.parse(st)-Date.parse(mon.started_at)>864e5),c=cmp[id];
+    return{id,kind:meta[id]?.kind||KIND0[id]||"benchmark",label:label(id)+(late?` · с ${dm(st)}`:""),p,sharpe:fin(p.sharpe_excess)?num(p.sharpe_excess,1)+seOwn(c?.closed_days):"—",gap:c?(fin(c.net_return_gap_pp)&&!(c.days<1)?{pp:c.net_return_gap_pp,days:c.days}:null):id!=="policy_v1"&&pol&&st&&!late&&fin(p.net_return_pct)&&fin(pol.net_return_pct)?{pp:p.net_return_pct-pol.net_return_pct,days:null}:null}});
+  const n=nullWindow(S),zero=n?{id:"timing_null",kind:"benchmark",label:"постоянная средняя доля политики"+(windowLabel(S,n)&&" · "+windowLabel(S,n)),p:{current_target_pct:n.share_pct,net_return_pct:n.null_net_return_pct},gap:fin(n.policy_net_return_pct)?{pp:n.null_net_return_pct-n.policy_net_return_pct,days:null}:null}:null;
+  const groups=[...Object.keys(KIND),"other"].map(k=>({kind:k,title:KIND[k]||"Прочее",rows:[...(k==="benchmark"&&zero?[zero]:[]),...rows.filter(r=>k==="other"?!KIND[r.kind]:r.kind===k)]})).filter(g=>g.rows.length);
+  // Числа против заранее объявленных порогов расследования — вместо сырого кода статуса.
+  const R=MODEL_POLICY_V1.forward_monitoring,simple=R.simple_benchmarks.map(k=>P[k]?.sharpe_excess).filter(fin),pn=mon.health?.performance_numbers,ti=pn?.thresholds?.investigation;
+  const inv=pn&&ti&&fin(pn.net_return_gap_vs_fixed_50_pct_points)&&fin(pn.sharpe_gap_vs_best_simple_benchmark)?{ret:pn.net_return_gap_vs_fixed_50_pct_points,retLimit:ti.net_return_gap_vs_fixed_50_pct_points,sharpe:pn.sharpe_gap_vs_best_simple_benchmark,sharpeLimit:ti.sharpe_gap_vs_best_simple_benchmark,fromDay:ti.min_days}:pol&&P.fixed_50&&simple.length&&fin(pol.sharpe_excess)?{ret:P.fixed_50.net_return_pct-pol.net_return_pct,retLimit:R.investigation_rules.net_return_gap_vs_fixed_50_pct_points,sharpe:Math.max(...simple)-pol.sharpe_excess,sharpeLimit:R.investigation_rules.sharpe_gap_vs_best_simple_benchmark,fromDay:R.review_days[1]}:null;
+  const rev=arr(mon.revision_alerts),rt=rev.map(x=>Date.parse(x?.detected_at)).filter(fin);
+  return{days:mon.days_elapsed,from:mon.started_at,changes:mon.target_changes,groups,inv,se,
+    decomp:n&&fin(n.level_pp)&&fin(n.timing_pp)?`Отставание от BTC ${num(n.hodl_net_return_pct-n.policy_net_return_pct,1)} п.п.: уровень доли ${sgn(n.level_pp,1)} · тайминг ${sgn(n.timing_pp,1)}${fin(n.costs_pp)?` · издержки ${sgn(n.costs_pp,1)}`:""}${fin(n.capture_ratio)?` · захват роста BTC ${pc(n.capture_ratio*100)}`:""}`:null,
+    status:`контроль — ${OPS[mon.health?.operational_status]||"неизвестно"}, оценка — ${PERF[mon.health?.performance_status]||"идёт сбор"}`,
+    // Буфер пересмотров обрезан сотней записей: печатается его охват, а не длина как число событий.
+    revisions:rev.length?`последние ${rev.length} ${plural(rev.length,"событие","события","событий")}${rt.length>1?` за ${span(Math.max(...rt)-Math.min(...rt))}`:""}, влияют на качество — ${rev.filter(x=>x?.quality_impact!=="audit").length}`:null,
+    corrections:arr(mon.corrections).filter(x=>x&&x.reason).slice(-3).map(x=>`${x.reason}: ${num(Number(x.from),3)} → ${num(Number(x.to),3)}`)};
+}
+
+// СНИМОК ПЕРЕЧИТЫВАЕТСЯ условным запросом по ETag: пока он прежний, сервер отвечает 304 без тела.
+async function pullSnapshot(st,fetchImpl,now){
+  try{
+    const r=await fetchImpl(`./snapshot.json?ts=${now()}`,{cache:"no-store",headers:st.etag?{"If-None-Match":st.etag}:{}});
+    if(r.status===304&&st.snap)return{...st,okAt:now(),err:null,changed:false};
+    if(!r.ok)throw new Error(`HTTP ${r.status}`);
+    const snap=await r.json();
+    return{snap,etag:r.headers?.get?.("etag")||null,okAt:now(),err:null,changed:snap?.generated_at!==st.snap?.generated_at};
+  }catch(e){return{...st,err:String(e?.message||e),changed:false}}
+}
+const VIEW={num,sgn,dm,wordOf,changeLog,leadOf,overlayLines,blockRows,whyOf,tactOf,triggersOf,levelsText,resultText,tactRows,dataNotes,warnMap,holdOf,pauseOf,toneOf,badge,cardFace,executionPolicySentence,monitorModel,pullSnapshot,srcState,POLL_MS,ACT_DOWN_H};
+/* VIEW:END */
 const $=id=>document.getElementById(id);
 /* Канвасы рисуются вручную, поэтому берут цвета из тех же токенов, что и CSS —
    иначе лента и спарклайны остались бы светлыми в тёмной теме. */
-const cssVar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";let SNAP=null;
+const cssVar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
+let SNAP=null,NET={snap:null,etag:null,okAt:0,err:null},LOG_N=10,BUSY=false,TRIED=0;
 const esc=s=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 const cleanUrls=o=>[...new Set([...(Array.isArray(o?.source_urls)?o.source_urls:[]),...(Array.isArray(o?.urls)?o.urls:[]),o?.source_url,o?.url].filter(u=>typeof u==="string"&&/^https:\/\//.test(u)))];
 const urlLabel=u=>{try{return new URL(u).hostname.replace(/^www\./,"")}catch{return"источник"}};
 const sourceLinks=o=>cleanUrls(o).map(u=>`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(urlLabel(u))}</a>`).join(" · ")||"<span>нет ссылки</span>";
-const fmtScore=v=>Number.isFinite(v)?`${v>=0?"+":""}${v.toFixed(0)}`:"—";
 const cls=s=>s==null?"na":s>=1.5?"s2":s>=0.5?"s1":s<=-1.5?"s-2":s<=-0.5?"s-1":"s0";
-const badge=s=>{if(s==null)return"нет данных";const lbl=s>=1.5?"сильная поддержка":s>=0.5?"поддержка":s>-0.5?"нейтрально":s>-1.5?"напряжение":"разлом";return`${s>0?"+":s<0?"−":""}${Math.abs(s)} ${lbl}`};
-const roleLabel={leading:"опережающий",confirming:"подтверждающий",context:"контекст",component:"компонент"};const horizonLabel={fast:"часы–дни",short:"дни–недели",medium:"недели–месяцы"};const methodLabel={dynamic:"динамический порог",mechanical:"механический порог",derived:"вычисляемый",mixed:"смешанный"};
-function executionPolicySentence(){const E=EXECUTION_POLICY_V1;const upgrades={tranches_from_next_session:"апгрейды исполнять траншами со следующей сессии"}[E.upgrades]||"апгрейды — по контракту";const downgrades={immediate:"даунгрейды — сразу"}[E.downgrades]||"даунгрейды — по контракту";const cash={income_instrument:"свободный кэш — в доходный инструмент"}[E.unallocated_cash]||"свободный кэш — по контракту";const leverage={prohibited:"без плеча"}[E.leverage]||"плечо — по контракту";return`действие — ${E.rebalance_on_step_change?"на смене ступени":"по контрактному графику"}; внепланово — если факт отклонился от цели больше чем на ${E.off_cycle_rebalance_drift_pp} п.п. · ${upgrades}, ${downgrades} · ${cash} · ${leverage}`}
-function ageText(t){if(!t)return"—";const min=Math.max(0,Math.round((Date.now()-new Date(t))/60000));if(min<60)return`${min} мин назад`;if(min<1440)return`${Math.round(min/60)} ч назад`;return`${Math.round(min/1440)} дн назад`}
-async function load(){try{const r=await fetch(`./snapshot.json?ts=${Date.now()}`,{cache:"no-store"});if(!r.ok)throw new Error(`HTTP ${r.status}`);SNAP=await r.json();render()}catch(e){$("verdict").textContent="СНИМОК НЕДОСТУПЕН";$("updated").textContent=String(e)}}
-function render(){$("uiVersion").textContent=`v${SNAP.version||"?"}`;document.title=`${SNAP.verdict} — Монитор Bitcoin`;$("verdict").textContent=SNAP.verdict;$("updated").textContent=`снимок ${ageText(SNAP.generated_at)}`;$("demoBanner").classList.toggle("show",!!SNAP.mock);$("override").classList.toggle("show",!!SNAP.override);$("override").textContent=SNAP.override||"";
-  const s=SNAP.scores.strategic,t=SNAP.scores.tactical;$("strategicScore").textContent=fmtScore(s);$("tacticalScore").textContent=fmtScore(t);for(const [needle,value] of [["strategicNeedle",s],["tacticalNeedle",t]]){const el=$(needle);el.style.opacity=Number.isFinite(value)?"1":"0";if(Number.isFinite(value))el.style.left=`${Math.max(0,Math.min(100,(value+60)/1.2))}%`;}
-  $("price").textContent=Number.isFinite(SNAP.price)?`$${Math.round(SNAP.price).toLocaleString("en-US")}`:"—";$("coverS").textContent=`${Math.round((SNAP.scores.coverage_strategic||0)*100)}%`;$("coverT").textContent=`${Math.round((SNAP.scores.coverage_tactical||0)*100)}%`;$("detCount").textContent=SNAP.detectors.filter(d=>["fired","watch","good"].includes(d.state)).length;$("onchainCoverage").textContent=`${Math.round((SNAP.scores.onchain_coverage||0)*100)}%`;$("shortBehavior").textContent=SNAP.behavior.short;$("mediumBehavior").textContent=SNAP.behavior.medium;$("phase").innerHTML=`<b>${esc(SNAP.phase)}</b><br>${esc(SNAP.thesis)}`;
-  renderStrategy();renderFactors();renderSources();renderBlocks();renderDetectors();renderMethod();renderPolicyStatus();renderContrib();renderMonitoring();drawTape();}
-function renderStrategy(){
+const since=(t,now)=>t&&fin(Date.parse(t))?ago(t,now)+" назад":"—";
+// Отказ одной подписи или одного блока не должен ронять экран: число цели от сервера обязано остаться.
+const safe=(f,d)=>{try{return f()}catch(e){console.error(e);return d}};
+// Вкладка обязана ПЕРЕЧИТЫВАТЬ снимок. Раньше интервал перерисовывал загруженный однажды: три часа
+// старая цель подавалась как текущая, а потом экран сообщал об отказе контура данных, которого не было.
+async function refresh(){
+  if(SNAP)render(false); // сперва часы: вкладка могла проспать, и гейт свежести обязан сработать до ответа сети
+  if(BUSY||Date.now()-TRIED<2e4)return;BUSY=true;TRIED=Date.now(); // частые возвраты на вкладку не плодят запросы
+  try{NET=await pullSnapshot(NET,(u,o)=>fetch(u,o),Date.now)}finally{BUSY=false}
+  if(NET.snap){SNAP=NET.snap;render(NET.changed)}else{$("verdict").textContent="СНИМОК НЕДОСТУПЕН";$("updated").textContent=NET.err||""}
+}
+function render(full=true){
+  const now=Date.now(),S=SNAP;
+  $("uiVersion").textContent=`v${SNAP.version||"?"}`;$("updated").textContent=`снимок ${since(S.generated_at,now)} · время ${tzLabel()}${NET.err?" · нет связи":""}`;
+  $("demoBanner").classList.toggle("show",!!S.mock);$("override").classList.toggle("show",!!S.override);$("override").textContent=S.override||"";
+  const pause=renderStrategy(now),stale=!!pause?.stale;
+  // При паузе по возрасту заголовок гаснет вместе с целью: вердикт 30-м кеглем читался как действующий.
+  $("hero").classList.toggle("aged",stale);document.body.classList.toggle("aged",stale);
+  $("verdict").textContent=stale?"СНИМОК УСТАРЕЛ":S.verdict;document.title=`${stale?"Снимок устарел":S.verdict} — Монитор Bitcoin`;
+  $("held").innerHTML=(stale?[`Последний вердикт от ${dmt(S.generated_at)}, не действует: ${S.verdict}`]:safe(()=>holdOf(S),[])).map(x=>`<div>${esc(x)}</div>`).join("");
+  $("sbText").textContent=pause?`скрыта · ${pause.lead}`:`${pc(S.decision?.target_pct)} лимита B · ${S.verdict}`;
+  if(!full)return;
+  for(const f of [renderWhy,renderTact,()=>renderStats(now),()=>renderLog(now),()=>renderSources(now),renderBlocks,renderDetectors,renderMethod,renderContrib,renderMonitoring])safe(f);
+  const tact=tactOf(S);$("foot").textContent=`Снимок обновляется${tact?` каждые ≈${NB}${tact}${NB}мин`:""}; дневные и недельные ряды меняются реже.`;
+}
+const TW={demand_break:"Тактика: слом спроса — докупки на паузе, откаты не выкупать.",deleveraging:"Тактика: делеверидж — повышения не исполнять, пока OI не сброшен и funding не стабилен.",fragile:"Тактика: хрупкая структура — каскад возможен без смены среднесрока; план не опережать.",overheated_supported:"Тактика: плечо перегрето — цену не догонять, повышения после очистки funding и OI.",short_squeeze:"Тактика: условия сквиза — отскок возможен, сверх цели не наращивать.",spot_led:"Тактика: спот ведёт — повышения по плану, частями на откатах.",balanced:"Тактика нейтральна — обычная ребалансировка.",insufficient:"Тактика не рассчитана: не хватает данных.",emergency:"Котировкам и сигналам не доверять до восстановления целостности рынка."};
+function renderStrategy(now){
 // Браузер только показывает уже принятое сервером решение. Он не пересчитывает аллокацию.
-const ORDER=POLICY_V1.strategic_order,A=POLICY_V1.allocation_overlays,D=SNAP.decision||{};
-const SHORT={emergency:"аварийный",defensive:"защитный",deteriorating:"ухудшается",transition:"переходный",unconfirmed_positive:"спрос не подтв.",constructive:"конструктивный"};
-const META={constructive:{tone:"good",step:5,lead:"Держать полную позицию. Добирать ступенчато."},unconfirmed_positive:{tone:"good",step:4,lead:"Держать почти полную. Без агрессивных докупок."},transition:{tone:"neutral",step:3,lead:"Держать умеренную долю. Ждать согласования."},deteriorating:{tone:"warn",step:2,lead:"Сокращать риск. Докупки — стоп."},defensive:{tone:"bad",step:1,lead:"Держать ядро. Без плеча."},insufficient:{tone:"neutral",step:0,lead:"Держать текущую. Выводов не делать."},emergency:{tone:"bad",step:0,lead:"Убрать риск. Ждать нормализации."}};
-const S=SNAP.regime?.strategic,T=SNAP.regime?.tactical,m=META[S]||META.insufficient;
+const D=SNAP.decision||{},el=$("strategy");
 const staleLimit=MODEL_POLICY_V1.forward_monitoring.operational_pause.snapshot_stale_hours;
 // Любой операционный отказ = пауза. Клиент не имеет права показывать последнюю цель поверх paused-решения.
-const gate=evaluateActionGateV1({generatedAt:SNAP.generated_at,now:Date.now(),staleLimitHours:staleLimit,decision:SNAP.decision,operationalStatus:SNAP.monitoring?.health?.operational_status});
-const pauseReasons={time_invalid:"время снимка неизвестно",snapshot_in_future:"время снимка находится в будущем",snapshot_stale:`снимок устарел (${Math.round(gate.age_hours)} ч; лимит ${staleLimit} ч)`,decision_missing:"серверное решение отсутствует",decision_not_actionable:"серверное решение приостановлено",decision_quality_not_actionable:"критическое покрытие данных не пройдено",operational_status_not_healthy:"операционный монитор приостановил действие"};
-const pauseReason=gate.actionable?null:pauseReasons[gate.code]||"операционная проверка не пройдена";
-if(pauseReason){$("strategy").className="strategy";$("strategy").innerHTML=`<div class="dial"><div class="eyebrow">Модельная аллокация</div><div class="num"><div class="pct neutral">—</div></div><div class="sub">${esc(pauseReason)} — целям не следовать</div></div><div class="act"><div class="lead">Новых действий не предпринимать.</div><div class="warnline">Контур данных или решений не прошёл операционную проверку.</div></div><div class="trig"><div class="t">цель вернётся после свежего валидного серверного решения</div></div><div class="foot">policy v1 · показана пауза, а не последняя известная цель · модельная иллюстрация, не персональная рекомендация</div>`;return;}
-const mvrvPct=(SNAP.metrics.find(x=>x.id==="mvrv_cycle")||{}).value_num;
-const recovGood=(SNAP.detectors.find(d=>d.id==="recovery")||{}).state==="good";
-const shockFired=(SNAP.detectors.find(d=>d.id==="macro_shock")||{}).state==="fired";
-const targetFor=reg=>D.regime_targets_pct?.[reg];
-const eff=reg=>targetFor(reg);
-const base=Number.isFinite(D.base_target_pct)?D.base_target_pct:null;
-const target=Number.isFinite(D.target_pct)?D.target_pct:null;
-const ovl=[];
-if(target!=null&&S!=="emergency"){
-  if(D.binding_overlays?.includes("recovery_floor"))ovl.push(["⤒","var(--good)",`Детектор «Восстановление» подтверждён: капитуляция позади, потоки стабилизируются — цель поднята до ${A.recovery_floor_pct}%.`]);
-  if(recovGood&&shockFired)ovl.push(["·","var(--soft)","Детектор «Восстановление» активен, но макрошок его блокирует — цель не поднята (как и в самом движке)."]);
-  if(D.binding_overlays?.includes("capitulation_floor"))ovl.push(["⤒","var(--good)",`Пол капитуляции: MVRV в нижнем дециле своей 4-летней истории — держать не меньше ${A.capitulation_floor_pct}% (не действует только в аварийном режиме).`]);
-  if(D.binding_overlays?.includes("euphoria_safety_cap"))ovl.push(["⤓","var(--warn)",`Потолок эйфории: MVRV ≥${A.euphoria_min_mvrv_percentile}-го перцентиля — не выше ${A.euphoria_cap_pct}%. Это заранее заданное защитное правило, а не подтверждённый историческими срабатываниями источник доходности.`]);
+const gate=evaluateActionGateV1({generatedAt:SNAP.generated_at,now,staleLimitHours:staleLimit,decision:SNAP.decision,operationalStatus:SNAP.monitoring?.health?.operational_status});
+// Единица главного числа стоит в подписи во всех состояниях, включая паузу и оверлеи.
+const unit=`<div class="eyebrow">Цель · доля лимита B</div>`;
+if(!gate.actionable){const p=safe(()=>pauseOf(SNAP,gate,NET,now,staleLimit))||{lead:"Цель скрыта",sub:""};el.className="strategy";
+  el.innerHTML=`<div class="dial">${unit}<div class="pct">—</div><div class="sub">цель скрыта</div></div><div class="act"><div class="eyebrow">Пауза</div><div class="lead">${esc(p.lead)}</div><div class="warnline">${esc(p.sub)}</div></div><div class="trig">${p.tab?'<div><button class="btn" data-act="reload">Перечитать</button></div>':""}</div>`;return p}
+const target=Number.isFinite(D.target_pct)?D.target_pct:null,base=fin(D.base_target_pct)?D.base_target_pct:null,tone=toneOf(target),lead=safe(()=>leadOf(SNAP,now))||{text:target==null?"Цель не рассчитана":`Цель ${pc(target)}`},res=safe(()=>resultText(SNAP)),ov=safe(()=>overlayLines(SNAP),[]);
+// Лестница числами: видно место цели и обрыв 45 → 95; ступень самого режима подчёркнута, если цель сдвинул оверлей.
+const ladder=[...new Set([...Object.values(POLICY_V1.ladder),...(target==null?[]:[target])])].sort((a,b)=>a-b).map(r=>r===target?`<b>${r}</b>`:r===base?`<u>${r}</u>`:`<span>${r}</span>`).join("");
+const moved=target!=null&&base!=null&&target!==base?`<div class="sub">режим даёт ${pc(base)} · ${OVL[arr(D.binding_overlays).filter(o=>OVL[o]).at(-1)]||"оверлей"} ${target>base?"поднял":"опустил"} до ${pc(target)}</div>`:"";
+const trig=safe(()=>triggersOf(SNAP,now),[]).map(t=>`<div class="tg"><span class="${t.dir}">${t.dir==="up"?"↑":t.dir==="dn"?"↓":"·"}</span><b>${fin(t.pct)?pc(t.pct):""}</b><span>${t.more?"или ниже — ":""}${esc(t.text)}</span></div>`).join("");
+el.className="strategy "+tone;
+el.innerHTML=`<div class="dial">${unit}<div class="pct ${tone}">${target==null?"—":target+"%"}</div><div class="ladder">${ladder}</div>${moved}<div class="sub">B — ваш потолок позиции в BTC</div></div><div class="act"><div class="eyebrow">Что делать сейчас</div><div class="lead">${esc(lead.text)}</div>${[lead.plan,target!==base&&ov.length?null:lead.cause,...ov,TW[SNAP.regime?.tactical]||"Тактика: действовать по среднесрочному режиму."].filter(Boolean).map(x=>`<div class="warnline">${esc(x)}</div>`).join("")}</div><div class="trig"><div class="eyebrow">Что изменит цель</div>${trig}<div class="ctx">${esc(safe(()=>levelsText(SNAP),""))}</div></div>${res?`<div class="foot"><b>Результат</b> ${esc(res)}</div>`:""}<div class="foot">${esc(executionPolicySentence(SNAP.monitoring?.assumptions?.tranched_execution))}</div>`;
+return null}
+// Общая шкала ±60 пунктов для всех дорожек; линии порогов и заливка зон приходят из тех же чисел,
+// что и правила, а не из CSS: прежние цветные зоны полосы не совпадали ни с одним порогом движка.
+const X=v=>Math.max(0,Math.min(100,(v+60)/1.2));
+const track=(v,cl,marks,bg)=>`<div class="trk" style="background:${bg}">${marks.map(m=>`<i style="left:${X(m)}%"></i>`).join("")}${v==null?"":`<u class="${cl}" style="left:${X(v)}%"></u>`}</div>`;
+function renderWhy(){
+  const w=whyOf(SNAP),lo=X(RB.adverse_max),hi=X(RB.supportive_min),bg=`linear-gradient(90deg,var(--bad-bg) 0 ${lo}%,var(--neutral-bg) ${lo}% ${hi}%,var(--good-bg) ${hi}% 100%)`;
+  let h=`${w.rule?`<p class="rule">Расчёт по полосам: ${esc(w.rule)}</p>`:""}<div class="ax"><span></span><div class="trk h"><i style="left:${lo}%">${sgn(RB.adverse_max)}</i><i style="left:${hi}%">${sgn(RB.supportive_min)}</i></div><span class="h">балл</span><span class="h">пункты</span>`;
+  for(const r of w.rows){
+    const live=r.families.filter(f=>f.score!==0),zero=r.families.length-live.length;
+    h+=`<span class="n">${r.label}</span>${track(r.score,r.band,[RB.adverse_max,RB.supportive_min],bg)}<span></span><b class="c">${sgn(r.score,1)}</b><span class="st">${r.score==null?"нет данных":`${BAND[r.band]} полоса${r.near?` · до ${BAND_OF[r.near.to]} ${hs(r.near.k)}`:""}`}${r.missing.length?` · нет данных: ${esc(r.missing.join(", "))}`:""}</span>`;
+    for(const f of live)h+=`<span class="f">${esc(f.name)} · <b>${esc(f.value||"")}</b>${f.stale?" · данные запаздывают":""}</span><span class="v ${f.score>0?"pos":"neg"}">${sc(f.score)}</span><span class="c">${sgn(f.contrib,1)}</span>`;
+    if(zero)h+=`<span class="f z">ещё ${zero} ${plural(zero,"семья","семьи","семей")} с баллом 0</span>`;
+  }
+  $("why").innerHTML=h+"</div>";
 }
-// lead согласован с оверлеем, который реально двигает цель
-let lead=m.lead;
-if(target!=null&&base!=null&&target>base)lead=D.binding_overlays?.includes("recovery_floor")?"Наращивать к цели траншами: восстановление подтверждено.":"Дно цикла: держать пол капитуляции, не продавать в панику.";
-const toneCol={good:"var(--good)",warn:"var(--warn)",bad:"var(--bad)",neutral:"var(--neutral)"}[m.tone];
-const pctTxt=target==null?"—":target+"%";
-const meter=[1,2,3,4,5].map(i=>`<i style="height:${5+(i-1)*4}px${i<=m.step?";background:"+toneCol:""}"></i>`).join("");
-const TW={demand_break:["⚠","var(--bad)","Докупки на паузе: тактика в режиме <b>«слом спроса»</b>. Откаты не выкупать."],deleveraging:["⚠","var(--bad)","Тактика в режиме <b>делевериджа</b>. Апгрейды ступени не исполнять, пока OI не сброшен и funding не стабилен."],fragile:["⚠","var(--warn)","Тактика: <b>хрупкая структура</b>, каскад возможен без смены среднесрока. Не опережать план."],overheated_supported:["⚠","var(--warn)","Тактика: <b>плечо перегрето</b>, обычно остывает откатом. Не догонять цену; апгрейды — после очистки funding/OI."],short_squeeze:["↺","var(--soft)","Возможен резкий отскок, но это не разворот режима. Не наращивать сверх цели."],spot_led:["✓","var(--good)","Спот ведёт движение — исполнять апгрейды по обычному плану, частями на откатах."],balanced:["·","var(--soft)","Структура нейтральна. Обычная ребалансировка, вход — по среднесрочному режиму."],insufficient:["·","var(--soft)","Краткосрочная структура не рассчитана: критических данных недостаточно."],emergency:["⚠","var(--bad)","Аварийный режим рынка: не полагаться на котировки и сигналы до восстановления целостности."]}[T]||["·","var(--soft)","Действовать по среднесрочному режиму."];
-const TW_SHORT={demand_break:"слом спроса",deleveraging:"делеверидж",fragile:"хрупкая структура",overheated_supported:"плечо перегрето",short_squeeze:"сквиз шортов",spot_led:"спот ведёт",balanced:"нейтральная структура",insufficient:"нет данных",emergency:"аварийный режим"};
-const tMeta=SNAP.regime_meta?.tactical||{};
-// Граница снятия — НИЖНЯЯ: `since` обнуляется встречным снимком, поэтому обратный отсчёт врал бы.
-const holdWhen=tMeta.hold_until?" · снятие не раньше "+new Date(tMeta.hold_until).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"";
-const holdNote=(tMeta.candidate&&tMeta.candidate!==T&&Object.hasOwn(TW_SHORT,tMeta.candidate))?` <span class="hold">Удерживается: по свежим данным уже «${TW_SHORT[tMeta.candidate]}»${holdWhen}</span>`:"";
-// Стратегическое удержание — то, что двигает ЦЕЛЕВУЮ АЛЛОКАЦИЮ, — обязано быть подписано так же,
-// как тактическое: иначе панель советует действие, противоположное тому, что скажет после снятия
-// удержания, и молчит об этом (аудит 2026-07-21: «Сокращать риск» при кандидате «переходный» 10/12).
-const sMeta=SNAP.regime_meta?.strategic||{};
-const sHoldWhen=sMeta.hold_until?" · снятие не раньше "+new Date(sMeta.hold_until).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"";
-const sHoldNote=(sMeta.candidate&&sMeta.candidate!==S&&Object.hasOwn(SHORT,sMeta.candidate))?`<div class="warnline"><span class="hold">Среднесрок удерживается гистерезисом: по свежим данным уже «${SHORT[sMeta.candidate]}»${sHoldWhen}</span></div>`:"";
-// Пол-оверлей включается детектором мгновенно, вердикт меняется медленнее — когда пол связывает
-// цель ВЫШЕ базы режима, это напряжение подписывается явно, вместе с теневой ступенью кандидата v2
-// (градуировка по дневным закрытиям; см. POLICY.md «Policy v2 candidate»).
-const v2c=SNAP.monitoring?.v2_candidate;
-const v2Rungs=Number.isFinite(v2c?.floor_rungs)?v2c.floor_rungs:3;
-const overlayNote=(D.binding_overlays?.includes("recovery_floor")&&Number.isFinite(D.target_pct)&&Number.isFinite(D.base_target_pct)&&D.target_pct>D.base_target_pct)?`<div class="warnline"><span class="hold">Пол recovery включается детектором мгновенно; вердикт движется медленнее (гистерезис)${v2c&&Number.isFinite(v2c.target_pct)?` · теневой кандидат v2 сейчас дал бы ${v2c.target_pct}% (закрытий подтверждения: ${v2c.recovery_closes??0}/${v2Rungs})`:""}</span></div>`:"";
-const i=ORDER.indexOf(S);let trig="";
-if(S==="emergency")trig+=`<div class="t">выход — в режим по данным: два подтверждённых снимка, вверх — с задержкой гистерезиса</div>`;
-else if(S==="insufficient")trig+=`<div class="t">цель появится после восстановления критических данных</div>`;
-else{
-  if((S==="defensive"||S==="deteriorating")&&!recovGood&&!shockFired&&target<A.recovery_floor_pct&&Number.isFinite(mvrvPct)&&mvrvPct<25)trig+=`<div class="t"><span style="color:var(--good)">↑</span> до <b>${A.recovery_floor_pct}%</b> — детектор «Восстановление» (не при макрошоке)</div>`;
-  // ближайшая ЭФФЕКТИВНАЯ цель выше/ниже текущей (оверлеи могут сплющивать соседние ступени)
-  // Гейт оценки: при MVRV ≥82-го перцентиля движок не выдаёт constructive/unconfirmed_positive —
-  // такие апгрейд-цели не рекламируются как достижимые.
-  const gateBlocked=reg=>(reg==="constructive"||reg==="unconfirmed_positive")&&(!Number.isFinite(mvrvPct)||mvrvPct>=82);
-  let up=null;for(let k=i+1;k<ORDER.length;k++){if(gateBlocked(ORDER[k]))continue;const e=eff(ORDER[k]);if(e!=null&&e>target){up={pct:e,name:SHORT[ORDER[k]]};break;}}
-  let down=null;for(let k=i-1;k>=0;k--){const e=eff(ORDER[k]);if(e!=null&&e<target){down={pct:e,name:SHORT[ORDER[k]],em:ORDER[k]==="emergency"};break;}}
-  if(up)trig+=`<div class="t"><span style="color:var(--good)">↑</span> до <b>${up.pct}%</b> — режим «${up.name}» (подтверждение ≥48 ч и ≥12 снимков)</div>`;
-  else if(i>=0&&i<ORDER.length-1&&gateBlocked(ORDER[ORDER.length-1]))trig+=`<div class="t">цели выше закрыты гейтом оценки (${Number.isFinite(mvrvPct)?"MVRV ≥82-го пц":"нет данных MVRV"})</div>`;
-  if(down)trig+=down.em?`<div class="t"><span style="color:var(--bad)">↓</span> до <b>0%</b> — аварийный override</div>`:`<div class="t"><span style="color:var(--bad)">↓</span> до <b>${down.pct}%</b> или ниже — ухудшение режима (вниз возможен прыжок через ступени)</div>`;
+function renderTact(){$("tact").innerHTML=`<div class="ax t">${tactRows(SNAP).map(r=>{const a=X(r.zone[1]),b=X(r.zone[2]);return`<span class="n">${r.label}</span>${track(r.v,r.cls,r.marks,`linear-gradient(90deg,var(--neutral-bg) 0 ${a}%,var(--${r.zone[0]}-bg) ${a}% ${b}%,var(--neutral-bg) ${b}% 100%)`)}<b class="c">${sgn(r.v,1)}</b><span class="st">${r.note}</span>`}).join("")}</div>`}
+const POS_DET=["recovery","short_squeeze"];
+function renderStats(now){const S=SNAP,q=S.scores||{},p=x=>`${Math.round((x||0)*100)}%`;
+  $("price").textContent=fin(S.price)?`$${Math.round(S.price).toLocaleString("en-US")}`:"—";$("priceAge").textContent=`BTC / USD${S.price_observed_at?" · "+since(S.price_observed_at,now):""}`;
+  $("coverS").textContent=p(q.coverage_strategic);$("coverT").textContent=p(q.coverage_tactical);$("onchainCoverage").textContent=p(q.onchain_coverage);
+  // Положительные детекторы (восстановление, сквиз) в счёт тревожных не идут.
+  $("detCount").textContent=objs(S.detectors).filter(d=>!POS_DET.includes(d.id)&&(d.state==="fired"||d.state==="watch")).length;
+  $("dataNote").innerHTML=dataNotes(S).map(x=>`<div class="dw">⚠ ${esc(x)}</div>`).join("")}
+// Лента событий: на всю ширину, сворачивается и помнит это, десять последних и «ещё».
+function renderLog(now=Date.now()){
+  const log=changeLog(SNAP).reverse(),mon=SNAP.monitoring||{},life=median(log.map(x=>x.life).filter(fin)),priced=log.some(x=>x.price!=null),more=log.length-LOG_N;
+  $("logSum").textContent=log.length?` · ${fin(mon.target_changes)?mon.target_changes:log.length} за ${num(mon.days_elapsed)} дн.${life!=null?` · медиана жизни цели ${span(life)}`:""}`:"";
+  $("changeLog").innerHTML=log.length?`<table class="log"><thead><tr><th>Дата</th><th class="num">Цель, %</th>${priced?'<th class="num">BTC, $</th>':""}<th class="num">Прожила</th><th>Причина</th></tr></thead><tbody>${log.slice(0,LOG_N).map(x=>`<tr><td>${dmt(x.t)}</td><td class="num"><span class="${x.to>x.from?"up":"dn"}">${x.to>x.from?"↑":"↓"}</span> ${x.from} → <b>${x.to}</b></td>${priced?`<td class="num">${x.price==null?"—":Math.round(x.price).toLocaleString("ru-RU")}</td>`:""}<td class="num">${x.life==null?"действует "+span(now-Date.parse(x.t)):span(x.life)}</td><td>${esc(x.cause||"—")}</td></tr>`).join("")}</tbody></table>${more>0?`<button class="btn" data-act="more">ещё ${Math.min(10,more)}</button>`:""}`:"<p>Смен цели в журнале нет.</p>";
 }
-const sc=Number.isFinite(SNAP.scores?.strategic)?(SNAP.scores.strategic>=0?"+":"")+SNAP.scores.strategic.toFixed(0):"—";
-$("strategy").className="strategy "+m.tone;
-const ovlHtml=ovl.map(o=>`<div class="warnline"><span style="color:${o[1]}">${o[0]}</span> ${o[2]}</div>`).join("");
-const baseNote=target!=null&&base!=null&&target!==base?`режим даёт ${base}% · оверлей ${target>base?"поднял цель до":"опустил цель до"} ${target}%`:`доля BTC от вашего лимита <b>B</b>${m.step?" · ступень "+m.step+"/5":""}`;
-$("strategy").innerHTML=`<div class="dial"><div class="eyebrow">Что делать сейчас · модельная аллокация · policy v1</div><div class="num"><div class="pct ${m.tone}">${pctTxt}</div><div class="meter">${meter}</div></div><div class="sub">${baseNote}</div></div><div class="act"><div class="lead">${lead}</div>${ovlHtml}${overlayNote}${sHoldNote}<div class="warnline"><span style="color:${TW[1]}">${TW[0]}</span> ${TW[2]}${holdNote}</div></div><div class="trig">${trig||'<div class="t">держать до смены режима</div>'}<div class="ctx">среднесрочный балл сейчас ${sc}${Number.isFinite(mvrvPct)?" · MVRV "+Math.round(mvrvPct)+"-й пц":""}</div></div><div class="foot">${executionPolicySentence()} · модельная иллюстрация, не персональная рекомендация</div>`;}
-function renderFactors(){const all=[...(SNAP.factors.strategic||[]).map(x=>({...x,scope:"среднесрок"})),...(SNAP.factors.tactical||[]).map(x=>({...x,scope:"краткосрок"}))];const unique=[];for(const x of all)if(!unique.some(y=>y.id===x.id))unique.push(x);unique.sort((a,b)=>Math.abs(b.score)-Math.abs(a.score));
-// Честная сводка рычагов: вердикт задают ГЕЙТ-ПОЛОСЫ блоков (±20), а не сумма факторных баллов —
-// близость блока к полосе показывается явно, чтобы «полшага одной семьи до смены режима» был виден.
-const bandLine=(()=>{const titles={macro:"Макро",demand:"Спрос",cycle:"Цикл"};const parts=Object.entries(titles).map(([key,label])=>{const s=SNAP.blocks?.[key]?.strategic?.score;if(!Number.isFinite(s))return null;const near=Math.abs(s)<20&&(20-Math.abs(s))<=6?` — до полосы ${s<=0?"−20":"+20"} осталось ${(20-Math.abs(s)).toFixed(1)}`:"";return `${label} ${s>0?"+":""}${s.toFixed(1)}${near}`}).filter(Boolean);return parts.length?`<p style="margin:8px 0 0;font-size:11px;opacity:.75">Блоки среднесрока против гейт-полос ±20: ${parts.join(" · ")}</p>`:""})();
-$("factors").innerHTML=(unique.slice(0,8).map(x=>`<div class="factor ${x.score>0?"pos":x.score<0?"neg":"neutral"}"><span>${esc(x.name)} <small>· ${x.scope}</small></span><span>${x.score>0?"+":""}${x.score} · ${esc(x.value)}</span></div>`).join("")||"<p>Нет доступных факторов.</p>")+bandLine}
 function drawSpark(canvas,series,score){if(!series||series.length<2)return;const ctx=canvas.getContext("2d"),w=canvas.clientWidth||250,h=35,dpr=devicePixelRatio||1;canvas.width=w*dpr;canvas.height=h*dpr;ctx.scale(dpr,dpr);const vals=series.map(x=>Number(x.v)).filter(Number.isFinite);if(vals.length<2)return;let mn=Math.min(...vals),mx=Math.max(...vals);if(mx===mn){mx+=1;mn-=1}ctx.strokeStyle=score<0?cssVar("--bad"):score>0?cssVar("--good"):cssVar("--neutral");ctx.lineWidth=1.4;ctx.beginPath();vals.forEach((v,i)=>{const x=i/(vals.length-1)*w,y=h-2-(v-mn)/(mx-mn)*(h-4);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
-function renderBlocks(){const root=$("blocks");root.innerHTML="";for(const [id,b] of Object.entries(SNAP.blocks)){const sec=document.createElement("section");sec.className="block";const bs=b.strategic.score,bt=b.tactical.score;sec.innerHTML=`<div class="block-head"><h2>${esc(b.roman)} · ${esc(b.title)}</h2><span class="sub">${esc(b.subtitle)}</span><span class="block-score">S ${fmtScore(bs)} · T ${fmtScore(bt)}</span></div><div class="grid"></div>`;const grid=sec.querySelector(".grid");for(const m of SNAP.metrics.filter(x=>x.block===id)){const card=document.createElement("article");card.className=`card ${cls(m.score)} ${m.score==null?"na":""}`;const valClass=String(m.value).length>24?" text":"";const scClass=m.score>0?"pos":m.score< -1?"neg":m.score<0?"warn":"";const badgeText=m.vote?badge(m.score):"без голоса";card.innerHTML=`<div class="ctop"><div class="cname">${esc(m.name)}</div><div class="score ${scClass}" title="${m.vote?"голосующая карточка":"справочная карточка: значение показывается, в баллы не входит"}">${esc(badgeText)}</div></div><div class="cvalue${valClass}">${esc(m.value)}${m.unit?` <small>${esc(m.unit)}</small>`:""}</div><div class="delta">${esc(m.delta||"")}</div><div class="note">${esc(m.note)}</div><div class="tags"><span class="tag">${esc(horizonLabel[m.horizon]||m.horizon)}</span><span class="tag">${esc(roleLabel[m.role]||m.role)}</span><span class="tag">${esc(methodLabel[m.method]||m.method)}</span><span class="tag">семья: ${esc(m.family)}</span>${m.vote?"":`<span class="tag">без голоса</span>`}</div><div class="spark"><canvas aria-hidden="true"></canvas></div><div class="meta"><span class="${m.stale?"stale":""}">${m.stale?"резерв / partial · наблюдение " + ageText(m.observed_at):"наблюдение " + ageText(m.observed_at)}</span><span class="links" title="${esc(m.source||"источники")}">${sourceLinks(m)}</span></div>`;grid.appendChild(card);requestAnimationFrame(()=>drawSpark(card.querySelector("canvas"),m.series,m.score))}root.appendChild(sec)}}
-function renderDetectors(){$("detectors").innerHTML=SNAP.detectors.map(raw=>{const d={...raw,state:["fired","watch","good","calm"].includes(raw.state)?raw.state:"calm"};const label=d.state==="fired"?"СРАБОТАЛ":d.state==="watch"?"НАБЛЮДЕНИЕ":d.state==="good"?"ПОЛОЖИТЕЛЬНЫЙ":"СПОКОЙНО";return`<article class="det ${d.state}"><div class="det-head"><h3>${esc(d.name)}</h3><span class="state">${label}</span></div><div class="inputs">${esc(d.inputs)}</div><p>${esc(d.logic)}</p><div class="pts">${({macro_shock:"право голоса: ограничивает среднесрочный вердикт",distribution:"право голоса: ограничивает среднесрочный вердикт",recovery:"право голоса: поднимает защитный режим до переходного",integrity:"право голоса: аварийный override",short_squeeze:"информационный · участвует в тактическом гейте",leverage:"информационный · участвует в тактическом гейте",demand_break:"информационный · участвует в тактическом гейте"})[d.id]||"информационный"}</div></article>`}).join("")}
-const SRC_STATES=["ok","partial","stale","fail","mock"];function renderSources(){const order=Object.entries(SNAP.sources||{});$("dots").innerHTML=order.map(([k,s])=>`<i class="dot ${SRC_STATES.includes(s.state)?s.state:"fail"}" role="img" aria-label="${esc(k)}: ${esc(s.state)}" title="${esc(k)}: ${esc(s.state)}"></i>`).join("");$("sources").innerHTML=order.map(([k,s])=>`<div class="source"><b>${esc(k)} · ${esc(s.state)}</b><p>наблюдение ${s.observed_at?ageText(s.observed_at):"—"} · загрузка ${s.fetched_at?ageText(s.fetched_at):"—"}${s.error?` · ${esc(s.error)}`:""}</p><p>${sourceLinks(s)}</p></div>`).join("")}
-function renderContrib(){const rows=SNAP.metrics.map(m=>`<tr><td>${esc(m.name)}</td><td>${esc(m.block)}</td><td>${esc(m.family)}</td><td>${m.vote?"да":"—"}</td><td>${esc(methodLabel[m.method]||m.method)}</td><td>${m.strategic?"да":"—"}</td><td>${m.tactical?"да":"—"}</td><td class="num">${m.score==null?"—":m.score}</td><td>${esc(m.value)}</td></tr>`).join("");$("contrib").innerHTML=`<table><thead><tr><th>Индикатор</th><th>Блок</th><th>Семья</th><th>Голос</th><th>Метод</th><th>S</th><th>T</th><th>Балл</th><th>Значение</th></tr></thead><tbody>${rows}</tbody></table>`}
-function renderPolicyStatus(){const D=SNAP.decision||{},pct=Number.isFinite(D.target_pct)?`${D.target_pct}%`:"—",quality=D.quality?.status||"неизвестно",hash=String(D.decision_hash||"").slice(0,12)||"без хэша",days=SNAP.monitoring?.days_elapsed||0,frozenDate=String(POLICY_V1.frozen_at||"").split("-").reverse().join(".")||"не указана";$("method").insertAdjacentHTML("afterbegin",`<h3>Статус policy v1 и границы доказательств</h3><p><b>Текущий служебный статус.</b> Policy v1 · качество ${esc(quality)} · решение ${esc(hash)} · ${days} дн. реального forward-наблюдения.</p><p><b>Что означает качество.</b> Оно показывает пригодность текущего пакета данных: полноту, свежесть и отсутствие несовместимой схемы или необъяснимого переписывания текущего факта. Обычные пересмотры старых точек временного ряда сохраняются в журнале аудита, но сами по себе не делают сегодняшний пакет хуже.</p><p><b>Как читать процент.</b> Число ${esc(pct)} — ступень модельной аллокации, а не вероятность роста BTC и не оценка точности прогноза.</p><p><b>«Историческая перекалибровка отключена».</b> Пороги policy v1 зафиксированы ${esc(frozenDate)} и не переписываются задним числом после просмотра новых результатов на старой истории. Если накопленные forward-данные потребуют других правил, они оформляются как отдельная policy v2; прежняя v1 остаётся неизменной, чтобы её решения можно было честно воспроизвести и сравнить.</p>`)}
+function renderBlocks(){const root=$("blocks"),warn=warnMap(SNAP),now=Date.now();root.innerHTML="";for(const [id,b] of Object.entries(SNAP.blocks||{})){const sec=document.createElement("section");sec.className="block";sec.innerHTML=`<div class="block-head"><h2>${esc(b.roman)} · ${esc(b.title)}</h2><span class="sub">${esc(b.subtitle)}</span><span class="block-score">S ${sgn(b.strategic?.score)} · T ${sgn(b.tactical?.score)}</span></div><div class="grid"></div>`;const grid=sec.querySelector(".grid");for(const m of objs(SNAP.metrics).filter(x=>x.block===id)){const card=document.createElement("article"),f=cardFace(m);card.className=`card ${cls(m.score)}`;const scClass=m.score>0?"pos":m.score< -1?"neg":m.score<0?"warn":"";card.innerHTML=`<div class="ctop"><div class="cname">${esc(m.name)}</div><div class="score ${scClass}" title="${m.vote?"голосующая карточка":"справочная карточка: значение показывается, в баллы не входит"}">${esc(m.vote?badge(m.score):"без голоса")}</div></div><div class="cvalue${f.text?" text":""}">${esc(f.value)}${m.unit?` <small>${esc(m.unit)}</small>`:""}</div><div class="delta">${esc(f.delta)}</div>${(warn[m.id]||[]).map(x=>`<div class="dw">⚠ ${esc(x)}</div>`).join("")}<div class="spark"><canvas aria-hidden="true"></canvas></div><div class="meta"><span class="${m.stale?"stale":""}">${m.stale?"резерв / partial · ":""}наблюдение ${since(m.observed_at,now)}</span><span class="links" title="${esc(m.source||"источники")}">${sourceLinks(m)}</span></div><details class="how"><summary>как считается</summary><div class="note">${esc(f.note)}</div></details>`;grid.appendChild(card);requestAnimationFrame(()=>drawSpark(card.querySelector("canvas"),m.series,m.score))}root.appendChild(sec)}}
+const DET_IN={leverage:["carry_regime","oi_quality","options_vol"],demand_break:["etf_regime","stablecoin_regime","exchange_supply","us_spot_premium"],macro_shock:["liquidity_regime","financial_conditions","system_stress"]};
+const CAPS="не даёт среднесрочному режиму быть лучше «ухудшается»",TACT="задаёт краткосрочный вердикт",DET_ROLE={macro_shock:CAPS,distribution:CAPS,recovery:`поднимает «защитный» и «ухудшается» до «переходного» и включает пол ${pc(OV.recovery_floor_pct)}`,integrity:`аварийный режим, цель ${pc(POLICY_V1.ladder.emergency)}; срабатывает и при отклонении USDT и USDC от 1 % с разбросом цен от 50 б.п.`,short_squeeze:TACT,leverage:TACT,demand_break:TACT};
+function renderDetectors(){$("detectors").innerHTML=objs(SNAP.detectors).map(raw=>{const d={...raw,state:["fired","watch","good","calm"].includes(raw.state)?raw.state:"calm"},ins=DET_IN[d.id]||[],have=ins.filter(id=>met(SNAP,id).score!=null).length;
+  // У положительных детекторов «спокойно» означало «условие не выполнено» — так и подписано.
+  const label=d.state==="fired"?"СРАБОТАЛ":d.state==="watch"?"НАБЛЮДЕНИЕ":d.state==="good"?"ВЫПОЛНЕН":POS_DET.includes(d.id)?"НЕ ВЫПОЛНЕН":"СПОКОЙНО";
+  // Знаменатель «условий N/3» не уменьшается, когда входа нет: число доступных входов печатается рядом.
+  return`<article class="det ${d.state}"><div class="det-head"><h3>${esc(d.name)}</h3><span class="state">${label}</span></div><div class="inputs">${esc(d.inputs)}${have<ins.length?` · данные есть по ${have} из ${ins.length}`:""}</div><p>${esc(d.logic)}</p><div class="pts">${DET_ROLE[d.id]||"справочный"}</div></article>`}).join("")}
+const SRC_WORD={ok:"работает",partial:"частично",stale:"устарел",fail:"отказ",mock:"демо"};
+function renderSources(now=Date.now()){const order=Object.entries(SNAP.sources||{});
+  const st=srcState;
+  $("dots").innerHTML=order.map(([k,s])=>`<i class="dot ${st(s)}" role="img" aria-label="${esc(k)}: ${SRC_WORD[st(s)]}" title="${esc(k)}: ${SRC_WORD[st(s)]}"></i>`).join("");
+  $("sources").innerHTML=order.map(([k,s])=>`<div class="source"><b>${esc(k)} · ${SRC_WORD[st(s)]}</b><p>наблюдение ${since(s.observed_at,now)} · загрузка ${since(s.fetched_at,now)}${s.error&&!s.legs?` · ${esc(s.error)}`:""}</p>${Array.isArray(s.legs)?`<p>${s.legs.map(l=>`${esc(l?.name)} — ${l?.state==="ok"?"работает":"отказ"}${l?.error?` (${esc(l.error)})`:""}`).join(" · ")}</p>`:""}<p>${sourceLinks(s)}</p></div>`).join("")}
+function renderContrib(){const n=(b,h)=>Object.values(SNAP.blocks?.[b]?.[h]?.families||{}).filter(fin).length,pts=(m,h)=>m.vote&&m[h]&&m.score!=null&&n(m.block,h)?sgn(50*m.score/n(m.block,h),1):"—";
+  const rows=objs(SNAP.metrics).map(m=>`<tr><td>${esc(m.name)}</td><td>${esc(SNAP.blocks?.[m.block]?.roman||m.block)}</td><td>${m.vote?[m.strategic&&"средне",m.tactical&&"кратко"].filter(Boolean).join(" + "):"—"}</td><td class="num">${m.score==null?"—":sc(m.score)}</td><td class="num">${pts(m,"strategic")}</td><td class="num">${pts(m,"tactical")}</td><td>${esc(wordOf(m))}</td></tr>`).join("");
+  $("contrib").innerHTML=`<table><thead><tr><th>Индикатор</th><th>Блок</th><th>Голос</th><th class="num">Балл</th><th class="num">Пункты блока, среднесрок</th><th class="num">Пункты блока, краткосрок</th><th>Значение</th></tr></thead><tbody>${rows}</tbody></table>`}
+const QUAL={good:"хорошее",degraded:"сниженное",paused:"пауза"};
+function renderPolicyStatus(){const D=SNAP.decision||{},pct=Number.isFinite(D.target_pct)?pc(D.target_pct):"—",quality=QUAL[D.quality?.status]||"неизвестно",hash=String(D.decision_hash||"").slice(0,12)||"без хэша",days=num(SNAP.monitoring?.days_elapsed||0),frozenDate=String(POLICY_V1.frozen_at||"").split("-").reverse().join(".")||"не указана";return`<h3>Статус и цель</h3><p><b>Policy v1</b> · качество данных ${esc(quality)} · решение ${esc(hash)} · ${days} дн. форвард-наблюдения. Качество — полнота и свежесть текущих данных; пересмотры старых точек временного ряда сохраняются в журнале аудита и качество не понижают.</p><p><b>Как читать процент.</b> ${esc(pct)} — целевая доля BTC от лимита B: вашего собственного потолка позиции в BTC. Это ступень модельной аллокации, а не вероятность роста. Лестница по режиму: ${Object.values(POLICY_V1.ladder).join(" / ")} %; полы и потолок сдвигают цель поверх режима.</p><p><b>Историческая перекалибровка отключена.</b> Пороги зафиксированы ${esc(frozenDate)}; новые правила оформляются отдельной версией policy, v1 остаётся воспроизводимой.</p>`}
 function renderMonitoring(){
-  const mon=SNAP.monitoring;if(!mon){$("monitoring").innerHTML="<p>Forward/OOS-журнал ещё не создан.</p>";return}
-  const labels={policy_v1:"policy v1",previous_policy_shadow:"прежняя policy (shadow)",policy_v2_shadow:"кандидат v2 (shadow)",static_theta:"static Θ · нуль тайминга",buy_and_hold:"BTC buy & hold",fixed_50:"BTC 50% / cash 50%",cash:"cash",trend_vol_25:"trend + vol 25%"};
-  const f=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):"—";
-  const rows=Object.entries(mon.performance||{}).map(([id,p])=>`<tr><td>${esc(labels[id]||id)}</td><td class="num">${f(p.current_target_pct,1)}%</td><td class="num">${f(p.net_return_pct)}%</td><td class="num">${f(p.max_drawdown_pct)}%</td><td class="num">${f(p.annualized_volatility_pct)}%</td><td class="num">${f(p.sharpe_excess)}</td><td class="num">${f(p.turnover_pct,1)}%</td><td class="num">${f(p.transaction_cost_pct,3)}%</td></tr>`).join("");
-  const health=mon.health||{},rev=mon.revision_alerts||[],events=mon.decision_events||[],euphoria=events.filter(x=>x.binding_overlays?.includes("euphoria_safety_cap")).length;
-  const evidence=mon.days_elapsed<90?"период слишком короток для вывода о качестве стратегии":mon.days_elapsed<365?"результаты предварительные; полный заранее назначенный рубеж ещё не достигнут":"достигнут первый полный рубеж оценки";
-  $("monitoring").innerHTML=`<p><b>Статус:</b> операционно — ${esc(health.operational_status||"неизвестно")}; оценка результатов — ${esc(health.performance_status||"collecting")}. Накоплено ${mon.days_elapsed||0} календарных дней / ${mon.observation_days||0} дневных наблюдений; ${evidence}. Следующая формальная проверка: ${mon.next_review_day?`день ${mon.next_review_day}`:"по решению владельца"}.</p><p><b>Что сравнивается.</b> Ровно зафиксированная live-policy, прежняя policy в shadow-режиме и простые ориентиры. Доходности учитывают ${f(mon.assumptions?.transaction_cost_bps_per_full_turnover,0)} б.п. на полный оборот и ${esc(mon.assumptions?.cash_yield_source||"доходность cash из FRED")}, когда котировка доступна.</p><table><thead><tr><th>Вариант</th><th>Сейчас</th><th>Net return</th><th>Max DD</th><th>Vol.</th><th>Sharpe сверх cash</th><th>Оборот</th><th>Издержки</th></tr></thead><tbody>${rows}</tbody></table><p><b>Границы доказательств.</b> Это forward/OOS-наблюдение «как было собрано», без подмены входов позднее пересмотренной историей и без автоматической перекалибровки. Потолок эйфории — safety rule: реальных forward-срабатываний в журнале ${euphoria}; до появления достаточной выборки его нельзя считать проверенным альфа-сигналом.</p><p><b>Контроль данных.</b> Зафиксировано исправлений того же vintage, исторических backfill и смен схем: ${rev.length}. Хэш-обязательства по исходным vintage, входам и каждому серверному решению позволяют проверить неизменность записанных входов и повторить итоговую аллокацию. Публичный снимок не хранит полные сырые ответы поставщиков и сам по себе не восстанавливает их задним числом. Кандидат на остановку policy возможен только по заранее заданным критериям после минимум ${MODEL_POLICY_V1.forward_monitoring.minimum_retirement_days} дней и ${MODEL_POLICY_V1.forward_monitoring.minimum_target_changes} фактических смен целевого процента; автоматического перехода на новые пороги нет.</p>`;
+  const mon=SNAP.monitoring;if(!mon){$("monitoring").innerHTML="<p>Журнал форвард-наблюдения ещё не создан.</p>";return}
+  const m=monitorModel(SNAP),f=(v,d=2,u=NB+"%")=>v==null||!fin(Number(v))?"—":num(Number(v),d)+u;
+  const row=r=>`<tr><td>${esc(r.label)}</td><td class="num">${f(r.p.current_target_pct,1)}</td><td class="num">${fin(r.p.net_return_pct)?sgn(r.p.net_return_pct,2)+NB+"%":"—"}</td><td class="num">${f(r.p.max_drawdown_pct)}</td><td class="num">${f(r.p.annualized_volatility_pct,1)}</td><td class="num">${esc(r.sharpe??"—")}</td><td class="num">${f(r.p.turnover_pct,0)}${r.id==="policy_v1"&&fin(m.changes)?` · ${m.changes}${NB}${plural(m.changes,"смена","смены","смен")} цели`:""}</td><td class="num">${f(r.p.transaction_cost_pct)}</td><td class="num">${r.gap?`${sgn(r.gap.pp,1)}${NB}п.п.${fin(r.gap.days)?` за ${num(r.gap.days)}${NB}дн.`:""}`:"—"}</td></tr>`;
+  $("monitoring").innerHTML=`<p><b>С ${m.from?dm(m.from):"—"}, ${num(m.days)} дн.</b> Статус: ${esc(m.status)}; следующий рубеж — ${fin(mon.next_review_day)?`день ${mon.next_review_day}`:"по решению владельца"}. Издержки — ${num(mon.assumptions?.transaction_cost_bps_per_full_turnover)} б.п. на полный оборот.</p><table><thead><tr><th>Вариант</th><th class="num">Доля сейчас</th><th class="num">Доход за ${num(m.days)} дн.</th><th class="num">Макс. просадка</th><th class="num">Волатильность, годовых</th><th class="num">Sharpe, годовой${m.se?` (±${m.se})`:""}</th><th class="num">Оборот</th><th class="num">Издержки</th><th class="num">К политике на общем окне</th></tr></thead><tbody>${m.groups.map(g=>`<tr class="grp"><th colspan="9">${g.title}</th></tr>${g.rows.map(row).join("")}`).join("")}</tbody></table>${m.decomp?`<p>${esc(m.decomp)}.</p>`:""}${m.inv?`<p><b>К порогам расследования</b> (действуют с ${m.inv.fromDay}-го дня): отставание от постоянных 50 % — ${num(m.inv.ret,1)} п.п. при пороге ${num(m.inv.retLimit)}; разрыв Sharpe с лучшим простым ориентиром — ${num(m.inv.sharpe,1)} при пороге ${num(m.inv.sharpeLimit,2)}.</p>`:""}${m.revisions?`<p><b>Пересмотры данных:</b> ${esc(m.revisions)}.</p>`:""}${m.corrections.map(x=>`<p><b>Поправка:</b> ${esc(x)}.</p>`).join("")}`;
 }
-function renderMethod(){const exclusions=(SNAP.methodology.exclusions||[]).map(x=>`<li>${esc(x)}</li>`).join("");$("method").innerHTML=`<p><b>Что это.</b> Панель проверяет одну ставку: ${esc(SNAP.thesis)} Она не предсказывает точную цену, а определяет допустимый режим поведения.</p><h3>Иерархия вместо одного среднего</h3><p><b>Среднесрочный режим</b> определяется Macro × Demand × Cycle; негативная лестница заякорена на спросе: одинокий слабый macro/cycle-блок даёт лишь «переходный», слабый спрос — «ухудшается», два слабых блока — «защитный». Независимое ядро — FRED, ETF, стейблкоины, цена и сеть. Coin Metrics добавляет биржевое предложение и первичные on-chain ряды; bitview.space поддерживает MVRV, а Blockchain.com — activity и miner revenue при отказе Coin Metrics. Ни один из этих поставщиков в одиночку не может выключить панель.</p><h3>Асимметричный гейт оценки</h3><p>Если MVRV недоступен, панель не имеет права объявить конструктивный или неподтверждённо-позитивный среднесрочный режим: максимум — переходный. При этом негативные предупреждения не подавляются. Отсутствие информации не трактуется как хорошая новость.</p><h3>Краткосрочная структура</h3><p>Обязательны быстрый спрос, целостность спотовых USD/USDT-групп, пеги и реализованная волатильность. Funding, OI, basis и опционы уточняют хрупкость, но их геоблокировка не обнуляет весь вывод.</p><h3>Динамические и механические пороги</h3><p>MVRV, ETF flows, exchange supply, активность и realized volatility сравниваются с собственной историей. Фиксированные пороги используются только там, где есть экономический ориентир: peg=1, funding≈0, basis≈0 и межбиржевой spread≈0.</p><h3>Покрытие</h3><p>В шапке отдельно показано покрытие on-chain-слоя. Потеря Coin Metrics прежде всего убирает exchange-labelled supply/flows; другие on-chain семьи переходят на цельные Blockchain.com histories. Деградация не создаёт ложный оптимизм: семья, потерявшая половину и более своих входов, может предупреждать, но не поддерживать — её положительный голос ограничивается нулём. Live-кандидат публикуется после строгой проверки целостности. Один горизонт может честно стать «недостаточно данных» и будет опубликован как видимая деградация; кандидат отклоняется, если непригодны оба горизонта или нарушены freshness/schema-контракты.</p><h3>Переходы режима</h3><p>Смена режима в сторону защиты подтверждается двумя последовательными снимками (~2 часа). Смена в сторону риска дополнительно должна продержаться 48 часов и не меньше 12 наблюдённых снимков (разрыв конвейера не ускоряет апгрейд) — асимметричный гистерезис против дёрганья заголовка на границе полос. Экстремальный депег или фрагментация рынка применяют override немедленно.</p><h3>Детекторы с правом голоса</h3><p>Три детектора влияют на сам вердикт: сработавшие «Макрошок ликвидности» и «Дистрибуция и потеря тренда» не дают среднесрочному режиму остаться оптимистичнее «ухудшается», а положительный «Капитуляция → восстановление» поднимает защитный/ухудшающийся режим до переходного — окно накопления после капитуляции не должно отображаться как «оставайтесь в защите». Все три сохраняют структуру «якорь + подтверждения».</p><h3>Семьи и карточки без голоса</h3><p>Каждый экономический процесс голосует один раз. Сырые ETF 1/5/20 дней, Net Liquidity 4/13 недель и отдельные контекстные карточки отображаются, но не дублируют семейный голос.</p><h3>Что сознательно исключено</h3><ul style="margin-left:20px;color:var(--soft)">${exclusions}</ul><h3>Практическое чтение</h3><p>Сначала смотрите на два текстовых режима и покрытие ончейн-слоя, затем на детекторы и семейные карточки. Числовые шкалы — удобная визуализация силы, но не самостоятельная торговая модель.</p>`}
-function drawTape(){const c=$("tape"),ctx=c.getContext("2d"),w=c.clientWidth,h=c.clientHeight,dpr=devicePixelRatio||1;c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);const hist=(SNAP.history||[]).slice(-90);ctx.clearRect(0,0,w,h);ctx.strokeStyle=cssVar("--btc");ctx.lineWidth=1.7;ctx.beginPath();if(hist.length<2){for(let x=0;x<w;x+=8){const y=h/2+Math.sin(x/22)*8+(Math.random()-.5)*5;x?ctx.lineTo(x,y):ctx.moveTo(x,y)}}else hist.forEach((p,i)=>{const x=i/(hist.length-1)*w,y=h/2-(Number(p.strategic||0)*.25+Number(p.tactical||0)*.18);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}
+function renderMethod(){const tact=tactOf(SNAP);$("method").innerHTML=`${renderPolicyStatus()}<h3>Как получается режим</h3><p><b>Полосы блоков.</b> Балл блока ${num(RB.adverse_max)} и ниже — неблагоприятная полоса, ${sgn(RB.supportive_min)} и выше — благоприятная. Два неблагоприятных блока — «защитный» режим; неблагоприятный Спрос — «ухудшается»; только Макро или только Цикл — «переходный»; благоприятные Спрос и Цикл либо Спрос и Макро — «конструктивный»; благоприятные Макро и Цикл при нейтральном Спросе — «спрос не подтв.». Полушаг — 0,5 балла одной семьи; пункты семей в сумме дают балл блока.</p><p><b>Гейт оценки.</b> Без MVRV и при MVRV от ${gatePct(SNAP)}-го перцентиля режим не выше «переходного».</p><p><b>Смена режима.</b> Ухудшение — двумя снимками подряд${tact?` (сейчас между снимками ≈ ${tact} мин)`:""}, улучшение — после ${HY.risk_on_hold_hours} ч без встречного снимка, аварийный режим — сразу.</p><p><b>Полы и потолок.</b> Пол восстановления ${pc(OV.recovery_floor_pct)}: MVRV ниже ${recPct(SNAP)}-го перцентиля и два неотрицательных балла из трёх (тренд, ETF, биржевое предложение); не действует при макрошоке; включается и снимается одним снимком. Пол капитуляции ${pc(OV.capitulation_floor_pct)}: MVRV не выше ${OV.capitulation_max_mvrv_percentile}-го перцентиля. Потолок ${pc(OV.euphoria_cap_pct)} (MVRV от ${OV.euphoria_min_mvrv_percentile}-го) не связывает: верхние ступени раньше закрывает гейт оценки.</p><p><b>Детекторы.</b> Макрошок и дистрибуция не дают режиму быть лучше «ухудшается»; восстановление поднимает «защитный» и «ухудшается» до «переходного» и включает пол; нарушение целостности рынка включает аварийный режим. Слом спроса, плечо и сквиз задают краткосрочный вердикт.</p>`}
 const AI_LS="btc21m.ai.v1";
 function aiSave(){try{if(!$("aiRemember").checked){localStorage.removeItem(AI_LS);return}localStorage.setItem(AI_LS,JSON.stringify({model:$("aiModel").value.trim(),key:$("aiKey").value.trim(),depth:$("aiDepth").value}))}catch(e){}}
 function aiLoad(){try{const j=JSON.parse(localStorage.getItem(AI_LS)||"null");if(j&&(j.key||j.model)){if(j.model)$("aiModel").value=j.model;if(j.key)$("aiKey").value=j.key;if(j.depth)$("aiDepth").value=j.depth;$("aiRemember").checked=true}}catch(e){}}
@@ -324,21 +635,28 @@ function mdRender(md){
   return out;
 }
 function aiCompact(){
-  const byDay={};for(const h of SNAP.history||[])byDay[String(h.t).slice(0,10)]=h;
-  const hist=Object.values(byDay).slice(-45).map(h=>({d:String(h.t).slice(0,10),S:Number.isFinite(h.strategic)?Math.round(h.strategic):null,T:Number.isFinite(h.tactical)?Math.round(h.tactical):null,price:Number.isFinite(h.price)?Math.round(h.price):null,regime:h.regime?.strategic}));
-  return{generated_at:SNAP.generated_at,verdict:SNAP.verdict,phase:SNAP.phase,thesis:SNAP.thesis,regime:SNAP.regime,regime_meta:SNAP.regime_meta,scores:SNAP.scores,behavior:SNAP.behavior,
+  const S=SNAP,mon=S.monitoring||{},D=S.decision||{};
+  // Дневная история — из журнала монитора (цена и цель на конец суток): в history снимка лежит меньше двух недель.
+  const hist=objs(mon.daily).slice(-45).map(d=>({d:d.date,price:fin(d.price)?Math.round(d.price):null,target_pct:d.policy_target_pct??null,quality:d.quality??null}));
+  return{generated_at:S.generated_at,verdict:S.verdict,thesis:S.thesis,regime:S.regime,regime_meta:S.regime_meta,regime_birth:S.regime_birth??null,scores:S.scores,
     // Policy-слой обязателен в промпте: без него модель строит позиционирование, не зная модельной
-    // аллокации панели, и может ей противоречить (аудит 2026-07-21).
-    policy:{id:SNAP.decision?.policy_id??null,status:"frozen 2026-07-19, историческая перекалибровка отключена",target_pct:SNAP.decision?.target_pct??null,base_target_pct:SNAP.decision?.base_target_pct??null,binding_overlays:SNAP.decision?.binding_overlays??[],quality:SNAP.decision?.quality?.status??null,ladder_pct:SNAP.decision?.regime_targets_pct??null,forward_monitor:{started_at:SNAP.monitoring?.started_at??null,days_elapsed:SNAP.monitoring?.days_elapsed??null,target_changes:SNAP.monitoring?.target_changes??null},v2_shadow:{target_pct:SNAP.monitoring?.v2_candidate?.target_pct??null,recovery_closes:SNAP.monitoring?.v2_candidate?.recovery_closes??null,note:"теневой кандидат v2 (градуировка пола по дневным закрытиям); живое решение задаёт v1"}},
-    blocks:Object.fromEntries(Object.entries(SNAP.blocks).map(([k,b])=>[k,{title:b.title,S:b.strategic.score==null?null:Math.round(b.strategic.score),T:b.tactical.score==null?null:Math.round(b.tactical.score),coverage:b.strategic.coverage}])),
-    detectors:SNAP.detectors.map(d=>({id:d.id,name:d.name,state:d.state,inputs:d.inputs,logic:d.logic})),factors:SNAP.factors,
-    metrics:SNAP.metrics.map(m=>({id:m.id,name:m.name,value:m.value,delta:m.delta,score:m.score,vote:m.vote,block:m.block,family:m.family,note:m.note,stale:m.stale})),
+    // аллокации панели, и может ей противоречить (аудит 2026-07-21). С правилами ступеней, уровнями
+    // цены и результатом форвард-наблюдения — иначе «сигналы-пороги» ей пришлось бы выдумывать.
+    policy:{id:D.policy_id??null,status:"frozen 2026-07-19, историческая перекалибровка отключена",target_pct:D.target_pct??null,base_target_pct:D.base_target_pct??null,binding_overlays:D.binding_overlays??[],quality:D.quality?.status??null,ladder_pct:D.regime_targets_pct??null,
+      rules:{ladder:POLICY_V1.ladder,overlays:OV,block_bands:RB,hysteresis:HY,regime_tree:"два и более неблагоприятных блока → defensive; неблагоприятен demand → deteriorating; неблагоприятен только macro или только cycle → transition; благоприятны demand и cycle либо demand и macro → constructive; благоприятны macro и cycle при нейтральном demand → unconfirmed_positive; иначе transition",valuation_gate:`без MVRV или при его перцентиле от ${gatePct(S)} режим не выше transition`,recovery_floor:`MVRV-перцентиль ниже ${recPct(S)} и не меньше двух из трёх баллов (trend_regime, etf_regime, exchange_supply) не ниже нуля; блокируется сработавшим macro_shock; включается и снимается одним снимком`,execution:executionPolicySentence(mon.assumptions?.tranched_execution)},
+      valuation_levels:S.valuation_levels??null,target_changes:changeLog(S).slice(-10).map(({t,from,to,price,cause})=>({t,from,to,price,cause})),
+      forward_monitor:{started_at:mon.started_at??null,days_elapsed:mon.days_elapsed??null,target_changes:mon.target_changes??null,net_return_pct:Object.fromEntries(Object.entries(mon.performance||{}).map(([k,p])=>[k,fin(p?.net_return_pct)?Number(p.net_return_pct.toFixed(2)):null])),timing_null:mon.timing_null?.since_start??null},
+      v2_shadow:{target_pct:mon.v2_candidate?.target_pct??null,recovery_closes:mon.v2_candidate?.recovery_closes??null,note:"теневой кандидат v2 (градуировка пола по дневным закрытиям); живое решение задаёт v1"}},
+    block_bands:blockRows(S).map(r=>({block:r.key,score:r.score,band:r.band,half_steps_to_next_band:r.near})),
+    blocks:Object.fromEntries(Object.entries(S.blocks||{}).map(([k,b])=>[k,{title:b.title,S:b.strategic?.score==null?null:Math.round(b.strategic.score),T:b.tactical?.score==null?null:Math.round(b.tactical.score),coverage:b.strategic?.coverage}])),
+    detectors:objs(S.detectors).map(d=>({id:d.id,name:d.name,state:d.state,inputs:d.inputs,logic:d.logic})),data_warnings:S.data_warnings??[],
+    metrics:objs(S.metrics).map(m=>({id:m.id,name:m.name,value:m.value,delta:m.delta,score:m.score,vote:m.vote,block:m.block,family:m.family,note:m.note,stale:m.stale,observed_at:m.observed_at})),
     history_daily:hist};
 }
 function aiPrompt(deep){
-  const head="Ты — опытный аналитик крипторынка с макро-подготовкой. Ниже — текущий снимок ключевых полей режимного дашборда Bitcoin «Монитор Bitcoin» и дневная история его шкал. Методология панели: среднесрочный режим = макроликвидность × маржинальный спрос × цикл (вердикт задают гейты, а не среднее); краткосрочная структура = быстрый спрос × целостность рынка × волатильность; плечо и волатильность голосуют только штрафом; детекторы — нелинейные события: макрошок и дистрибуция ограничивают среднесрочный вердикт сверху, восстановление поднимает защитный/ухудшающийся до переходного; слом спроса, делеверидж и сквиз задают сам тактический вердикт; целостность рынка держит аварийный override. Целевая доля BTC (поле policy) задаётся ЗАМОРОЖЕННОЙ policy v1 — лестница по среднесрочному режиму плюс полы/потолок по MVRV и восстановлению; она под форвард-наблюдением и НЕ пересчитывается ни моделью, ни браузером: не предлагай альтернативную аллокацию, объясняй текущую и риски вокруг неё. Баллы семей — от −2 до +2 полушагами; блочные и композитные шкалы — от −100 до +100 (полосы гейтов ±20, реалистичный диапазон ≈±60). Публикуемый режим проходит АСИММЕТРИЧНЫЙ гистерезис: ухудшение принимается за 2 снимка, улучшение требует 48 часов и ≥12 снимков подтверждения. Поэтому в regime_meta поле state — то, что опубликовано, а candidate — то, что насчитано по свежим данным СЕЙЧАС; если они расходятся, вердикт удерживается, и расхождение с состоянием детекторов является ожидаемым, а не противоречием картины.";
+  const head="Ты — опытный аналитик крипторынка с макро-подготовкой. Ниже — текущий снимок ключевых полей режимного дашборда Bitcoin «Монитор Bitcoin» и дневная история цели и цены. Методология панели: среднесрочный режим = макроликвидность × маржинальный спрос × цикл (вердикт задают гейты, а не среднее); краткосрочная структура = быстрый спрос × целостность рынка × волатильность; плечо и волатильность голосуют только штрафом; детекторы — нелинейные события: макрошок и дистрибуция ограничивают среднесрочный вердикт сверху, восстановление поднимает защитный/ухудшающийся до переходного и включает пол; слом спроса, делеверидж и сквиз задают сам тактический вердикт; целостность рынка держит аварийный override. Целевая доля BTC (поле policy) задаётся ЗАМОРОЖЕННОЙ policy v1 — лестница по среднесрочному режиму плюс полы/потолок по MVRV и восстановлению; она под форвард-наблюдением и НЕ пересчитывается ни моделью, ни браузером: не предлагай альтернативную аллокацию, объясняй текущую и риски вокруг неё. Баллы семей — от −2 до +2 полушагами; блочные и композитные шкалы — от −100 до +100 (полосы гейтов ±20, реалистичный диапазон ≈±60). Публикуемый режим проходит АСИММЕТРИЧНЫЙ гистерезис: ухудшение принимается за 2 снимка, улучшение требует 48 часов и ≥12 снимков подтверждения. Поэтому в regime_meta поле state — то, что опубликовано, а candidate — то, что насчитано по свежим данным СЕЙЧАС; если они расходятся, вердикт удерживается, и расхождение с состоянием детекторов является ожидаемым, а не противоречием картины. Правила смены ступеней лежат в policy.rules, расстояния блоков до полос в полушагах — в block_bands, уровни цены у порогов оценки — в policy.valuation_levels, история смен цели и результат форвард-наблюдения — в policy.target_changes и policy.forward_monitor.";
   const task=deep?
-"\n\nЗадача — не пересказ цифр, а глубокое объяснение СМЫСЛА именно этой комбинации значений простым человеческим языком, с максимумом реальной пользы:\n- что это состояние означает по существу и какие механизмы его создали — причинные цепочки, а не корреляции;\n- эффекты второго и третьего порядка: что эта комбинация обычно запускает дальше, где толпа может ошибаться в её прочтении, что сейчас НЕ очевидно;\n- неочевидные взаимосвязи и противоречия между показателями снимка (противоречия часто информативнее согласия — разбери самые важные);\n- траектория: как панель пришла в это состояние (по дневной истории) и что это меняет в интерпретации;\n- три сценария (базовый/бычий/медвежий) с вероятностной оценкой и КОНКРЕТНЫМИ сигналами-порогами из этого же дашборда, которые подтвердят или фальсифицируют каждый;\n- логика позиционирования на двух горизонтах (дни-недели и месяцы) с учётом асимметрии исходов — без персональных рекомендаций, но с честным разбором trade-off'ов.\nПиши развёрнуто, как умный человек умному человеку: без канцелярита, без воды, с умеренной структурой (только markdown-заголовки, **жирный** и списки — таблицы и ссылки не отрисуются). Не выдумывай данных, которых нет в снимке; где данных не хватает — скажи прямо. Объём подчиняется содержанию, ориентир 900–1500 слов.":
+"\n\nЗадача — не пересказ цифр, а глубокое объяснение СМЫСЛА именно этой комбинации значений простым человеческим языком, с максимумом реальной пользы:\n- что это состояние означает по существу и какие механизмы его создали — причинные цепочки, а не корреляции;\n- эффекты второго и третьего порядка: что эта комбинация обычно запускает дальше, где толпа может ошибаться в её прочтении, что сейчас НЕ очевидно;\n- неочевидные взаимосвязи и противоречия между показателями снимка (противоречия часто информативнее согласия — разбери самые важные);\n- траектория: как панель пришла в это состояние (по истории смен цели и дневной истории) и что это меняет в интерпретации;\n- три сценария (базовый/бычий/медвежий) с КОНКРЕТНЫМИ сигналами-порогами из policy.rules и block_bands, которые подтвердят или фальсифицируют каждый; вероятности не назначай — базовых частот в данных нет;\n- логика позиционирования на двух горизонтах (дни-недели и месяцы) с учётом асимметрии исходов — без персональных рекомендаций, но с честным разбором trade-off'ов.\nПиши развёрнуто, как умный человек умному человеку: без канцелярита, без воды, с умеренной структурой (только markdown-заголовки, **жирный** и списки — таблицы и ссылки не отрисуются). Не выдумывай данных, которых нет в снимке; где данных не хватает — скажи прямо. Объём подчиняется содержанию, ориентир 900–1500 слов.":
 "\n\nЗадача — сжатая сводка (300–500 слов) человеческим языком: 1) суть текущего режима одной мыслью; 2) что его создало; 3) главное противоречие или слабое место картины; 4) один сигнал из дашборда, который первым скажет, что мнение пора менять; 5) разумное поведение на горизонте дней-недель и на горизонте месяцев. Без пересказа всех карточек, без воды.";
   return head+task+"\n\nДАННЫЕ ДАШБОРДА:\n"+JSON.stringify(aiCompact());
 }
@@ -398,10 +716,17 @@ const syncThemeWord=()=>{const d=document.documentElement.dataset.theme==="dark"
    Намеренно на scroll, а не на IntersectionObserver: IO зависит от компоновщика
    и молча не срабатывает в headless-окружениях, где эту страницу проверяют. */
 const _hero=document.querySelector(".hero"),_sb=$("stickyBar");
-const syncSticky=()=>{if(!_hero||!_sb)return;const gone=_hero.getBoundingClientRect().bottom<0;if(gone&&SNAP&&$("sbText").textContent!==SNAP.verdict)$("sbText").textContent=SNAP.verdict||"";_sb.classList.toggle("show",gone)};
+const syncSticky=()=>{if(_hero&&_sb)_sb.classList.toggle("show",_hero.getBoundingClientRect().bottom<0)};
 addEventListener("scroll",syncSticky,{passive:true});syncSticky();
-$("themeBtn").onclick=()=>{const next=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=next;window.__theme.remember(next);syncThemeWord();if(SNAP){renderBlocks();drawTape()}};
-$("refresh").onclick=()=>location.reload();$("aiBtn").onclick=askAI;let rsz=null;addEventListener("resize",()=>{clearTimeout(rsz);rsz=setTimeout(()=>{if(SNAP){renderBlocks();drawTape();}},250)});setInterval(()=>{if(SNAP)render()},5*60*1000);load();
+$("themeBtn").onclick=()=>{const next=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=next;window.__theme.remember(next);syncThemeWord();if(SNAP)renderBlocks()};
+$("refresh").onclick=()=>location.reload();$("aiBtn").onclick=askAI;
+addEventListener("click",e=>{const a=e.target?.dataset?.act;if(a==="reload")refresh();else if(a==="more"){LOG_N+=10;renderLog()}});
+let rsz=null;addEventListener("resize",()=>{clearTimeout(rsz);rsz=setTimeout(()=>{if(SNAP)renderBlocks()},250)});
+// Сворачиваемые панели помнят своё состояние на устройстве.
+const UI_LS="btc21m.ui.v1",uiState=()=>{try{return JSON.parse(localStorage.getItem(UI_LS)||"{}")||{}}catch(e){return{}}};
+for(const d of document.querySelectorAll("details.panel[id]")){const s=uiState();if(typeof s[d.id]==="boolean")d.open=s[d.id];d.addEventListener("toggle",()=>{try{localStorage.setItem(UI_LS,JSON.stringify({...uiState(),[d.id]:d.open}))}catch(e){}})}
+// Снимок перечитывается по таймеру и при возврате на вкладку.
+setInterval(refresh,POLL_MS);document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")refresh()});refresh();
 </script>
 </body>
 </html>
