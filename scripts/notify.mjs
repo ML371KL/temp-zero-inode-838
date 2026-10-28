@@ -621,8 +621,8 @@ function fromSnapshotJSON(snap) {
       word: typeof snap.verdict === "string" ? snap.verdict : String(snap.verdict?.word || snap.verdict?.label || ""),
       score: snap.scores?.strategic ?? snap.scores?.total ?? null,
       extra: [
-        snap.regime?.strategic ? `режим ${snap.regime.strategic}` : "",
-        finite(snap.scores?.strategic) ? `балл ${snap.scores.strategic.toFixed(1)}` : "",
+        snap.regime?.strategic ? `режим «${regimeWord(snap.regime.strategic)}»` : "",
+        finite(snap.scores?.strategic) ? `оценка ${fmtSigned(snap.scores.strategic)} по шкале от −100 до +100` : "",
       ].filter(Boolean).join(" · "),
     },
     target: finite(snap.decision?.target_pct)
@@ -792,15 +792,18 @@ async function readPanel() {
 
 /* ==================================== 3. СОБЫТИЯ ==================================== */
 
+// Эмодзи — по общему стандарту сообщений (29.10.2026): 🔔 смена доли или режима решения (пауза и её
+// снятие — тоже режим), ⚠️ сигнал внимания, 🗓 выход статистики, ℹ️ служебное, качество данных и
+// пересчёт истории. Одна эмодзи — в начале заголовка, у всех сообщений своя.
 const KIND = {
-  allocation: { emoji: "🎯", label: "изменение доли капитала" },
-  pause: { emoji: "⏸", label: "пауза решения о доле" },
-  hold: { emoji: "⏳", label: "удержание повышения" },
+  allocation: { emoji: "🔔", label: "изменение доли капитала" },
+  pause: { emoji: "🔔", label: "пауза решения о доле" },
+  hold: { emoji: "⚠️", label: "удержание повышения" },
   risk: { emoji: "⚠️", label: "сигнал риска" },
-  quality: { emoji: "🧩", label: "предупреждение о данных" },
-  service: { emoji: "🛠", label: "служебное сообщение" },
-  release: { emoji: "📊", label: "вышли новые данные" },
-  revision: { emoji: "♻️", label: "пересмотр опубликованных данных" },
+  quality: { emoji: "ℹ️", label: "предупреждение о данных" },
+  service: { emoji: "ℹ️", label: "служебное сообщение" },
+  release: { emoji: "🗓", label: "вышли новые данные" },
+  revision: { emoji: "ℹ️", label: "пересмотр опубликованных данных" },
 };
 
 // Порядок важен: сначала то, что меняет вывод, потом то, что его питает.
@@ -843,22 +846,43 @@ function closeNum(a, b) {
 }
 const sameSet = (a, b) => { const x = [...(a || [])].sort(), y = [...(b || [])].sort(); return x.length === y.length && x.every((v, k) => v === y[k]); };
 
+/* ---- Числа, даты и время для читателя (стандарт сообщений 29.10.2026) ----
+   Число в тексте пишет ОДНА функция — fmtNum, остальные её обёртки: десятичная запятая, разряды
+   неразрывным пробелом с 10 000 (четырёхзначные слитно: «2391,72»), типографский минус, «+» у
+   изменения. До 29.10.2026 здесь был toLocaleString: он делил и четырёхзначные («1 234») и ставил
+   дефис вместо минуса. Время — только московское с пометкой, год — только не текущий. */
+const NBSP = " ";
+const MINUS = "−";
+function fmtNum(x, { digits = 1, sign = false } = {}) {
+  if (!finite(x)) return "—";
+  const [int, frac = ""] = Math.abs(x).toFixed(digits).split(".");
+  const tail = frac.replace(/0+$/, "");
+  const zero = /^0*$/.test(int + tail);
+  const body = (int.length >= 5 ? int.replace(/\B(?=(\d{3})+$)/g, NBSP) : int) + (tail ? `,${tail}` : "");
+  return (zero ? "" : x < 0 ? MINUS : sign ? "+" : "") + body;
+}
+// Четыре значащие цифры, от тысячи — целым: так видны и малые сдвиги, и крупные суммы без хвоста.
+const fmtSig = (x, n = 4) => (finite(x) ? fmtNum(x, { digits: Math.abs(x) >= 1000 || x === 0 ? 0 : Math.max(0, n - 1 - Math.floor(Math.log10(Math.abs(x)))) }) : "—");
 // Число со знаком и типографским минусом: «−6,3», «+12,5», «0» — так оценки читаются в строке
 // рядом с порогом и не превращаются в «--6.25».
-function fmtSigned(x, digits = 1) {
-  if (!finite(x)) return "—";
-  const r = Number(x.toFixed(digits));
-  const body = Math.abs(r).toLocaleString("ru-RU", { maximumFractionDigits: digits });
-  return (r > 0 ? "+" : r < 0 ? "−" : "") + body;
-}
-const fmtPlain = (x, digits = 1) => (finite(x) ? x.toLocaleString("ru-RU", { maximumFractionDigits: digits }) : "—");
-const fmtUsd = (x) => (finite(x) ? `${Math.round(x).toLocaleString("ru-RU")} $` : "—");
-// Момент снимка в сообщении: дата без года и время с явным поясом. Пояс один для всех дат в
-// сообщениях — UTC, тот же, что у дат наблюдений.
+const fmtSigned = (x, digits = 1) => fmtNum(x, { digits, sign: true });
+const fmtPlain = (x, digits = 1) => fmtNum(x, { digits });
+// Доллар — перед числом: «$86 198», цена биткоина — до доллара.
+const fmtUsd = (x) => (finite(x) ? `${x < 0 ? MINUS : ""}$${fmtNum(Math.abs(Math.round(x)), { digits: 0 })}` : "—");
+// Проценты слитно: «45%», «0,5%».
+const fmtPct = (x, digits = 1) => `${fmtNum(x, { digits })}%`;
+
+// «Текущий год» — год снимка, по которому собрано сообщение, а не часов машины: иначе тесты на
+// фикстурах 2026 года покраснели бы в 2027-м. Задаётся в diff() и main(); без них — сейчас.
+let REF_MS = null;
+const MSK_MS = 3 * 3600e3;
+const p2 = (n) => String(n).padStart(2, "0");
+const refYear = () => new Date((REF_MS ?? Date.now()) + MSK_MS).getUTCFullYear();
+const dm = (d) => `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)}${d.getUTCFullYear() === refYear() ? "" : `.${d.getUTCFullYear()}`}`;
+// Момент для читателя — по Москве: «28.10, 14:05 МСК».
 const ruMoment = (t) => {
-  const d = new Date(Number(t));
-  const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getUTCDate())}.${p(d.getUTCMonth() + 1)} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} UTC`;
+  const d = new Date(Number(t) + MSK_MS);
+  return `${dm(d)}, ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())} МСК`;
 };
 
 // Читаемое число для точки ряда: у карточек разный масштаб (хешрейт 7·10²⁰ H/s и MVRV 1,8
@@ -866,9 +890,8 @@ const ruMoment = (t) => {
 function fmtPoint(v) {
   if (!finite(v)) return "—";
   const a = Math.abs(v);
-  if (a !== 0 && (a >= 1e7 || a < 1e-3)) return v.toExponential(3).replace(".", ",").replace("e+", "·10^").replace("e-", "·10^−");
-  const digits = a >= 100 ? 1 : a >= 1 ? 2 : 4;
-  return v.toLocaleString("ru-RU", { maximumFractionDigits: digits });
+  if (a !== 0 && (a >= 1e7 || a < 1e-3)) return v.toExponential(3).replace(".", ",").replace("e+", "·10^").replace("e-", "·10^−").replace(/^-/, MINUS);
+  return fmtNum(v, { digits: a >= 100 ? 1 : a >= 1 ? 2 : 4 });
 }
 
 // Пара точек ряда «было → стало» в единице ряда, объявленной словарём (HUMAN[id].s). Обе стороны —
@@ -879,18 +902,22 @@ function seriesPair(before, after, s) {
   const a = before / (s.per || 1), b = after / (s.per || 1);
   const top = Math.max(Math.abs(a), Math.abs(b));
   const step = s.auto ? SERIES_STEPS.find(([from]) => top >= from) : null;
-  const tail = [step ? step[2] : "", s.u || ""].filter(Boolean).join(" ");
+  // доллар — перед числом («−$22,5 млн», «$0,05 за PH/s в сутки»), процент — слитно, прочее — после
+  const u = s.u || "";
+  const usd = u.startsWith("$");
+  const unit = usd ? u.slice(1).trim() : u;
+  const tail = [step ? step[2] : "", unit].filter(Boolean).join(" ");
   const one = (x) => {
-    const v = x / (step ? step[1] : 1), abs = Math.abs(v);
-    const body = abs >= 1000 ? Math.round(abs).toLocaleString("ru-RU") : abs.toLocaleString("ru-RU", { maximumSignificantDigits: 4 });
-    return `${v < 0 && body !== "0" ? "−" : ""}${body}${tail ? ` ${tail}` : ""}`;
+    const v = x / (step ? step[1] : 1);
+    const body = fmtSig(Math.abs(v));
+    return `${v < 0 && body !== "0" ? MINUS : ""}${usd ? "$" : ""}${body}${!tail ? "" : tail === "%" ? "%" : NBSP + tail}`;
   };
   return [one(a), one(b)];
 }
 
-const dayLabel = (t) => new Date(Number(t)).toISOString().slice(0, 10);
-// В сообщении дата читается человеком, а не машиной: 27.05.2026 вместо 2026-05-27.
-const ruDay = (t) => { const d = new Date(Number(t)); return `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`; };
+// Дата наблюдения для читателя: «27.05», чужой год — «27.05.2025». Дата календарная (полночь UTC
+// у ряда), поэтому сдвига пояса у неё нет — в отличие от момента (ruMoment).
+const ruDay = (t) => dm(new Date(Number(t)));
 
 // Переписанная история: сравниваем ТЕ ЖЕ метки времени в старом и новом ряду. Точки от
 // последней запомненной и новее не считаются — последняя точка суток ещё формируется, её
@@ -951,7 +978,7 @@ const DETECTOR_HUMAN = {
 };
 const detectorHuman = (name) => DETECTOR_HUMAN[name] || name;
 // Счётчик условий детектора по-русски: «условий 2/4» → «условий 2 из 4», дробь — через запятую.
-const detectorInputs = (s) => String(s || "").replace(/(\d+)\s*\/\s*(\d+)/g, "$1 из $2").replace(/(\d)\.(\d)/g, "$1,$2").replace(/\s*·\s*/g, ", ").trim();
+const detectorInputs = (s) => typo(String(s || "").replace(/(\d+)\s*\/\s*(\d+)/g, "$1 из $2").replace(/(\d)\.(\d)/g, "$1,$2").replace(/\s*·\s*/g, ", ").trim());
 
 // Русский счётный род: «5 пунктов», но «3,33 пункта» и «21 наблюдением». Мелочь, но без неё
 // сообщение выглядит машинным переводом.
@@ -1185,7 +1212,7 @@ function engineOf(alloc) {
 const bandOf = (score) => (!finite(score) ? "unknown" : score >= V1.bands.supportive ? "supportive" : score <= V1.bands.adverse ? "adverse" : "neutral");
 // Ступень режима без оверлеев — и цель, которую режим получил бы СЕЙЧАС, с действующими оверлеями.
 const rungOf = (eng, r) => (eng?.contract && finite(V1.ladder[r]) ? V1.ladder[r] : null);
-const rungNote = (eng, r) => (finite(rungOf(eng, r)) ? ` (ступень ${rungOf(eng, r)} %)` : "");
+const rungNote = (eng, r) => (finite(rungOf(eng, r)) ? ` (ступень ${rungOf(eng, r)}%)` : "");
 const targetOf = (eng, r) => (finite(eng?.ladder?.[r]) ? eng.ladder[r] : rungOf(eng, r));
 
 // Таблица режимов движка по полосам трёх направлений (макро, спрос, цикл) с гейтом оценки и
@@ -1248,7 +1275,7 @@ function recoveryConfirmations(eng) {
 // необязательное — без него строка остаётся без цены).
 function levelNote(eng, key) {
   const p = eng?.levels?.[key]?.price;
-  return finite(p) ? `; это цена ≈ ${fmtPlain(p / 1000, 1)} тыс. $` : "";
+  return finite(p) ? `; это цена ≈ $${fmtPlain(p / 1000, 1)}${NBSP}тыс.` : "";
 }
 const cadenceNote = (eng) => (finite(eng?.cadence_min) && eng.cadence_min >= 5 && eng.cadence_min <= 120 ? ` (≈ ${eng.cadence_min} мин)` : "");
 
@@ -1313,7 +1340,7 @@ function floorExitLine(eng) {
   const conf = recoveryConfirmations(eng);
   const anchor = `MVRV-перцентиль дойдёт до ${V1.recoveryAnchorPct} (сейчас ${fmtPlain(eng.mvrv_pct)}${levelNote(eng, "recovery_anchor")})`;
   const need = `подтверждений станет меньше ${V1.recoveryNeed}${conf ? ` из ${conf.of} (сейчас ${conf.n})` : ""}`;
-  return `Пол снимается одним снимком, если ${anchor} или ${need}.${finite(eng.base) ? ` Цель вернётся к ступени режима — ${eng.base} %` : ""}`;
+  return `Пол снимается одним снимком, если ${anchor} или ${need}.${finite(eng.base) ? ` Цель вернётся к ступени режима — ${eng.base}%` : ""}`;
 }
 function floorReturnLine(eng, lead = "Пол вернётся одним снимком") {
   const conf = recoveryConfirmations(eng);
@@ -1332,7 +1359,7 @@ function undoLines(eng, prevEng, dir, step) {
   const pct = fmtPlain(eng.mvrv_pct);
   if (eng.emergency) return ["Аварийный режим снимается первым снимком без нарушения; цель вернётся к ступени режима, который был до него, или ниже"];
   if (dir === 0) return [];
-  const back = finite(eng.base) ? ` Цель вернётся к ступени режима — ${eng.base} %` : "";
+  const back = finite(eng.base) ? ` Цель вернётся к ступени режима — ${eng.base}%` : "";
   if (dir > 0) {
     if (prevEng?.emergency) return ["Аварийный режим вернётся первым же снимком с нарушением целостности рынка"];
     if (eng.overlays.includes("recovery_floor")) return [floorExitLine(eng)];
@@ -1345,7 +1372,7 @@ function undoLines(eng, prevEng, dir, step) {
     // сразу) — тогда честнее общее правило, чем условие, которое таблица не подтверждает.
     if (!o) return [agrees && eng.state === "defensive" ? "Ниже этой ступени — только аварийный режим" : `Понижение принимается вторым снимком подряд${cadenceNote(eng)}`];
     const cross = o.threshold < 0 ? `опустится до ${fmtSigned(o.threshold, 0)}` : `опустится ниже ${fmtSigned(o.threshold, 0)}`;
-    return [`Понижение до ${o.pct} % — вторым снимком подряд${cadenceNote(eng)}, если оценка ${BLOCK_GEN[o.block]} ${cross} (сейчас ${fmtSigned(o.score)})`];
+    return [`Понижение до ${o.pct}% — вторым снимком подряд${cadenceNote(eng)}, если оценка ${BLOCK_GEN[o.block]} ${cross} (сейчас ${fmtSigned(o.score)})`];
   }
   if (eng.overlays.includes("euphoria_safety_cap")) return [`Потолок снимается одним снимком, если MVRV-перцентиль опустится ниже ${V1.euphoriaPct} (сейчас ${pct}${levelNote(eng, "euphoria")}).${back}`];
   const regimeFell = step.regime_from && step.regime_to && severity(step.regime_to) < severity(step.regime_from);
@@ -1360,7 +1387,7 @@ function undoLines(eng, prevEng, dir, step) {
     out.push(`Возврат уже на удержании: кандидат «${regimeWord(eng.candidate)}»${rungNote(eng, eng.candidate)}, не раньше ${ruMoment(until)}`);
   } else if (up) {
     const cross = up.threshold < 0 ? `выше ${fmtSigned(up.threshold, 0)}` : `не ниже ${fmtSigned(up.threshold, 0)}`;
-    out.push(`Возврат к ${up.pct} % — после ${V1.holdHours} часов удержания, не раньше ${earliest}: нужна оценка ${BLOCK_GEN[up.block]} ${cross} (сейчас ${fmtSigned(up.score)})`);
+    out.push(`Возврат к ${up.pct}% — после ${V1.holdHours} часов удержания, не раньше ${earliest}: нужна оценка ${BLOCK_GEN[up.block]} ${cross} (сейчас ${fmtSigned(up.score)})`);
   } else {
     out.push(`Возврат вверх — после ${V1.holdHours} часов удержания, не раньше ${earliest}`);
   }
@@ -1462,14 +1489,16 @@ function significance(i, hist) {
 // масштаб 1e6 и хвост « млн $». История показателя переводится в те же единицы — иначе модель
 // получала значение «0,98» и «историю» той же строки в долларах («68 076 … 90 582»).
 function labelScale(i) {
-  const m = fmtValue(i).replace(/[−–]/g, "-").match(/^\s*[+-]?\s*[$€]?\s*(\d+(?:[.,]\d+)?)(.*)$/);
-  if (!m || !finite(i.value_num)) return { scale: 1, unit: "" };
-  const shown = Number(m[1].replace(",", "."));
-  const unit = /^(\s|%)/.test(m[2]) ? m[2].trimEnd() : "";
-  if (!shown || !i.value_num) return { scale: 1, unit };
+  // доллар стоит перед числом («−$58 млн»): он уходит в cur и печатается перед числом истории
+  const m = fmtValue(i).replace(/[−–]/g, "-").match(/^\s*[+-]?\s*([$€]?)\s*(\d+(?:[.,]\d+)?)(.*)$/);
+  if (!m || !finite(i.value_num)) return { scale: 1, unit: "", cur: "" };
+  const shown = Number(m[2].replace(",", "."));
+  const unit = /^(\s|%)/.test(m[3]) ? m[3].trimEnd() : "";
+  const cur = m[1];
+  if (!shown || !i.value_num) return { scale: 1, unit, cur };
   const ratio = Math.abs(i.value_num) / shown;
-  for (const s of [1, 1e3, 1e6, 1e9, 1e12]) if (Math.abs(ratio / s - 1) < 0.06) return { scale: s, unit };
-  return { scale: 1, unit: "" };
+  for (const s of [1, 1e3, 1e6, 1e9, 1e12]) if (Math.abs(ratio / s - 1) < 0.06) return { scale: s, unit, cur };
+  return { scale: 1, unit: "", cur: "" };
 }
 
 // Короткая сводка недавней истории показателя — она уходит В КОНТЕКСТ модели, чтобы «насколько
@@ -1484,8 +1513,8 @@ function historyDigest(i, hist) {
   if (rows.length < 5) return "";
   // Панель, которая не говорит, та же ли величина в ряду, что на карточке (макро-панель), получает
   // историю как раньше, числами ряда: единица подписи к чужой величине была бы выдумкой.
-  const { scale, unit } = i.series_is_value === undefined ? { scale: 1, unit: "" } : labelScale(i);
-  const f = (v) => `${fmtPoint(v / scale)}${unit}`;
+  const { scale, unit, cur } = i.series_is_value === undefined ? { scale: 1, unit: "" } : labelScale(i);
+  const f = (v) => `${fmtPoint(v / scale).replace(/^(−?)/, `$1${cur || ""}`)}${unit}`;
   const vals = rows.map((r) => r[1]);
   const min = Math.min(...vals), max = Math.max(...vals);
   const last = rows.slice(-4).map(([t, v]) => `${ruDay(t)} ${f(v)}`).join(", ");
@@ -1524,14 +1553,14 @@ function allocationSteps(prevT, curT, from, to, feed) {
 function structureLine(s) {
   const k = changeKind(s);
   const regimeMoved = !!s.regime_from && !!s.regime_to && s.regime_from !== s.regime_to;
-  const step = finite(s.base_to) ? ` (ступень ${s.base_to} %)` : "";
-  const ladderDat = s.regime_to ? `ступени режима «${regimeWord(s.regime_to)}»${finite(s.base_to) ? ` (${s.base_to} %)` : ""}` : "ступени режима";
+  const step = finite(s.base_to) ? ` (ступень ${s.base_to}%)` : "";
+  const ladderDat = s.regime_to ? `ступени режима «${regimeWord(s.regime_to)}»${finite(s.base_to) ? ` (${s.base_to}%)` : ""}` : "ступени режима";
   if (k.off.includes("emergency_override") || s.regime_from === "emergency") return `Аварийный режим снят: цель вернулась к ${ladderDat}`;
   const on = k.on.find((o) => OVERLAY_WORD[o]), off = k.off.find((o) => OVERLAY_WORD[o]);
   const moved = regimeMoved ? `режим «${regimeWord(s.regime_from)}» → «${regimeWord(s.regime_to)}»${step}` : "";
   if (on) {
     const over = on === "euphoria_safety_cap" ? "при режиме" : "поверх режима";
-    return `Включён ${OVERLAY_WORD[on]} ${s.to} % ${s.regime_to ? `${over} «${regimeWord(s.regime_to)}»${step}` : ""}`.trim() + (regimeMoved ? `; режим при этом сменился с «${regimeWord(s.regime_from)}»` : "");
+    return `Включён ${OVERLAY_WORD[on]} ${s.to}% ${s.regime_to ? `${over} «${regimeWord(s.regime_to)}»${step}` : ""}`.trim() + (regimeMoved ? `; режим при этом сменился с «${regimeWord(s.regime_from)}»` : "");
   }
   if (off) return regimeMoved ? `Снят ${OVERLAY_WORD[off]}, ${moved}` : `Снят ${OVERLAY_WORD[off]}: цель вернулась к ${ladderDat}`;
   return capFirst(moved);
@@ -1682,25 +1711,25 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
     const since = Date.parse(prevState.pause?.since || "");
     const ovl = eng.overlays.find((o) => OVERLAY_WORD[o]);
     causes.push(`Решение возобновлено после паузы${finite(since) ? ` (с ${ruMoment(since)})` : ""}`);
-    if (!emergencyOn) causes.push(`Режим «${regimeWord(eng.state)}»${finite(eng.base) ? ` (ступень ${eng.base} %)` : ""}${ovl ? `, действует ${OVERLAY_WORD[ovl]} ${to} %` : ""}`);
+    if (!emergencyOn) causes.push(`Режим «${regimeWord(eng.state)}»${finite(eng.base) ? ` (ступень ${eng.base}%)` : ""}${ovl ? `, действует ${OVERLAY_WORD[ovl]} ${to}%` : ""}`);
     const rule = eng.candidate === eng.state ? ruleLine(eng) : "";
     if (rule && !emergencyOn) causes.push(`Сейчас: ${rule}`);
   }
   if (steps.length > 1) {
     // Бот пропустил такты: между запусками цель прошла несколько шагов. Каждый назван — иначе
     // двухшаговое «80 → 45 → 5» читалось бы как одно «80 → 5», а круг «20 → 80 → 20» не оставлял следа.
-    causes.push(`Путь: ${[`${from} %`, ...steps.map((s) => `${s.to} % (${ruMoment(s.t)})`)].join(" → ")}`);
+    causes.push(`Путь: ${[`${from}%`, ...steps.map((s) => `${s.to}% (${ruMoment(s.t)})`)].join(" → ")}`);
     for (const s of steps.slice(0, -1)) {
       const kind = changeKind(s);
       const on = kind.on.find((o) => OVERLAY_WORD[o]), off = kind.off.find((o) => OVERLAY_WORD[o]);
       const what = on ? `включён ${OVERLAY_WORD[on]}` : off ? `снят ${OVERLAY_WORD[off]}`
         : s.regime_from && s.regime_to && s.regime_from !== s.regime_to ? `режим «${regimeWord(s.regime_from)}» → «${regimeWord(s.regime_to)}»` : "смена цели";
-      causes.push(`${s.from} % → ${s.to} % — ${what}${s.cause?.text ? ` (${s.cause.text})` : ""}`);
+      causes.push(`${s.from}% → ${s.to}% — ${what}${s.cause?.text ? ` (${s.cause.text})` : ""}`);
     }
   }
   // что изменилось
   if (emergencyOn) {
-    causes.push(`Сработал аварийный переключатель${eng.override ? `: ${eng.override.toLowerCase()}` : ""}${eng.integrity_inputs ? ` (${detectorInputs(eng.integrity_inputs)})` : ""}. Цель обнулена независимо от режима`);
+    causes.push(`Сработал аварийный переключатель${eng.override ? `: ${typo(eng.override.toLowerCase())}` : ""}${eng.integrity_inputs ? ` (${detectorInputs(eng.integrity_inputs)})` : ""}. Цель обнулена независимо от режима`);
   } else if (!resumed) {
     let what = structureLine(last);
     if (what && regimeMoved && !emergencyOff && !["insufficient", "emergency"].includes(last.regime_from)) {
@@ -1777,9 +1806,9 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
   const next = pendingDowngrade(eng, to);
   if (eng.contract) {
     if (emergencyOn) todo.push("Понижение — сразу: убрать риск и ждать нормализации");
-    else if (dir > 0) todo.push(next ? `Повышение — траншами со следующей сессии; к ней цель может снизиться: кандидат уже «${regimeWord(next.regime)}» (${next.pct} %)` : "Повышение — траншами со следующей сессии");
-    else if (dir < 0) todo.push(next ? `Понижение — сразу. Кандидат уже «${regimeWord(next.regime)}»: следующий шаг до ${next.pct} % подтвердится ближайшим снимком` : "Понижение — сразу");
-    else todo.push(`Действий не требуется: цель снова ${to} %`);
+    else if (dir > 0) todo.push(next ? `Повышение — траншами со следующей сессии; к ней цель может снизиться: кандидат уже «${regimeWord(next.regime)}» (${next.pct}%)` : "Повышение — траншами со следующей сессии");
+    else if (dir < 0) todo.push(next ? `Понижение — сразу. Кандидат уже «${regimeWord(next.regime)}»: следующий шаг до ${next.pct}% подтвердится ближайшим снимком` : "Понижение — сразу");
+    else todo.push(`Действий не требуется: цель снова ${to}%`);
   }
 
   return {
@@ -1788,11 +1817,12 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
     // смены в течение семи суток глушился: из 20 → 80 → 20 → 80 → 20 доходили два сообщения из
     // четырёх. Метка — время шага, а не запуска: повторный прогон после сбоя даёт тот же ключ.
     key: found.source === "diff" ? `alloc:${from}->${to}@base:${base}` : `alloc:${from}->${to}@${new Date(last.t).toISOString()}`,
-    emoji: emergencyOn ? "🚨" : undefined,
     title,
+    // время события в подвале — момент самого шага цели, а не прогона бота
+    at: last.t,
     before: dir === 0 ? "" : `${from}%`,
     after: dir === 0 ? "" : `${to}%`,
-    detail: [finite(last.price) ? `BTC ${fmtUsd(last.price)}` : "", ruMoment(last.t)].filter(Boolean).join(" · "),
+    detail: finite(last.price) ? `BTC ${fmtUsd(last.price)}` : "",
     causes,
     todo,
     undo,
@@ -1823,7 +1853,7 @@ function pauseEvent(panel, base, lastPct) {
     before: "",
     after: "",
     detail: `${hidden ? "Панель скрыла цель" : "Цель не опубликована"}: ${why}`,
-    todo: [`Новых действий не предпринимать. Последняя цель — ${lastPct} %`],
+    todo: [`Новых действий не предпринимать. Последняя цель — ${lastPct}%`],
     undo: [hidden ? "Цель вернётся первым же снимком, в котором панель снова её покажет" : "Цель вернётся первым же снимком, в котором решение опубликовано"],
     note: "",
   };
@@ -1852,7 +1882,7 @@ function holdResetEvent({ panel, prevState, prevEng, why, staleMoves, staleIds, 
   const lines = [
     `Причина: по свежим данным режим ${eng.candidate === eng.state ? "снова" : "уже"} «${regimeWord(eng.candidate)}»${rule ? `: ${rule}` : ""}${moved.text ? `; сдвинулся показатель ${moved.text}` : ""}`,
     again ? `Отсчёт начат заново для кандидата «${regimeWord(eng.candidate)}»${step(eng.candidate)}: не раньше ${ruMoment(Date.parse(eng.hold_until))}`
-      : down ? `Кандидат хуже текущего режима: понижение до ${down.pct} % подтвердится ближайшим снимком`
+      : down ? `Кандидат хуже текущего режима: понижение до ${down.pct}% подтвердится ближайшим снимком`
       : `Отсчёт ${V1.holdHours} часов начнётся заново, когда кандидат вернётся`,
   ];
   return {
@@ -1862,7 +1892,7 @@ function holdResetEvent({ panel, prevState, prevEng, why, staleMoves, staleIds, 
     title: `Повышение доли ${panel.assetWord || "рискового актива"} откладывается`,
     before: "",
     after: "",
-    detail: `Кандидат «${regimeWord(prevEng.candidate)}»${step(prevEng.candidate)} продержался ${fmtPlain(heldH)} ч из ${V1.holdHours} и сорван ${ruMoment(eng.t)}. Цель остаётся ${panel.allocation.pct} %`,
+    detail: `Кандидат «${regimeWord(prevEng.candidate)}»${step(prevEng.candidate)} продержался ${fmtPlain(heldH)} ч из ${V1.holdHours} и сорван ${ruMoment(eng.t)}. Цель остаётся ${panel.allocation.pct}%`,
     lines,
     note: "",
   };
@@ -1934,12 +1964,11 @@ function btcDecisionEvents({ prevState, panel, why, staleMoves, staleIds, detect
     if (resumed && prevState.pause?.announced) {
       out.push({
         kind: "pause",
-        emoji: "▶️",
         key: `pause:off@base:${base}`,
         title: `Решение о доле ${panel.assetWord || "рискового актива"} возобновлено`,
         before: "",
         after: "",
-        detail: `Цель прежняя — ${curAlloc.pct} %`,
+        detail: `Цель прежняя — ${curAlloc.pct}%`,
         note: "",
       });
     }
@@ -1979,10 +2008,10 @@ function warningEvents(prevState, panel) {
   if (!panel.warnings) return []; // снимок прежней формы: поля нет — нечего ни объявлять, ни снимать
   const now = Date.parse(panel.generated_at || "") || Date.now();
   const { appeared, cleared } = trackWarnings(prevState.warnings, panel.warnings, now);
-  const line = (w) => `${w.text}${w.affects?.length ? ` — затронуты: ${w.affects.map((id) => `«${humanTitle(id)}»`).join(", ")}` : ""}`;
+  const line = (w) => `${typo(w.text)}${w.affects?.length ? ` — затронуты: ${w.affects.map((id) => `«${humanTitle(id)}»`).join(", ")}` : ""}`;
   const out = [];
   if (appeared.length) out.push({ kind: "quality", key: `warn:on:${appeared.map((w) => w.key).sort().join("+")}@${appeared[0].since}`, title: "Предупреждение о данных", before: "", after: "", detail: "", lines: appeared.map(line), note: "" });
-  if (cleared.length) out.push({ kind: "quality", key: `warn:off:${cleared.map((w) => w.key).sort().join("+")}@${cleared[0].gone_since || ""}`, title: "Предупреждение о данных снято", before: "", after: "", detail: "", lines: cleared.map((w) => w.text), note: "" });
+  if (cleared.length) out.push({ kind: "quality", key: `warn:off:${cleared.map((w) => w.key).sort().join("+")}@${cleared[0].gone_since || ""}`, title: "Предупреждение о данных снято", before: "", after: "", detail: "", lines: cleared.map((w) => typo(w.text)), note: "" });
   return out;
 }
 
@@ -1995,7 +2024,11 @@ function diff(prevState, panel) {
   let dust = 0;
   const seenRevised = prevState.revised_points || {};
   const prevInd = prevState.indicators || {};
-  const shownMap = prevState.shown || {};
+  // Показанное прежней версией бота («+176 млн $») — к записи стандарта: иначе оно не совпало бы с
+  // той же подписью, напечатанной сейчас («+$176 млн»), и вышло бы ложным «было → стало».
+  const shownMap = Object.fromEntries(Object.entries(asObject(prevState.shown) || {}).map(([id, r]) => [id, asObject(r) && typeof r.v === "string" ? { ...r, v: typo(r.v) } : r]));
+  // «текущий год» дат сообщения — год этого снимка (см. REF_MS)
+  REF_MS = Date.parse(panel.generated_at || "") || null;
 
   // Изменения внутри панели (вердикт, зоны показателей, детекторы) сами по себе НЕ рассылаются:
   // это внутренняя кухня. Они собираются как объяснение к единственному внешнему событию о самой
@@ -2158,7 +2191,7 @@ function diff(prevState, panel) {
             name: (span ? `${ruDay(c.t)} · ` : "") + slot.names.join(" · "),
             before,
             after,
-            delta: finite(c.pct) ? `${c.pct > 0 ? "+" : "−"}${Math.abs(c.pct).toFixed(Math.abs(c.pct) < 1 ? 2 : 1).replace(".", ",")}%` : "",
+            delta: finite(c.pct) ? `${c.pct > 0 ? "+" : MINUS}${Math.abs(c.pct).toFixed(Math.abs(c.pct) < 1 ? 2 : 1).replace(".", ",")}%` : "",
           });
         }
       }
@@ -2233,13 +2266,13 @@ function diff(prevState, panel) {
     const refDay = shown?.d || was.observed_at;
     const gapDays = refDay && i.observed_at ? (Date.parse(i.observed_at) - Date.parse(refDay)) / 864e5 : 0;
     const usual = seriesGapDays(i.points) ?? 1;
-    const beforeText = gapDays > Math.max(3, 2 * usual) + 0.01 ? `${before} (за ${ruDay(Date.parse(refDay)).slice(0, 5)})` : before;
+    const beforeText = gapDays > Math.max(3, 2 * usual) + 0.01 ? `${before} (за ${ruDay(Date.parse(refDay))})` : before;
     const marks = [];
     // Видимый маркер значимости: он и есть ответ на «насколько это существенно», не зависящий
     // от доступности модели.
     if (flipped) marks.push(toMinus ? "смена на отрицательные значения" : "смена на положительные значения");
     else if (sig?.notable && !update) marks.push(sig.sinceLabel ? `сильнейшее движение с ${sig.sinceLabel}` : "заметное движение");
-    if (dict.lvl && i.delta) marks.push(`${dict.lvl} ${String(i.delta).replace(/(\d)\.(\d)/g, "$1,$2")}`);
+    if (dict.lvl && i.delta) marks.push(`${dict.lvl} ${typo(String(i.delta).replace(/(\d)\.(\d)/g, "$1,$2"))}`);
     const release = releaseOf(i);
     const key = `${release}|${i.observed_at}`;
     if (!groups.has(key)) groups.set(key, { release, observed_at: i.observed_at, moves: [], plain: [], history: [], updates: 0 });
@@ -2294,7 +2327,7 @@ function diff(prevState, panel) {
     console.log(`смена источника ряда (не пересмотр, в рассылку не идёт): ${switched.length}`);
     for (const s of switched) console.log(`  · ${s}`);
   }
-  if (dust) console.log(`пересчёт истории меньше ${String(REVISION_MIN_PCT).replace(".", ",")} % (в рассылку не идёт): точек ${dust}`);
+  if (dust) console.log(`пересчёт истории меньше ${String(REVISION_MIN_PCT).replace(".", ",")}% (в рассылку не идёт): точек ${dust}`);
 
   // ---- Доля капитала: что стало, почему и что это отменит ----
   if (curAlloc?.engine) {
@@ -2337,6 +2370,8 @@ function diff(prevState, panel) {
   const kept = events.filter((ev) => KIND_ORDER.includes(ev.kind));
   if (kept.length !== events.length) console.log(`тип события выключен в KIND_ORDER (в рассылку не идёт): ${events.length - kept.length}`);
   kept.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+  // Время события для подвала: своё у смены доли (момент шага), у остальных — момент снимка.
+  for (const ev of kept) if (!finite(ev.at)) ev.at = REF_MS ?? Date.now();
   return kept;
 }
 
@@ -2347,10 +2382,26 @@ const esc = (s) =>
 
 function fmtValue(i) {
   // Панели форматируют дробную часть по-разному (BTC-панель — точкой, макро — запятой), и в
-  // соседних строках одного сообщения это выглядело неряшливо. Приводим к русской записи,
-  // не трогая ничего, кроме разделителя между цифрами.
+  // соседних строках одного сообщения это выглядело неряшливо. Приводим к русской записи:
+  // десятичная запятая здесь, минус, доллар и пробелы — в typo().
   const v = sharpen(String(i.value ?? "").trim().replace(/(\d)\.(\d)/g, "$1,$2"), i.value_num);
-  return i.unit && !v.includes(i.unit) ? `${v} ${i.unit}` : v;
+  return typo(i.unit && !v.includes(i.unit) ? `${v} ${i.unit}` : v);
+}
+
+// Подписи и строки, которые пишет сборщик («-175 млн $», «−44 тыс. BTC», «0,5 %»), — к записи
+// стандарта: типографский минус, доллар перед числом («−$175 млн»), неразрывный пробел перед
+// тыс./млн/млрд/трлн и б.п./п.п. и в разрядах, процент слитно. Повторный проход ничего не меняет:
+// так же приводится и «было», запомненное прежней версией бота (state.shown), — иначе первое
+// сообщение после выкладки сравнило бы «+176 млн $» с «+$176 млн» как разные значения.
+// Десятичную точку функция не трогает: в чужом тексте она бывает и в датах, и в «H.4.1».
+function typo(s) {
+  return String(s ?? "")
+    .replace(/(^|[\s(«"/:;=≈~])[-–](?=\$?\d)/g, `$1${MINUS}`)
+    .replace(/(?<![\d,])(\d{1,3})((?: \d{3})+)(?!\d)/g, (m, a, b) => a + b.replace(/ /g, NBSP))
+    .replace(/(?<![\d, ])(\d) (\d{3})(?![\d ])/g, "$1$2")
+    .replace(/(\d) (тыс\.|млн|млрд|трлн|б\.п\.|п\.п\.)/g, `$1${NBSP}$2`)
+    .replace(/([+−]?)(\d[\d ]*(?:,\d+)?)((?: (?:тыс\.|млн|млрд|трлн))?)[  ]\$(?![A-Za-z0-9])/g, "$1$$$2$3")
+    .replace(/(\d)[  ]%/g, "$1%");
 }
 
 // Сжатая подпись с одной значащей цифрой («+4 млрд $») прячет движение: 3,44 → 3,54 читалось как
@@ -2426,21 +2477,34 @@ function templateComment(ev) {
   if (ev.kind === "revision") {
     return "Первоисточник переписал уже опубликованные данные задним числом: картина прошлого изменилась, хотя новых событий не происходило.";
   }
-  // Разбора от модели нет — значит и осмысления не будет. Честнее дать короткую справку о
-  // смысле показателя и прямо сказать, что разбор недоступен, чем выдавать словарное определение
-  // за анализ. Формулировка «Что это за показатель» из первой версии была именно этой ошибкой:
-  // читатель ждал вывода, а получал определение, которое и так знает.
+  // Разбора от модели нет — значит и осмысления не будет. Остаётся короткая справка о смысле
+  // показателя: шаблон идёт курсивом и без «💬» (это знак ИИ-разбора), поэтому за анализ он себя не
+  // выдаёт и оговорка «разбор недоступен» ему не нужна. Нечего сказать — строки нет вовсе.
   const plain = (ev.plain || [])[0];
   const notable = (ev.moves || []).some((m) => /движение/.test(m.delta || ""));
-  const tail = notable ? " Движение для этого показателя нерядовое." : "";
-  return plain
-    ? `${plain}.${tail} (Разбор недоступен — комментатор не ответил.)`
-    : `Вышли новые данные первоисточника.${tail} (Разбор недоступен — комментатор не ответил.)`;
+  const tail = notable ? "Движение для этого показателя нерядовое." : "";
+  // имя показателя уже стоит в строке движения — справка начинается с самого смысла
+  const cut = plain ? plain.indexOf(" — ") : -1;
+  const gist = cut >= 0 ? plain.slice(cut + 3) : plain || "";
+  return [gist ? `${capFirst(gist)}.` : "", tail].filter(Boolean).join(" ");
 }
 
-function renderMessage(ev, comment) {
-  const k = KIND[ev.kind] || { emoji: "•", label: ev.kind };
-  const head = `${ev.emoji || k.emoji} <b>${esc(ev.title)}</b>`;
+// Пометка панели — первым словом заголовка: 837 и 838 пишут одним ботом. Имя — как на карточке хаба.
+const PANEL_TAG = "Bitcoin";
+const PANEL_URL = "https://tzi-838.pages.dev/";
+// Сообщение, ушедшее позже события на столько, получает строку «⏳ С опозданием на …»: бот
+// пропустил прогоны (простой Actions) или дошёл до шага цели по журналу монитора.
+const LATE_MS = 60 * 60e3;
+// Подвал — одна строка: ссылка на панель и время события по Москве.
+const footer = (ms) => `<a href="${PANEL_URL}">Открыть панель</a> · ${ruMoment(finite(ms) ? ms : Date.now())}`;
+const headLine = (emoji, title) => `${emoji} <b>${esc(PANEL_TAG)} · ${esc(title)}</b>`;
+
+// comment — ИИ-разбор (идёт после «💬»); opts.note — шаблон на его месте (курсивом, без «💬»);
+// opts.sentAt — момент отправки, по нему ставится строка об опоздании.
+function renderMessage(ev, comment, { note = "", sentAt = null } = {}) {
+  const k = KIND[ev.kind] || { emoji: "ℹ️", label: ev.kind };
+  const head = headLine(k.emoji, ev.title);
+  const late = finite(sentAt) && finite(ev.at) && sentAt - ev.at >= LATE_MS ? `⏳ С опозданием на ${fmtSpan((sentAt - ev.at) / 3600e3)}` : "";
   const move = ev.before || ev.after ? `${esc(ev.before || "—")} → <b>${esc(ev.after || "—")}</b>` : "";
   const moves = (ev.moves || [])
     .map((m) => `• ${esc(m.name)}: ${esc(m.before)} → <b>${esc(m.after)}</b>${m.delta ? ` <i>(${esc(m.delta)})</i>` : ""}`)
@@ -2462,6 +2526,7 @@ function renderMessage(ev, comment) {
   // списка: под правилом «не больше трёх строк» она выпадала в половине случаев.
   const lines = [
     head,
+    late,
     move,
     moves,
     ev.detail ? esc(ev.detail) : "",
@@ -2471,12 +2536,15 @@ function renderMessage(ev, comment) {
     undo ? `\n<b>Что отменит</b>\n${undo}` : "",
     stability ? `\n<b>Насколько это устойчиво</b>\n${stability}` : "",
   ].filter(Boolean);
-  if (ev.indicator?.observed_at) lines.push(`<i>данные на ${esc(ev.indicator.observed_at)}${ev.indicator.source ? " · " + esc(ev.indicator.source) : ""}</i>`);
-  if (comment) {
-    lines.push("");
-    lines.push("💬 " + esc(comment));
-  }
-  return clipTelegram(lines.join("\n"));
+  // дата пересмотра уже стоит в строке события; второй строкой — только источник
+  if (ev.indicator?.source) lines.push(`<i>источник: ${esc(sourceLabel(ev.indicator.source))}</i>`);
+  // Типографика разбора — та же, что у остального сообщения («45 %» → «45%», «-0,5» → «−0,5»):
+  // смысл и числа ответа проверены блоком 5б, здесь меняются только пробелы и знаки.
+  if (comment) lines.push("", "💬 " + esc(typo(comment)));
+  else if (note) lines.push("", `<i>${esc(note)}</i>`);
+  // Подвал не срезается: длинное тело режется по границе строки до него.
+  const tail = footer(ev.at);
+  return `${clipTelegram(lines.join("\n"), TG_TEXT_LIMIT - tail.length - 2)}\n\n${tail}`;
 }
 
 /* ================================== 5. КОММЕНТАРИИ ================================== */
@@ -2535,8 +2603,8 @@ function llmContext(panel) {
     ctx.decision_now = [
       finite(eng.price) ? `цена биткоина ${fmtUsd(eng.price)}` : "",
       `снимок ${ruMoment(eng.t)}`,
-      panel.allocation.paused ? "решение на паузе, цель не опубликована" : `доля биткоина ${panel.allocation.pct} %`,
-      eng.state ? `режим «${regimeWord(eng.state)}»${finite(eng.base) ? ` (ступень ${eng.base} %)` : ""}` : "",
+      panel.allocation.paused ? "решение на паузе, цель не опубликована" : `доля биткоина ${panel.allocation.pct}%`,
+      eng.state ? `режим «${regimeWord(eng.state)}»${finite(eng.base) ? ` (ступень ${eng.base}%)` : ""}` : "",
       eng.candidate && eng.candidate !== eng.state ? `кандидат «${regimeWord(eng.candidate)}»${finite(hold) ? `, на удержании до ${ruMoment(hold)}` : ""}` : "кандидат совпадает с режимом",
       ovl.length ? `оверлей: ${ovl.join(", ")}` : "оверлеев нет",
     ].filter(Boolean).join("; ");
@@ -3668,14 +3736,14 @@ function appendTrend(prev, panel) {
 function pingMessage(panel) {
   const det = (panel.detectors || []).filter((d) => d.state !== "calm");
   return [
-    "✅ <b>Проверка связи</b>",
+    headLine("ℹ️", "Проверка связи"),
     "Бот подключён, уведомления настроены.",
     "",
-    `Сейчас на панели: <b>${esc(panel.verdict?.word || "—")}</b>`,
+    `Сейчас: <b>${esc(panel.verdict?.word || "—")}</b>`,
     panel.verdict?.extra ? esc(panel.verdict.extra) : "",
-    panel.allocation && finite(panel.allocation.pct) ? `Доля ${panel.assetWord || "рискового актива"} сейчас: <b>${panel.allocation.pct}%</b>` : "",
+    panel.allocation && finite(panel.allocation.pct) ? `Доля ${panel.assetWord || "рискового актива"}: <b>${fmtPct(panel.allocation.pct)}</b>` : "",
     `Показателей под наблюдением: ${(panel.indicators || []).length}`,
-    det.length ? `Детекторы не в покое: ${esc(det.map((d) => `${d.name} (${DET_LABEL[d.state] || d.state})`).join(", "))}` : "Все детекторы спокойны",
+    det.length ? `Сигналы риска не в покое: ${esc(det.map((d) => `${detectorHuman(d.name)} (${DET_LABEL[d.state] || d.state})`).join(", "))}` : "Сигналы риска спокойны",
   ]
     .filter(Boolean)
     .join("\n");
@@ -3723,7 +3791,8 @@ async function main(io = {}) {
         ? `Комментатор работает (${LAST_MODEL || resolveModel()}). Пример разбора:\n<i>${esc(got[0].slice(0, 600))}</i>`
         : `Комментатор НЕ ответил (${resolveModel()}) — сообщения пойдут без разбора, причина в логе прогона`;
     }
-    const text = `${pingMessage(panel)}\n\n${verdictLine}`;
+    REF_MS = Date.parse(panel.generated_at || "") || null;
+    const text = `${pingMessage(panel)}\n\n${verdictLine}\n\n${footer(Date.now())}`;
     if (DRY) console.log(text.replace(/<[^>]+>/g, ""));
     else await sendTelegram(text); // обрезку под предел Telegram делает сам транспорт
     console.log(DRY ? "пинг: dry-run, ничего не отправлено" : "пинг отправлен");
@@ -3743,6 +3812,7 @@ async function main(io = {}) {
     return;
   }
   const now = Date.now();
+  REF_MS = Date.parse(panel.generated_at || "") || null;
   const sentIndex = pruneSent(prev.sent, now);
   let revisedSeen = prev.revised_points || {};
   let shownSeen = prev.shown || {};
@@ -3783,6 +3853,7 @@ async function main(io = {}) {
       queue = [{
         kind: "service",
         key: `selftest@${selftestAlertAt}`,
+        at: now,
         title: "Тесты уведомлений не проходят",
         before: "",
         after: "",
@@ -3828,8 +3899,8 @@ async function main(io = {}) {
     console.log(`комментарии: ${got ? `модель (${LAST_MODEL || resolveModel()})` : "шаблон"}`);
     for (let i = 0; i < capped.length; i++) {
       const ev = capped[i];
-      const comment = llm[i] || templateComment(ev);
-      const text = renderMessage(ev, comment);
+      // разбор модели — после «💬»; на месте отказа или брака — шаблон курсивом
+      const text = renderMessage(ev, llm[i], { note: llm[i] ? "" : templateComment(ev), sentAt: now });
       if (dry) {
         const plain = text
           .replace(/<[^>]+>/g, "")
@@ -3882,4 +3953,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, rememberShown, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, guardCheck, gParseBlocks, guardReview, guardRecord, guardOpsTick, guardWeekLine, guardWeekOf, guardAccessProblem, engineAgrees, trackWarnings, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER };
+export { fmtNum, ruMoment, typo, PANEL_TAG, PANEL_URL, LLM_SYSTEM, diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, rememberShown, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, guardCheck, gParseBlocks, guardReview, guardRecord, guardOpsTick, guardWeekLine, guardWeekOf, guardAccessProblem, engineAgrees, trackWarnings, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER };
