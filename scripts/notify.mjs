@@ -8,7 +8,8 @@
 // Файл вырос из общего для двух панелей (BTC и макро) и по-прежнему определяет панель по форме
 // данных, но копии разошлись: в макро-панели он с 02.10.2026 ещё и ведёт журнал решений, здесь
 // 13.10.2026 переписан по аудиту. Между репозиториями файл НЕ копируется — общие исправления
-// переносятся руками, функция за функцией, с прогоном тестов той панели.
+// переносятся руками, функция за функцией, с прогоном тестов той панели. Исключение одно —
+// блок «ТРАНСПОРТ К CLAUDE» (раздел 5а): он в обеих копиях побайтово одинаков.
 //
 // Режимы источника (NOTIFY_SOURCE):
 //   json  — docs/snapshot.json уже содержит посчитанные карточки (BTC-панель);
@@ -22,8 +23,14 @@
 //   NOTIFY_SNAPSHOT=<путь>  — снимок для режима json (по умолчанию docs/snapshot.json);
 //   NOTIFY_PAGE_DIR=<путь>  — каталог страницы (docs) для локальной подачи: свежее и надёжнее;
 //   NOTIFY_PAGE=<url>       — опубликованный адрес страницы (резерв, отстаёт на цикл публикации);
-//   OPENROUTER_KEY          — ключ для комментариев LLM; без него комментарий берётся из шаблона;
-//   NOTIFY_MODEL            — модель комментатора (по умолчанию бесплатная nemotron);
+//   ANTHROPIC_API_KEY       — ключ API Anthropic для разбора; без него комментарий берётся из шаблона;
+//   NOTIFY_MODEL            — модель комментатора (по умолчанию claude-sonnet-5-5);
+//   NOTIFY_LLM_EFFORT       — глубина размышлений модели (по умолчанию xhigh);
+//   NOTIFY_LLM_DAILY_USD    — потолок расходов на разбор за московские сутки, $ (по умолчанию 1.0;
+//                             0 — разбор выключен); расход копится в состоянии, поле llm_spend;
+//   NOTIFY_LLM_TIMEOUT_MS   — срок одного разбора вместе с повторами SDK (по умолчанию 150000);
+//   NOTIFY_LLM_MAX_RETRIES  — повторы SDK при перегрузке и сбоях сервера (по умолчанию 2);
+//   NOTIFY_DECISION_LLM_MS  — срок разбора, когда в пачке есть сообщение о доле (по умолчанию 60000);
 //   NOTIFY_MAX=<n>          — предохранитель: больше n событий за прогон → отправляется сводка.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -38,32 +45,14 @@ const PAGE_URL = process.env.NOTIFY_PAGE || "";
 const PAGE_DIR = process.env.NOTIFY_PAGE_DIR || "";
 const MAX_EVENTS = Number(process.env.NOTIFY_MAX || 40);
 const SEND_GAP_MS = Number(process.env.NOTIFY_GAP_MS || 3500); // Telegram: ~20 сообщений/мин в чат
-// Комментатор обязан быть БЕСПЛАТНЫМ. Модель по умолчанию — та же, что уже судит новости на
-// макро-панели. Переопределить её можно (vars.NOTIFY_MODEL), но платный вариант требует явного
-// NOTIFY_ALLOW_PAID=1: иначе одна опечатка в переменной начала бы тихо жечь деньги на каждом
-// прогоне, а прогонов до сотни в сутки.
-const FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
-// Бесплатные модели живут на общих мощностях и регулярно отвечают «ResourceExhausted: Worker
-// local total request limit reached» — именно это оставило боевое уведомление без разбора.
-// Поэтому не одна модель, а ЦЕПОЧКА, и намеренно у РАЗНЫХ провайдеров: перегрузка NVIDIA не
-// должна выключать разбор целиком. Все до единой — с суффиксом :free.
-// КАТАЛОГ ЖИВОЙ, и модели из него исчезают. «inclusionai/ling-3.0-flash:free» отдаёт 404 —
-// то есть последний рубеж цепочки был мёртв, и заметить это можно было только в тот день,
-// когда первые три окажутся перегружены разом. Пришедший ему на смену «ling-3.0-tiny»
-// разметку ответа игнорирует вовсе. Замену проверять живым запросом, а не по названию.
-const FREE_CHAIN = [
-  FREE_MODEL,                          // NVIDIA, самая крупная — первый выбор по качеству
-  "google/gemma-4-31b-it:free",        // Google
-  "openai/gpt-oss-20b:free",           // OpenAI OSS
-  "poolside/laguna-s-2.1:free",        // Poolside, последний рубеж
-];
-const resolveModel = () => (process.env.NOTIFY_MODEL || "").trim() || FREE_MODEL;
-const paidAllowed = () => process.env.NOTIFY_ALLOW_PAID === "1";
-// Если модель задана явно — уважаем выбор и цепочку не подставляем.
-const modelChain = () => ((process.env.NOTIFY_MODEL || "").trim() ? [resolveModel()] : FREE_CHAIN);
-const LLM_TIMEOUT_MS = Number(process.env.NOTIFY_LLM_TIMEOUT_MS || 90000);
-// Сколько всего ждать разбор, когда в пачке есть сообщение о доле. Понижение исполняется сразу,
-// и сообщение о нём не должно стоять в очереди за четырьмя моделями по полторы минуты.
+// Комментатор — Claude Sonnet 5.5 через SDK Anthropic (раздел 5а, общий с макро-панелью). Своё у
+// этой панели — суточный потолок расходов на разбор по умолчанию и срок для сообщения о доле.
+// Потолок ниже, чем у макро-панели: здесь ~5 сообщений в сутки и запрос к модели уходит только из
+// прогона, где есть события, которым нужен разбор.
+const LLM_DAILY_USD_DEFAULT = 1.0;
+// Сколько всего ждать разбор, когда в пачке есть сообщение о доле. Понижение исполняется сразу, и
+// сообщение о нём не должно ждать модель дольше минуты (обычный срок разбора — LLM_TIMEOUT_MS,
+// 150 с). Срок общий для попытки и повторов SDK; вышел — уходит шаблон из записи решения.
 const DECISION_LLM_BUDGET_MS = Number(process.env.NOTIFY_DECISION_LLM_MS || 60000);
 
 const finite = (x) => typeof x === "number" && Number.isFinite(x);
@@ -2500,8 +2489,8 @@ const LLM_SYSTEM = `Ты — независимый экономический �
 ТВОЯ ЗАДАЧА — осмыслить движение, а не пересказать его:
 · что за ним стоит по существу и почему оно могло произойти;
 · насколько оно значительно на фоне последних месяцев (динамика передана в recent_history);
-· как это вяжется с тем, что сейчас происходит в мировой экономике и на смежных рынках — соседние показатели переданы в market_now;
-· к чему это ведёт дальше и за чем имеет смысл следить.
+· как это вяжется с соседними показателями из market_now — другой картины текущей обстановки у тебя нет;
+· какие сценарии из этого следуют и по каким признакам их можно будет различить.
 
 Ты СВОБОДЕН рассуждать, связывать факты и делать выводы. Рядовое движение назови рядовым одной фразой и не раздувай. Важное — объясни, почему оно важное, и доведи мысль до вывода.
 
@@ -2512,8 +2501,12 @@ const LLM_SYSTEM = `Ты — независимый экономический �
 · Приводить числа, которых нет во входных данных. Каждое число в ответе должно быть взято из переданного тебе (округлять можно); ответ с посторонним числом отбрасывается целиком.
 · Канцелярит, дисклеймеры, «важно отметить», «стоит подчеркнуть», «в заключение».
 · Приказы «покупайте / продавайте» — объясняй механику и последствия.
+· Утверждать, куда пойдёт рынок, и выдавать догадку о намерениях участников за факт. Говори «может означать», «если …, то …» и называй, что подтвердит или опровергнет версию.
+· Упоминать решения, заявления и события, которых нет во входных данных: твои знания о текущих событиях могли устареть.
 
 ЕСЛИ СОБЫТИЕ — ИЗМЕНЕНИЕ ДОЛИ КАПИТАЛА. Причина, действие и условие отмены уже посчитаны и переданы в why_changed, what_to_do и what_cancels; цена, режим, кандидат и оверлей — в decision_now. Других причин не придумывай и готовые строки не пересказывай: скажи одной-тремя фразами, что эта смена значит для позиции и чего ждать дальше, опираясь только на них. Слова «режим», «ступень», «пол», «кандидат», «удержание» здесь допустимы — они стоят в самом сообщении.
+
+ДАТА. Сегодняшняя дата по Москве — в поле today. Даты данных — в самих событиях. Не называй событие свежим или давним, не сверившись с этими датами.
 
 ФОРМАТ: 2–5 предложений живого русского на событие. Термин — с короткой расшифровкой прямо в тексте при первом употреблении.
 
@@ -2658,8 +2651,9 @@ let LAST_MODEL = "";
      · чужая письменность посреди фразы — «продажи حكومات»;
      · смешение алфавитов внутри слова — «кванitative tightening».
    Проверка доли кириллицы такое не ловит: одно латинское слово среди двадцати русских не сдвигает
-   отношение. Поэтому ищем именно дефекты, а не пропорцию. Найдено — берём следующую модель:
-   лучше потратить ещё один запрос, чем показать читателю ломаный текст. */
+   отношение. Поэтому ищем именно дефекты, а не пропорцию. Найдено — разбор этого события
+   отбрасывается и идёт шаблон: лучше честное «разбор недоступен», чем ломаный текст у читателя.
+   Срывы видели у бесплатных моделей; у Claude проверка остаётся страховкой. */
 function textDefect(t) {
   const s = String(t || "");
   // Письменности, которых в русском разборе быть не может ни при каких терминах.
@@ -2679,9 +2673,11 @@ function textDefect(t) {
 }
 
 // Вход модели одной строкой. Вынесен отдельно, потому что с ним же сверяются числа ответа: что
-// модель получила, то она и вправе цитировать.
-function llmInput(events, panel) {
+// модель получила, то она и вправе цитировать. Сегодняшняя дата — тоже вход: своих часов у модели
+// нет, а её знания о «сейчас» к моменту запроса устарели; назвать дату из today — не выдумка.
+function llmInput(events, panel, today = mskDateRu()) {
   return JSON.stringify({
+    today,
     panel_context: llmContext(panel),
     events: events.map((e, i) => ({
       i,
@@ -2704,154 +2700,220 @@ function llmInput(events, panel) {
   });
 }
 
-// Одна попытка у одной модели. Возвращает разобранные комментарии либо null; вторым значением —
-// признак того, что стоит попробовать СЛЕДУЮЩУЮ модель (перегрузка провайдера, отказ маршрута).
-async function askModel(model, events, panel, key, timeoutMs = LLM_TIMEOUT_MS) {
-  const input = llmInput(events, panel);
-  const payload = {
-    model,
-    // Рассуждающая модель тратит на размышления НАМНОГО больше, чем на сам ответ, и по
-    // документации OpenRouter лимит обязан покрывать и то, и другое. Прежний бюджет (720 токенов
-    // на одно событие) уходил на размышления целиком, ответ не начинался вовсе — и в Telegram
-    // уезжал англоязычный поток мыслей вида «The user wants me to analyze…».
-    max_tokens: Math.min(16000, 2000 * events.length + 6000),
-    // Размышления нужны модели, но НЕ нужны нам: просим провайдера их не возвращать, чтобы
-    // ответ гарантированно лежал в content и его нельзя было спутать с черновиком.
-    reasoning: { exclude: true },
-    messages: [
-      { role: "system", content: LLM_SYSTEM },
-      { role: "user", content: input },
-    ],
-  };
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), Math.max(1000, timeoutMs));
-  try {
-    const send = async (b) =>
-      fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-        body: JSON.stringify(b),
-        signal: ctl.signal,
-      });
-    const readBody = async (r) => {
-      if (!r.ok) return { httpError: `${r.status} — ${(await r.text().catch(() => "")).slice(0, 160).replace(/\s+/g, " ")}` };
-      return await r.json().catch(() => ({ error: { message: "ответ не является JSON" } }));
-    };
+/* ================== 5а. ТРАНСПОРТ К CLAUDE — ОБЩИЙ ДЛЯ ПАНЕЛЕЙ 837 И 838 ==================
+   От этой строки до строки «конец транспорта к Claude» блок побайтово одинаков в обоих
+   репозиториях, хотя остальной файл в копиях разошёлся. Правка здесь — та же правка во втором
+   репозитории; сверка — diff двух вырезок между маркерами.
 
-    let j = await readBody(await send(payload));
-    // Не каждый провайдер понимает подавление размышлений, и отказ приходит по-разному: то
-    // HTTP-ошибкой, то телом с полем error при коде 200. Один повтор без параметра дешевле,
-    // чем потеря разбора, поэтому проверяем ОБА вида отказа.
-    const paramRejected = j.httpError || (j.error && /param|unsupport|invalid|reasoning/i.test(String(j.error.message || "")));
-    if (paramRejected && payload.reasoning) {
-      console.error(`${model}: запрос с подавлением размышлений отклонён (${j.httpError || j.error?.message}), повтор без него`);
-      const { reasoning, ...plain } = payload;
-      j = await readBody(await send(plain));
-    }
-    if (j.httpError) {
-      console.error(`${model}: ответ ${j.httpError}`);
-      return { comments: null, tryNext: true };
-    }
-    // OpenRouter умеет вернуть 200 с телом-ошибкой и пустым choices — без этой строки в логе
-    // было только «ответ пуст», и причина оставалась невидимой. Именно так выглядит перегрузка
-    // бесплатного провайдера: «ResourceExhausted: Worker local total request limit reached».
-    if (j?.error) {
-      console.error(`${model}: провайдер вернул ошибку — ${String(j.error.message || JSON.stringify(j.error)).slice(0, 180)}`);
-      return { comments: null, tryNext: true };
-    }
-    const choice = j?.choices?.[0] || {};
-    const msg = choice.message || {};
-    const content = String(msg.content || "").trim();
-    const thinking = String(msg.reasoning || "").trim();
-    // ЧЕРНОВИК — НЕ ОТВЕТ. `reasoning` это поток мыслей модели («The user wants me to analyze…»,
-    // «wait, monthly -50M seems low»), и он однажды уехал пользователю целиком, по-английски.
-    // Берём его, только если он СОДЕРЖИТ нашу разметку — то есть модель успела дописать ответ
-    // внутри того же потока. Иначе честнее промолчать, чем выдать черновик за разбор.
-    const txt = content || (/^[^\S\n]*=+\s*\d+\s*=+[^\S\n]*$/m.test(thinking) ? thinking : "");
-    if (!txt) {
-      const why =
-        choice.finish_reason === "length"
-          ? "не хватило бюджета токенов — модель не дошла до ответа"
-          : thinking
-            ? "вернулись только черновые размышления без ответа"
-            : "ответ пуст";
-      console.error(`${model}: не дал текста — ${why} (finish_reason: ${choice.finish_reason ?? "?"}, размышлений ${thinking.length} симв.)`);
-      return { comments: null, tryNext: true };
-    }
-    const parsed = parseComments(txt, events.length);
-    if (!parsed) {
-      // ДИАГНОСТИКА: без неё «шаблон» в логе не отличить от «модель ответила, а я не разобрал».
-      console.error(`${model}: ответ не разобран (${txt.length} симв.). Начало: ${txt.slice(0, 250).replace(/\s+/g, " ")}`);
-      return { comments: null, tryNext: true };
-    }
-    // Страховка по языку: промпт требует русский, но требование можно и проигнорировать —
-    // англоязычный разбор до читателя доходить не должен. Считаем долю кириллицы среди букв.
-    for (let k = 0; k < parsed.length; k++) {
-      const t = parsed[k];
-      if (!t) continue;
-      const cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
-      const lat = (t.match(/[a-zA-Z]/g) || []).length;
-      if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) {
-        console.error(`${model}: ответ на событие ${k} не на русском (кириллицы ${Math.round((100 * cyr) / (cyr + lat))}%) — отброшен`);
-        parsed[k] = null;
-        continue;
-      }
-      const defect = textDefect(t);
-      if (defect) {
-        console.error(`${model}: ответ на событие ${k} испорчен — ${defect}; пробую следующую модель`);
-        parsed[k] = null;
-        continue;
-      }
-      // Числа ответа сверяются со входом: постороннее число — комментарий отброшен, идёт шаблон.
-      const stray = strayNumbers(t, input);
-      if (stray.length) {
-        console.error(`${model}: в ответе на событие ${k} есть числа, которых нет во входе (${stray.slice(0, 4).join(", ")}) — отброшен`);
-        parsed[k] = null;
-      }
-    }
-    // Совсем нечего показать — пусть попробует следующая модель, вдруг она послушнее.
-    if (parsed.every((t) => !t)) return { comments: null, tryNext: true };
-    return { comments: parsed, tryNext: false };
-  } catch (e) {
-    console.error(`${model}: запрос не удался — ${String(e.message || e)}`);
-    return { comments: null, tryNext: true };
-  } finally {
-    clearTimeout(timer);
-  }
+   С 28.10.2026 комментатор — Claude Sonnet 5.5 через официальный SDK Anthropic: решение
+   владельца, кредиты API есть, нужны качество и надёжность. Бесплатная цепочка OpenRouter ушла
+   целиком вместе с предохранителем платных моделей. Модель одна: перегрузку и сбои сервера
+   (408/409/429/5xx/529) повторяет сам SDK с паузой, отказ по политике подхватывает серверный
+   резерв (fallbacks: "default" — модель резерва Anthropic выбирает по категории отказа).
+   SDK подключается динамическим импортом внутри вызова: модуль грузится и без пакета (тесты
+   диффера, прогон без установки), комментарии тогда идут из шаблона. */
+const LLM_MODEL_DEFAULT = "claude-sonnet-5-5";
+// Глубина размышлений. Умолчание API у Sonnet 5.5 — «high»; «xhigh» — выбор владельца ради
+// качества разбора. Понизить или поднять можно переменной NOTIFY_LLM_EFFORT, не трогая код.
+const LLM_EFFORT_DEFAULT = "xhigh";
+// Срок одной попытки SDK и одновременно всего вызова вместе с повторами. Повтор нужен перегрузке,
+// которая отвечает отказом за секунду; зависший ответ не должен съесть прогон рассылки.
+const LLM_TIMEOUT_MS = Number(process.env.NOTIFY_LLM_TIMEOUT_MS || 150000);
+// Сколько раз SDK повторяет запрос. Не «?? 2»: незаданная переменная Actions приходит пустой
+// строкой, а Number("") — это 0, то есть молча выключенные повторы.
+const LLM_MAX_RETRIES = /^\d+$/.test(String(process.env.NOTIFY_LLM_MAX_RETRIES ?? "").trim()) ? Number(process.env.NOTIFY_LLM_MAX_RETRIES) : 2;
+// Ответ вместе с размышлениями. 16 000 — обычный потолок запроса без потоковой передачи: ответ
+// укладывается в срок одного HTTP-запроса. Упёрлись — ответ оборван, разбора нет, идёт шаблон.
+const LLM_MAX_TOKENS = 16000;
+// Цены Sonnet 5.5, $ за миллион токенов; размышления оплачиваются как выход. Резерв «default» у
+// Sonnet 5.5 — Sonnet 5 с теми же ценами, так что формула верна и для его ответа.
+const LLM_USD_PER_MTOK_IN = 2;
+const LLM_USD_PER_MTOK_OUT = 10;
+const LLM_BETAS = ["server-side-fallback-2026-07-01"];
+const resolveModel = () => (process.env.NOTIFY_MODEL || "").trim() || LLM_MODEL_DEFAULT;
+const resolveEffort = () => (process.env.NOTIFY_LLM_EFFORT || "").trim() || LLM_EFFORT_DEFAULT;
+
+// Сутки потолка и дата для модели — московские: по ним владелец считает и расходы, и «сегодня».
+// Сдвиг Москвы постоянный, +3 часа.
+const mskDay = (ms = Date.now()) => new Date(ms + 3 * 3600e3).toISOString().slice(0, 10);
+const mskDateRu = (ms = Date.now()) => mskDay(ms).split("-").reverse().join(".");
+
+// Суточный потолок расходов, $. «0» выключает разбор, не трогая ключ; пустое или негодное значение
+// (незаданная переменная Actions) — умолчание панели, LLM_DAILY_USD_DEFAULT в шапке файла.
+function llmDailyCap() {
+  const raw = String(process.env.NOTIFY_LLM_DAILY_USD ?? "").trim();
+  const v = Number(raw);
+  return raw !== "" && Number.isFinite(v) && v >= 0 ? v : LLM_DAILY_USD_DEFAULT;
 }
 
-// budgetMs — сколько всего можно ждать цепочку моделей. Задаётся, когда в пачке есть сообщение о
-// доле: понижение по правилу исполнения немедленное, а цепочка из четырёх моделей по 90 секунд
-// могла задержать его на шесть минут. Вышел срок — уходит шаблон из записи решения.
-async function llmComments(events, panel, { budgetMs = 0 } = {}) {
-  const key = process.env.OPENROUTER_KEY;
-  if (!key || !events.length) return null;
-  const deadline = budgetMs > 0 ? Date.now() + budgetMs : Infinity;
-  const chain = modelChain();
-  // Платный предохранитель: ни одна модель без суффикса :free в сеть не уходит без явного
-  // разрешения. Проверяем ВСЮ цепочку, а не только первую.
-  const paid = chain.filter((m) => !m.endsWith(":free"));
-  if (paid.length && !paidAllowed()) {
-    console.error(`модель «${paid[0]}» платная, а NOTIFY_ALLOW_PAID не выставлен — комментарии из шаблона`);
+// Запись расхода из состояния (.notify/state.json, поле llm_spend): { day: "ГГГГ-ММ-ДД" по Москве,
+// usd }. Поле чужой формы читается как «сегодня ещё ничего не потрачено»: ронять рассылку оно не
+// вправе. Запись прошлых суток за сегодняшний расход не считается.
+const spendOf = (x) =>
+  x && typeof x === "object" && typeof x.day === "string" && Number.isFinite(x.usd) ? { day: x.day, usd: x.usd } : { day: "", usd: 0 };
+const spentToday = (spend, now = Date.now()) => (spend && spend.day === mskDay(now) && Number.isFinite(spend.usd) ? spend.usd : 0);
+function addSpend(spend, usd, now = Date.now()) {
+  if (!spend) return;
+  if (spend.day !== mskDay(now) || !Number.isFinite(spend.usd)) {
+    spend.day = mskDay(now);
+    spend.usd = 0;
+  }
+  spend.usd = Math.round((spend.usd + usd) * 1e6) / 1e6;
+}
+
+// Цена ответа по счёту самого API: вход × $2 + выход × $10 за миллион. При серверном резерве
+// верхний usage описывает только последнюю попытку, а все попытки лежат в usage.iterations —
+// берётся большая из двух сумм, чтобы потолок видел и попытку, которую отклонила основная модель.
+function llmCostUsd(usage) {
+  const price = (u) => ((Number(u?.input_tokens) || 0) * LLM_USD_PER_MTOK_IN + (Number(u?.output_tokens) || 0) * LLM_USD_PER_MTOK_OUT) / 1e6;
+  const its = Array.isArray(usage?.iterations) ? usage.iterations : [];
+  return Math.max(price(usage), its.reduce((s, u) => s + price(u), 0));
+}
+// Оборванный по сроку запрос мог быть оплачен целиком: сервер дописывает ответ и без нас, а
+// счёта у оборванного ответа нет. В потолок идёт оценка сверху — вход по ~2 символа на токен и
+// весь max_tokens на выходе. Иначе зависающая модель жгла бы деньги мимо потолка.
+const llmWorstCaseUsd = (chars) => (Math.ceil(chars / 2) * LLM_USD_PER_MTOK_IN + LLM_MAX_TOKENS * LLM_USD_PER_MTOK_OUT) / 1e6;
+
+/* Один запрос к Claude. Возвращает { text, model } — склейку текстовых блоков ответа и модель,
+   которая его дала, — либо { text: null } (с timedOut: true, если вышел срок). В любом исходе в
+   логе остаётся строка о том, что произошло; ключ не печатается нигде.
+   Блоки размышлений (thinking) не читаются вовсе: черновик модели к читателю попадать не должен.
+   spend — запись расхода за сутки из состояния: с ней запрос сверяется с потолком и дописывает
+   свою цену; без неё (тесты, проверка связи) потолок не применяется. timeoutMs — срок всего
+   вызова, по умолчанию LLM_TIMEOUT_MS. */
+async function claudeAsk({ system, user, timeoutMs = LLM_TIMEOUT_MS, spend = null }) {
+  if (spend) {
+    const cap = llmDailyCap();
+    const spent = spentToday(spend);
+    if (spent >= cap) {
+      console.error(`суточный потолок $${cap} исчерпан (за ${mskDay()} МСК потрачено $${spent.toFixed(4)}) — разбор пропущен, идёт шаблон`);
+      return { text: null };
+    }
+  }
+  let Anthropic;
+  try {
+    ({ default: Anthropic } = await import("@anthropic-ai/sdk"));
+  } catch (e) {
+    console.error(`SDK Anthropic не установлен — разбор пропущен (${String(e?.code || e?.message || e).slice(0, 120)})`);
+    return { text: null };
+  }
+  const model = resolveModel();
+  const limitMs = Math.max(1000, timeoutMs);
+  const t0 = performance.now();
+  const secs = () => ((performance.now() - t0) / 1000).toFixed(1);
+  const short = (s) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+  try {
+    // Свой fetch — тонкая обёртка над глобальным: так тесты подменяют сеть, не трогая SDK.
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: LLM_MAX_RETRIES, timeout: LLM_TIMEOUT_MS, fetch: (...a) => globalThis.fetch(...a) });
+    // Ни temperature, ни top_p: на этой модели они дают 400.
+    const msg = await client.beta.messages.create(
+      {
+        model,
+        max_tokens: LLM_MAX_TOKENS,
+        betas: LLM_BETAS,
+        fallbacks: "default",
+        thinking: { type: "adaptive" },
+        output_config: { effort: resolveEffort() },
+        system,
+        messages: [{ role: "user", content: user }],
+      },
+      { signal: AbortSignal.timeout(limitMs) }
+    );
+    const u = msg.usage || {};
+    const usd = llmCostUsd(u);
+    addSpend(spend, usd);
+    const served = msg.model || model;
+    // Одна строка на вызов: кто ответил, сколько токенов, сколько из них на размышления, цена, время.
+    console.log(`Claude: ${served}${served !== model ? ` (запрошена ${model})` : ""} · вход ${u.input_tokens ?? "?"} · выход ${u.output_tokens ?? "?"}, из них размышления ${u.output_tokens_details?.thinking_tokens ?? "?"} · $${usd.toFixed(4)} · ${secs()} с · stop_reason ${msg.stop_reason}`);
+    if (msg.stop_reason === "refusal") {
+      console.error(`${served}: модель отказалась отвечать (категория ${msg.stop_details?.category ?? "не указана"}) — разбора нет, идёт шаблон`);
+      return { text: null };
+    }
+    if (msg.stop_reason === "max_tokens") {
+      console.error(`${served}: не хватило max_tokens (${LLM_MAX_TOKENS}) — ответ оборван, разбора нет`);
+      return { text: null };
+    }
+    const text = (msg.content || []).filter((b) => b?.type === "text").map((b) => b.text || "").join("").trim();
+    if (!text) {
+      console.error(`${served}: ответ без текста (блоки: ${(msg.content || []).map((b) => b?.type).join(", ") || "нет"}) — разбора нет`);
+      return { text: null };
+    }
+    return { text, model: served };
+  } catch (e) {
+    // Классы SDK — от частного к общему: срок и обрыв — подклассы APIConnectionError, а тот — APIError.
+    if (e instanceof Anthropic.APIUserAbortError || e instanceof Anthropic.APIConnectionTimeoutError) {
+      const est = llmWorstCaseUsd(String(system).length + String(user).length);
+      addSpend(spend, est);
+      console.error(`${model}: срок ответа вышел (${secs()} с при сроке ${Math.round(limitMs / 1000)} с) — разбора нет${spend ? `; в потолок записана оценка сверху $${est.toFixed(4)}` : ""}`);
+      return { text: null, timedOut: true };
+    }
+    if (e instanceof Anthropic.APIConnectionError) {
+      console.error(`${model}: нет связи с API Anthropic — ${short(e.cause?.message || e.message)}`);
+      return { text: null };
+    }
+    if (e instanceof Anthropic.APIError) {
+      // Код, тип и текст ошибки из тела ответа — ключа в них нет; request-id нужен для обращения в поддержку.
+      console.error(`${model}: API Anthropic ответил ${e.status ?? "?"}${e.type ? ` ${e.type}` : ""} — ${short(e.error?.error?.message || e.message)}${e.requestID ? ` (request-id ${e.requestID})` : ""}`);
+      return { text: null };
+    }
+    console.error(`${model}: запрос не удался — ${short(e?.message || e)}`);
+    return { text: null };
+  }
+}
+/* ============================== конец транспорта к Claude ============================== */
+
+// Разбор пачки событий одним запросом: модель получает все события сразу и отвечает блоками
+// «===N===». Возвращает массив комментариев (null на месте отброшенного) либо null — тогда все
+// сообщения идут с шаблоном. spend — запись суточного расхода из состояния (см. claudeAsk).
+// budgetMs — сколько всего можно ждать разбор. Задаётся, когда в пачке есть сообщение о доле:
+// понижение по правилу исполнения немедленное, и ждать модель полный срок (LLM_TIMEOUT_MS, вместе
+// с повторами SDK) оно не должно. Вышел срок — уходит шаблон из записи решения.
+async function llmComments(events, panel, { budgetMs = 0, spend = null } = {}) {
+  if (!process.env.ANTHROPIC_API_KEY || !events.length) return null;
+  const input = llmInput(events, panel);
+  const timeoutMs = budgetMs > 0 ? Math.min(LLM_TIMEOUT_MS, budgetMs) : LLM_TIMEOUT_MS;
+  const { text: txt, model, timedOut } = await claudeAsk({ system: LLM_SYSTEM, user: input, timeoutMs, spend });
+  if (!txt) {
+    if (timedOut && budgetMs > 0) console.error("время на разбор для сообщения о доле вышло — комментарии из шаблона");
     return null;
   }
-  for (let k = 0; k < chain.length; k++) {
-    const left = deadline - Date.now();
-    if (left <= 0) {
-      console.error("время на разбор для сообщения о доле вышло — комментарии из шаблона");
-      return null;
-    }
-    const { comments, tryNext } = await askModel(chain[k], events, panel, key, Math.min(LLM_TIMEOUT_MS, left));
-    if (comments) {
-      if (k > 0) console.log(`комментарий получен запасной моделью ${chain[k]} (основная не ответила)`);
-      LAST_MODEL = chain[k];
-      return comments;
-    }
-    if (!tryNext) break;
-    if (k + 1 < chain.length) console.error(`перехожу к следующей модели: ${chain[k + 1]}`);
+  const parsed = parseComments(txt, events.length);
+  if (!parsed) {
+    // ДИАГНОСТИКА: без неё «шаблон» в логе не отличить от «модель ответила, а я не разобрал».
+    console.error(`${model}: ответ не разобран (${txt.length} симв.). Начало: ${txt.slice(0, 250).replace(/\s+/g, " ")}`);
+    return null;
   }
-  console.error("ни одна бесплатная модель не дала разбора — комментарии из шаблона");
-  return null;
+  // Страховка по языку: промпт требует русский, но требование можно и проигнорировать —
+  // англоязычный разбор до читателя доходить не должен. Считаем долю кириллицы среди букв.
+  for (let k = 0; k < parsed.length; k++) {
+    const t = parsed[k];
+    if (!t) continue;
+    const cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
+    const lat = (t.match(/[a-zA-Z]/g) || []).length;
+    if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) {
+      console.error(`${model}: ответ на событие ${k} не на русском (кириллицы ${Math.round((100 * cyr) / (cyr + lat))}%) — отброшен`);
+      parsed[k] = null;
+      continue;
+    }
+    const defect = textDefect(t);
+    if (defect) {
+      console.error(`${model}: ответ на событие ${k} испорчен — ${defect}; отброшен`);
+      parsed[k] = null;
+      continue;
+    }
+    // Числа ответа сверяются со входом: постороннее число — комментарий отброшен, идёт шаблон.
+    const stray = strayNumbers(t, input);
+    if (stray.length) {
+      console.error(`${model}: в ответе на событие ${k} есть числа, которых нет во входе (${stray.slice(0, 4).join(", ")}) — отброшен`);
+      parsed[k] = null;
+    }
+  }
+  if (parsed.every((t) => !t)) {
+    console.error(`${model}: годных разборов нет — комментарии из шаблона`);
+    return null;
+  }
+  LAST_MODEL = model;
+  return parsed;
 }
 
 
@@ -3158,7 +3220,7 @@ async function main(io = {}) {
     // Живая карточка панели берётся как повод, чтобы прогнать модель на реальных данных.
     const sample = (panel.indicators || []).find((i) => HUMAN[i.id] && i.value && !HUMAN[i.id].quiet);
     let verdictLine = "Комментатор: ключ не задан, сообщения будут без разбора";
-    if (process.env.OPENROUTER_KEY && sample) {
+    if (process.env.ANTHROPIC_API_KEY && sample) {
       const probe = [{
         kind: "release",
         title: releaseOf(sample),
@@ -3170,16 +3232,11 @@ async function main(io = {}) {
         history: historyDigest(sample) ? [`${humanTitle(sample.id, sample.name)}: ${historyDigest(sample)}`] : [],
         note: "",
       }];
-      // Остаток бесплатной квоты: бесплатный уровень OpenRouter ограничен по числу запросов в
-      // сутки, и квота общая с судьёй новостей макро-панели. Знать запас полезно до того, как
-      // он кончится посреди рабочего дня.
-      try {
-        const kr = await fetch("https://openrouter.ai/api/v1/key", { headers: { authorization: `Bearer ${process.env.OPENROUTER_KEY}` } });
-        if (kr.ok) {
-          const kd = (await kr.json())?.data || {};
-          console.log(`квота OpenRouter: использовано ${kd.usage ?? "?"}, лимит ${kd.limit ?? "без лимита"}, остаток бесплатных запросов ${kd.rate_limit?.requests ?? "?"} / ${kd.rate_limit?.interval ?? "?"}`);
-        }
-      } catch {}
+      // Пинг делает один настоящий запрос: его usage и цену печатает строкой «Claude: …» сам
+      // транспорт. Суточный потолок к пингу не применяется — диагностика обязана дойти до модели,
+      // — и в состояние пинг ничего не пишет; расход за сегодня из состояния печатается для сверки.
+      const spend = spendOf((await readJSON(STATE_PATH))?.llm_spend);
+      console.log(`расход на Claude за ${mskDay()} МСК: $${spentToday(spend).toFixed(4)} при потолке $${llmDailyCap()}`);
       const got = await llmComments(probe, panel);
       // Пинг — диагностический режим, поэтому текст разбора печатается и в лог: иначе оценить
       // качество ответа можно только по Telegram, а это неудобно при отладке.
@@ -3260,8 +3317,12 @@ async function main(io = {}) {
   const trend = appendTrend(prev.alloc_trend, panel);
   const allocChanges = appendChanges(prev.alloc_changes, panel, prev.allocation, all.filter((ev) => ev.kind === "allocation").flatMap((ev) => ev.steps || []));
   let baseline = null; // сдвигается один раз в самом конце — до тех пор пишем старую базу
+  // Расход на разбор за московские сутки копится в состоянии и переживает прогоны: с ним каждый
+  // запрос сверяется с потолком NOTIFY_LLM_DAILY_USD. Объект один на прогон — транспорт дописывает
+  // в него цену ответа, persist() уносит на диск.
+  const llmSpend = spendOf(prev.llm_spend);
   const persist = async () => {
-    const state = { ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, shown: shownSeen, alloc_trend: trend, alloc_changes: allocChanges };
+    const state = { ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, shown: shownSeen, alloc_trend: trend, alloc_changes: allocChanges, llm_spend: llmSpend };
     if (selftestAlertAt) state.selftest_alert_at = selftestAlertAt;
     if (io.saveState) return io.saveState(state);
     await mkdir(dirname(STATE_PATH), { recursive: true });
@@ -3276,7 +3337,11 @@ async function main(io = {}) {
     // модель дольше отведённого нельзя — понижение по правилу исполнения немедленное.
     const ask = capped.map((ev, idx) => ({ ev, idx })).filter((x) => !NO_COMMENT.has(x.ev.kind));
     const urgent = capped.some((ev) => ev.kind === "allocation" || ev.kind === "pause");
-    const got = ask.length ? await llmComments(ask.map((x) => x.ev), panel, { budgetMs: urgent ? DECISION_LLM_BUDGET_MS : 0 }) : null;
+    const got = ask.length ? await llmComments(ask.map((x) => x.ev), panel, { budgetMs: urgent ? DECISION_LLM_BUDGET_MS : 0, spend: llmSpend }) : null;
+    // Оплаченный запрос — на диск сразу, до рассылки: упавший на Telegram прогон не должен стереть
+    // его из суточного расхода (состояние сохраняется при любом исходе, см. notify.yml). База
+    // сравнения при этом не двигается — baseline ещё null.
+    if (ask.length) await persist();
     const llm = new Array(capped.length).fill(null);
     if (got) ask.forEach((x, k) => { llm[x.idx] = got[k] || null; });
     console.log(`комментарии: ${got ? `модель (${LAST_MODEL || resolveModel()})` : "шаблон"}`);

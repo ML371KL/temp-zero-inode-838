@@ -22,6 +22,21 @@ assert.doesNotMatch(notifyY,/uses:\s*actions\/cache@v\d/,"единый actions/c
 assert.match(notifyY,/id:\s*selftest\s*\n\s*continue-on-error:\s*true/,"тесты уведомлений не должны блокировать рассылку");
 assert.match(notifyY,/NOTIFY_SELFTEST:\s*\$\{\{\s*steps\.selftest\.outcome\s*\}\}/,"исход тестов обязан доходить до скрипта: по нему включается осторожный режим");
 assert.match(notifyY,/if:\s*always\(\)\s*&&\s*steps\.selftest\.outcome\s*==\s*'failure'[\s\S]*exit 1/,"упавший тест обязан красить прогон");
+// Комментатор — Claude через SDK Anthropic (28.10.2026). SDK обязан стоять ДО тестов: тесты комментатора
+// идут через настоящий SDK, и без него краснели бы на каждом прогоне, а не на сломанном коде. Установка —
+// одна: каждая следующая `npm i --no-save` вычищает пакеты предыдущей. Сбой установки рассылку не держит.
+{
+  const SDK_INSTALL_LINE=/^\s*run:\s*npm i --no-save --no-package-lock --no-audit --no-fund @anthropic-ai\/sdk@\d+\.\d+\.\d+\s*$/m;
+  const TESTS_RUN_LINE=/^\s*run:\s*node scripts\/notify-test\.mjs\s*$/m;
+  const sdkAt=notifyY.match(SDK_INSTALL_LINE),testsAt=notifyY.match(TESTS_RUN_LINE);
+  assert.ok(sdkAt,"SDK Anthropic обязан ставиться в notify.yml точной версией и без записи в package.json");
+  assert.ok(testsAt,"шаг тестов уведомлений пропал из notify.yml");
+  assert.ok(sdkAt.index<testsAt.index,"SDK Anthropic обязан ставиться ДО тестов уведомлений");
+  assert.equal([...notifyY.matchAll(/^\s*(?:run:\s*)?npm (?:i|install)\b[^\n]*--no-save/gm)].length,1,"вторая `npm i --no-save` вычистила бы SDK, поставленный первой");
+  assert.match(notifyY,/id:\s*sdk\s*\n\s*continue-on-error:\s*true/,"сбой установки SDK не должен останавливать рассылку");
+  assert.match(notifyY,/^\s*ANTHROPIC_API_KEY:\s*\$\{\{\s*secrets\.ANTHROPIC_API_KEY\s*\}\}\s*$/m,"ключ комментатора — секрет ANTHROPIC_API_KEY");
+  assert.doesNotMatch(notifyY,/OPENROUTER_KEY/,"комментатор больше не ходит в OpenRouter");
+}
 assert.match(y,/cron:\s*"23 \* \* \* \*"/,"hourly schedule missing");
 assert.match(y,/actions\/checkout@v6/);
 assert.match(y,/actions\/setup-node@v6/);

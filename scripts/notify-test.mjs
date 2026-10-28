@@ -1,7 +1,15 @@
 // Тесты уведомлений. Все фикстуры синтетические и НЕ зависят от текущей даты: проверяется
 // поведение диффера, а не то, что сегодня опубликовал FRED.
 import assert from "node:assert/strict";
-import { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER } from "./notify.mjs";
+// Транспорт к Claude читает настройки при загрузке модуля, поэтому они задаются ДО импорта (он
+// поэтому динамический). Повторы SDK выключены: заглушка отвечает сразу, а повтор 429/529 с паузой
+// только растягивал бы прогон. Срок разбора сокращён до 5 с — заметно длиннее срока для сообщения
+// о доле (1 с у теста с бюджетом 300 мс), чтобы тест этого срока отличал одно от другого.
+// Настройки окружения разработчика (своя модель, свой адрес API) на тесты влиять не должны.
+process.env.NOTIFY_LLM_MAX_RETRIES = "0";
+process.env.NOTIFY_LLM_TIMEOUT_MS = "5000";
+for (const k of ["NOTIFY_MODEL", "NOTIFY_LLM_EFFORT", "NOTIFY_LLM_DAILY_USD", "NOTIFY_DECISION_LLM_MS", "ANTHROPIC_BASE_URL"]) delete process.env[k];
+const { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER } = await import("./notify.mjs");
 
 let passed = 0;
 const test = (name, fn) => {
@@ -1887,8 +1895,8 @@ testAsync("в осторожном режиме предупреждение о 
 // Тесты фолбэка НАМЕРЕННО провоцируют отказ модели, и её жалоба уезжала в лог CI, выглядя там
 // настоящей ошибкой. Такой шум приучает не читать диагностику, поэтому ожидаемый вывод глушится:
 // сами сообщения при этом проверяются — тест падает, если жалобы не было вовсе.
-// Глушит ОБА потока: часть диагностики идёт через console.log («комментарий получен запасной
-// моделью…»), и она утекала в лог CI, выглядя там боевой. Сами сообщения при этом проверяются.
+// Глушит ОБА потока: часть диагностики идёт через console.log (строка «Claude: …» о каждом вызове),
+// и она утекала в лог CI, выглядя там боевой. Сами сообщения при этом проверяются.
 const quiet = async (fn) => {
   const realErr = console.error;
   const realLog = console.log;
@@ -1903,60 +1911,97 @@ const quiet = async (fn) => {
   }
   return said.join("\n");
 };
+// Та же глушилка для тестов, которым лог не нужен: строка «Claude: …» об удачном вызове — тоже шум.
+const hush = async (fn) => {
+  let r;
+  await quiet(async () => { r = await fn(); });
+  return r;
+};
 
+// Ключ нарочно узнаваемый: тесты проверяют, что он не попадает в лог ни при каком исходе.
+const TEST_KEY = "sk-ant-test-key-DO-NOT-LOG-7f3a";
 const withFetch = async (impl, fn) => {
   const real = globalThis.fetch;
-  const realKey = process.env.OPENROUTER_KEY;
+  const realKey = process.env.ANTHROPIC_API_KEY;
   globalThis.fetch = impl;
-  process.env.OPENROUTER_KEY = "test-key";
+  process.env.ANTHROPIC_API_KEY = TEST_KEY;
   try {
     return await fn();
   } finally {
     globalThis.fetch = real;
-    if (realKey === undefined) delete process.env.OPENROUTER_KEY;
-    else process.env.OPENROUTER_KEY = realKey;
+    if (realKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = realKey;
   }
 };
-const reply = (content) => async () => ({ ok: true, json: async () => ({ choices: [{ message: { content } }] }) });
+// Переменные окружения на время одного теста: undefined — переменной нет.
+const withEnv = async (vars, fn) => {
+  const was = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  const put = (k, v) => (v === undefined ? delete process.env[k] : (process.env[k] = v));
+  for (const [k, v] of Object.entries(vars)) put(k, v);
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(was)) put(k, v);
+  }
+};
+// Ответ в форме Messages API — настоящий Response, как его отдаёт сеть: SDK читает и заголовки, и тело.
+const USAGE = { input_tokens: 1200, output_tokens: 800, output_tokens_details: { thinking_tokens: 500 } };
+const respond = (body, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "request-id": "req_test" } });
+const replyMsg = (fields = {}) => async () =>
+  respond({ id: "msg_test", type: "message", role: "assistant", model: "claude-sonnet-5-5", content: [], stop_reason: "end_turn", stop_sequence: null, usage: USAGE, ...fields });
+const reply = (text) => replyMsg({ content: [{ type: "text", text }] });
+const apiError = (status, type, message) => async () => respond({ type: "error", error: { type, message } }, status);
+// Перехват запроса: что именно ушло в API.
+const capture = (answer = reply("===0===\nтекст\n===1===\nтекст")) => {
+  const seen = [];
+  const impl = async (url, init) => {
+    seen.push({ url: String(url), headers: new Headers(init?.headers), body: JSON.parse(init?.body || "{}") });
+    return answer();
+  };
+  return { seen, impl };
+};
+const mskToday = () => new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
 const evs = [{ kind: "zone", title: "A", before: "1", after: "2", detail: "", note: "" }, { kind: "release", title: "B", before: "", after: "", detail: "", note: "" }];
 const panel = panelOf([ind({})]);
 
 testAsync("комментарии разбираются из ответа модели", async () => {
-  const out = await withFetch(reply('[{"i":0,"text":"первый"},{"i":1,"text":"второй"}]'), () => llmComments(evs, panel));
+  const out = await hush(() => withFetch(reply('[{"i":0,"text":"первый"},{"i":1,"text":"второй"}]'), () => llmComments(evs, panel)));
   assert.deepEqual(out, ["первый", "второй"]);
 });
 
 testAsync("основной формат — блоки ===N===", async () => {
   const txt = "===0===\nразбор первого события\n===1===\nразбор второго события";
-  const out = await withFetch(reply(txt), () => llmComments(evs, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
   assert.deepEqual(out, ["разбор первого события", "разбор второго события"]);
 });
 
 testAsync("рассуждение вокруг блоков не мешает разбору", async () => {
   const txt = "Сначала подумаю: событий два, оба про кредит.\n\n===0===\nпервый текст\n\n===1===\nвторой текст\n";
-  const out = await withFetch(reply(txt), () => llmComments(evs, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
   assert.equal(out[0], "первый текст");
   assert.equal(out[1], "второй текст");
 });
 
-testAsync("готовый ответ внутри reasoning принимается — но только с разметкой", async () => {
-  const impl = async () => ({
-    ok: true,
-    json: async () => ({ choices: [{ message: { content: "", reasoning: "===0===\nтекст с разметкой\n===1===\nвторой" } }] }),
-  });
-  const out = await withFetch(impl, () => llmComments(evs, panel));
-  assert.equal(out[0], "текст с разметкой");
+testAsync("размышления модели в разбор не попадают: читаются только текстовые блоки", async () => {
+  // Черновик рассуждений («The user wants me to analyze…») однажды уехал читателю целиком. У Claude
+  // размышления — отдельные блоки thinking, и в разбор идёт только text — даже если черновик
+  // случайно похож на ответ с разметкой.
+  const cot = "The user wants me to analyze two events.\n===0===\nчерновик внутри размышлений\n===1===\nещё черновик";
+  const impl = replyMsg({ content: [{ type: "thinking", thinking: cot, signature: "sig" }, { type: "text", text: "===0===\nразбор первого\n===1===\nразбор второго" }] });
+  const out = await hush(() => withFetch(impl, () => llmComments(evs, panel)));
+  assert.deepEqual(out, ["разбор первого", "разбор второго"]);
 });
 
-testAsync("ЧЕРНОВИК РАЗМЫШЛЕНИЙ не выдаётся за разбор", async () => {
-  // Боевой случай: бюджета токенов не хватило, content пуст, а в reasoning лежит поток мыслей
-  // по-английски — он уехал пользователю целиком. Без разметки такой текст ответом не считается.
-  const cot = "The user wants me to analyze a single event: the Fed's balance sheet data.\nKey data points:\n- Net liquidity up 1.8% over 4 weeks\n- wait, monthly -50M seems low";
-  const impl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "", reasoning: cot }, finish_reason: "length" }] }) });
+testAsync("ответ, оборванный по max_tokens, — шаблон, а не черновик", async () => {
+  // Боевой случай прежнего провайдера: бюджета токенов не хватило, и поток мыслей уехал читателю.
+  // Теперь оборванный ответ не разбирается вовсе, даже если разметка в нём уже есть.
+  const impl = replyMsg({ stop_reason: "max_tokens", content: [{ type: "thinking", thinking: "The user wants me to analyze…", signature: "sig" }, { type: "text", text: "===0===\nначало разбора, оборванное на полусло" }] });
   let out, said = "";
   said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.equal(out, null, "черновик — не ответ");
-  assert.match(said, /бюджета токенов/, "причина должна быть названа в логе");
+  assert.equal(out, null, "оборванный ответ — не разбор");
+  assert.match(said, /не хватило max_tokens/, "причина должна быть названа в логе");
+  assert.doesNotMatch(said, /The user wants/, "черновик не печатается даже в лог");
 });
 
 testAsync("англоязычный разбор до читателя не доходит", async () => {
@@ -1987,7 +2032,7 @@ testAsync("чистый русский разбор с аббревиатура�
   const txt = "===0===\nПотоки в биткоин-ETF развернулись: за неделю отток, MVRV ушёл к 18-му перцентилю, а Nasdaq при этом растёт.\n===1===\nВторой разбор тоже чистый, с упоминанием Deribit и обычных сокращений вроде ФРС и ВВП.";
   // число из разбора обязано лежать во входе — здесь оно стоит в строке события
   const withMove = [{ ...evs[0], moves: [{ name: "Оценка рынка биткоина (MVRV)", before: "25-й перцентиль 4 лет", after: "18-й перцентиль 4 лет" }] }, evs[1]];
-  const out = await withFetch(reply(txt), () => llmComments(withMove, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(withMove, panel)));
   assert.ok(out[0] && out[1], `нормальный текст с аббревиатурами не должен браковаться: ${JSON.stringify(out)}`);
 });
 
@@ -2031,171 +2076,176 @@ testAsync("разбор с посторонним числом отбрасыв�
 
 testAsync("разбор, все числа которого взяты из входа, проходит", async () => {
   const txt = "===0===\nЗа день в фонды пришло 137 млн долларов после оттока в 58 млн: за месяц приток вырос с 3,4 до 3,5 млрд.";
-  const out = await withFetch(reply(txt), () => llmComments(numEvents, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(numEvents, panel)));
   assert.ok(out?.[0], `честный разбор браковаться не должен: ${JSON.stringify(out)}`);
 });
 
-testAsync("одиночный устоявшийся англицизм модель не меняет", async () => {
-  // «treasuries» в боевом прогоне вызвал смену модели — это расточительно: слово читателю
-  // понятно, а лишний запрос жжёт бесплатную квоту. Признак срыва языка — ДВА слова подряд.
+
+testAsync("одиночный устоявшийся англицизм разбор не бракует", async () => {
+  // «treasuries» в боевом прогоне уже стоил разбора — слово читателю понятно, а отбраковка оставила
+  // бы его без комментария. Признак срыва языка — ДВА таких слова и больше.
   const txt = "===0===\nДоходности treasuries подросли, и это давит на длинные ставки по всему рынку сегодня.\n===1===\nВторой разбор чистый и достаточно длинный для проверки языковых правил.";
-  const out = await withFetch(reply(txt), () => llmComments(evs, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
   assert.ok(out[0], `одно английское слово не повод браковать разбор: ${JSON.stringify(out)}`);
 });
 
-testAsync("перегрузка бесплатного провайдера — переход к запасной модели", async () => {
-  // Боевой случай: «Upstream error from Nvidia: ResourceExhausted: Worker local total request
-  // limit reached (163/32)» оставил уведомление без разбора. Одна модель = единая точка отказа.
-  const tried = [];
-  const impl = async (_u, o) => {
-    const m = JSON.parse(o.body).model;
-    tried.push(m);
-    if (m.startsWith("nvidia/")) return { ok: true, json: async () => ({ error: { message: "Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (163/32)" } }) };
-    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор от запасной\n===1===\nвторой" } }] }) };
-  };
-  let out;
-  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.equal(out[0], "разбор от запасной", "перегрузка одного провайдера не должна лишать разбора");
-  assert.ok(tried.length >= 2, `должна быть попытка у следующей модели: ${tried}`);
-  assert.ok(!tried[1].startsWith("nvidia/"), `запасная обязана быть у ДРУГОГО провайдера: ${tried}`);
+testAsync("форма запроса: Sonnet 5.5, адаптивные размышления, xhigh, серверный резерв, дата по Москве", async () => {
+  const { seen, impl } = capture();
+  await hush(() => withEnv({ NOTIFY_MODEL: undefined, NOTIFY_LLM_EFFORT: undefined }, () => withFetch(impl, () => llmComments(evs, panel))));
+  assert.equal(seen.length, 1, "одна модель и один запрос на всю пачку событий");
+  const { url, headers, body } = seen[0];
+  assert.equal(url, "https://api.anthropic.com/v1/messages");
+  assert.equal(body.model, "claude-sonnet-5-5");
+  assert.equal(body.max_tokens, 16000, "бюджет ответа — с запасом на размышления");
+  assert.deepEqual(body.thinking, { type: "adaptive" });
+  assert.deepEqual(body.output_config, { effort: "xhigh" });
+  assert.equal(body.fallbacks, "default", "серверный резерв при отказе по политике");
+  const betas = String(headers.get("anthropic-beta") || "").split(",").map((s) => s.trim());
+  assert.ok(betas.includes("server-side-fallback-2026-07-01"), `бета-заголовок резерва обязателен: ${betas}`);
+  for (const k of ["temperature", "top_p", "top_k", "reasoning", "betas"]) assert.ok(!(k in body), `в теле запроса не должно быть «${k}»`);
+  assert.equal(typeof body.system, "string");
+  assert.deepEqual(body.messages.map((m) => m.role), ["user"]);
+  const user = JSON.parse(body.messages[0].content);
+  assert.equal(user.today, mskToday().split("-").reverse().join("."), "сегодняшняя дата по Москве, ДД.ММ.ГГГГ");
+  assert.equal(user.events.length, 2, "все события пачки — в одном запросе");
+  assert.ok(Array.isArray(user.panel_context?.market_now), "соседние показатели на месте");
+  assert.ok(!JSON.stringify(body).includes(TEST_KEY), "ключ уходит только в заголовок авторизации");
+});
+
+testAsync("промпт: сценарии вместо прогноза, только переданные события, дата по Москве", async () => {
+  const { seen, impl } = capture();
+  await hush(() => withFetch(impl, () => llmComments(evs, panel)));
+  const sys = seen[0].body.system;
+  for (const must of [
+    "как это вяжется с соседними показателями из market_now — другой картины текущей обстановки у тебя нет",
+    "какие сценарии из этого следуют и по каким признакам их можно будет различить",
+    "Утверждать, куда пойдёт рынок, и выдавать догадку о намерениях участников за факт. Говори «может означать», «если …, то …» и называй, что подтвердит или опровергнет версию.",
+    "Упоминать решения, заявления и события, которых нет во входных данных: твои знания о текущих событиях могли устареть",
+    "ДАТА. Сегодняшняя дата по Москве — в поле today. Даты данных — в самих событиях. Не называй событие свежим или давним, не сверившись с этими датами.",
+    "===0===",
+  ]) assert.ok(sys.includes(must), `в промпте нет: «${must.slice(0, 60)}…»`);
+  for (const gone of ["что сейчас происходит в мировой экономике", "за чем имеет смысл следить"]) assert.ok(!sys.includes(gone), `в промпте осталось: «${gone}»`);
+});
+
+testAsync("NOTIFY_MODEL и NOTIFY_LLM_EFFORT меняют модель и глубину, пустые значения — нет", async () => {
+  const set = capture();
+  await hush(() => withEnv({ NOTIFY_MODEL: "claude-opus-5-5", NOTIFY_LLM_EFFORT: "high" }, () => withFetch(set.impl, () => llmComments(evs, panel))));
+  assert.equal(set.seen[0].body.model, "claude-opus-5-5", "выбор владельца не подменяется");
+  assert.deepEqual(set.seen[0].body.output_config, { effort: "high" });
+  // незаданная переменная Actions приходит пустой строкой — это не модель «»
+  const blank = capture();
+  await hush(() => withEnv({ NOTIFY_MODEL: "   ", NOTIFY_LLM_EFFORT: "" }, () => withFetch(blank.impl, () => llmComments(evs, panel))));
+  assert.equal(blank.seen[0].body.model, "claude-sonnet-5-5");
+  assert.deepEqual(blank.seen[0].body.output_config, { effort: "xhigh" });
+});
+
+testAsync("отказ модели по политике (refusal) — шаблон, категория в логе", async () => {
+  const impl = replyMsg({ stop_reason: "refusal", stop_details: { type: "refusal", category: "cyber", explanation: null }, content: [] });
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  assert.equal(out, null);
+  assert.match(said, /отказалась отвечать \(категория cyber\)/);
+});
+
+testAsync("перегрузка и сбои API (429, 529, 500) — шаблон без исключения, причина в логе, ключа в логе нет", async () => {
+  for (const [status, type, text] of [[429, "rate_limit_error", "Number of requests has exceeded your rate limit"], [529, "overloaded_error", "Overloaded"], [500, "api_error", "Internal server error"]]) {
+    let out = "не вызывалось";
+    const said = await quiet(async () => { out = await withFetch(apiError(status, type, text), () => llmComments(evs, panel)); });
+    assert.equal(out, null, `${status}: шаблон`);
+    assert.ok(said.includes(`API Anthropic ответил ${status} ${type} — ${text}`), `${status}: код, тип и текст ошибки обязаны быть в логе: ${said}`);
+    assert.match(said, /request-id req_test/, "request-id — для обращения в поддержку");
+    assert.ok(!said.includes(TEST_KEY), "ключ в лог не попадает");
+  }
+});
+
+testAsync("обрыв связи — шаблон и своя строка в логе", async () => {
+  let out, said = "";
+  said = await quiet(async () => { out = await withFetch(async () => { throw new TypeError("fetch failed"); }, () => llmComments(evs, panel)); });
+  assert.equal(out, null);
+  assert.match(said, /нет связи с API Anthropic — fetch failed/);
 });
 
 testAsync("на сообщение о доле модель ждут не дольше отведённого", async () => {
-  // Понижение исполняется сразу, а цепочка из четырёх моделей по полторы минуты могла задержать
-  // сообщение о нём на шесть минут. Срок вышел — дальше по цепочке не идём, уходит шаблон.
-  const tried = [];
-  const realNow = Date.now;
-  let clock = realNow();
-  Date.now = () => clock;
-  const impl = async (_u, o) => {
-    tried.push(JSON.parse(o.body).model);
-    clock += 45000; // каждая модель «думает» 45 секунд и отказывает
-    return { ok: true, json: async () => ({ error: { message: "exhausted" } }) };
-  };
-  let out, said;
-  try {
-    said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel, { budgetMs: 60000 })); });
-  } finally {
-    Date.now = realNow;
-  }
+  // Понижение исполняется сразу: сообщение о нём не должно ждать полный срок разбора (здесь 5 с,
+  // в бою 150 с) вместе с повторами SDK. Заглушка не отвечает, пока запрос не оборвут, — срок
+  // держит транспорт, а не сеть. Обрыв по сроку — своя строка в логе и оценка сверху в потолке.
+  const hang = (_u, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason ?? new Error("aborted")), { once: true }));
+  const spend = { day: mskToday(), usd: 0 };
+  let out = "не вызывалось";
+  const t0 = Date.now();
+  const said = await quiet(async () => { out = await withFetch(hang, () => llmComments(evs, panel, { budgetMs: 300, spend })); });
+  const waited = Date.now() - t0;
   assert.equal(out, null);
-  assert.equal(tried.length, 2, `за минуту успевают две модели из четырёх: ${tried}`);
+  assert.ok(waited < 3000, `срок для сообщения о доле — не полный срок разбора: ждали ${waited} мс`);
+  assert.match(said, /срок ответа вышел/);
   assert.match(said, /время на разбор для сообщения о доле вышло/);
-});
-
-testAsync("вся цепочка запасных моделей — бесплатная", async () => {
-  const tried = [];
-  const impl = async (_u, o) => {
-    tried.push(JSON.parse(o.body).model);
-    return { ok: true, json: async () => ({ error: { message: "exhausted" } }) };
-  };
-  await quiet(async () => { await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.ok(tried.length >= 3, `цепочка должна быть не из одной модели: ${tried}`);
-  for (const m of tried) assert.ok(m.endsWith(":free"), `платная модель в цепочке: ${m}`);
-  assert.equal(new Set(tried).size, tried.length, "повторов в цепочке быть не должно");
-});
-
-testAsync("явно заданная модель отменяет цепочку", async () => {
-  const tried = [];
-  const impl = async (_u, o) => {
-    tried.push(JSON.parse(o.body).model);
-    return { ok: true, json: async () => ({ error: { message: "exhausted" } }) };
-  };
-  process.env.NOTIFY_MODEL = "google/gemma-4-31b-it:free";
-  try {
-    await quiet(async () => { await withFetch(impl, () => llmComments(evs, panel)); });
-  } finally {
-    delete process.env.NOTIFY_MODEL;
-  }
-  assert.deepEqual(tried, ["google/gemma-4-31b-it:free"], "выбор владельца не подменяется цепочкой");
-});
-
-testAsync("тело-ошибка при статусе 200 объясняется в логе", async () => {
-  // OpenRouter умеет вернуть 200 с телом-ошибкой и пустым choices; без этой ветки в логе было
-  // только «ответ пуст», и причина оставалась невидимой.
-  const impl = async () => ({ ok: true, json: async () => ({ error: { message: "rate limit exceeded" } }) });
-  let out, said = "";
-  said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.equal(out, null);
-  assert.match(said, /rate limit exceeded/);
-});
-
-testAsync("провайдер, не понявший подавление размышлений, получает повтор без него", async () => {
-  const seen = [];
-  const impl = async (_u, o) => {
-    const body = JSON.parse(o.body);
-    seen.push(body.reasoning ? "с подавлением" : "без подавления");
-    if (body.reasoning) return { ok: false, status: 400, text: async () => "unsupported parameter" };
-    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор\n===1===\nвторой" } }] }) };
-  };
-  let out;
-  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.deepEqual(seen, ["с подавлением", "без подавления"], "должен быть ровно один повтор");
-  assert.equal(out[0], "разбор", "разбор не теряется из-за неподдержанного параметра");
-});
-
-testAsync("отказ параметра телом при коде 200 тоже даёт повтор", async () => {
-  // Провайдеры сообщают об отказе по-разному: одни HTTP-кодом, другие полем error при 200.
-  const seen = [];
-  const impl = async (_u, o) => {
-    const body = JSON.parse(o.body);
-    seen.push(body.reasoning ? "с подавлением" : "без подавления");
-    if (body.reasoning) return { ok: true, json: async () => ({ error: { message: "unsupported parameter: reasoning" } }) };
-    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор\n===1===\nвторой" } }] }) };
-  };
-  let out;
-  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.deepEqual(seen, ["с подавлением", "без подавления"]);
-  assert.equal(out[0], "разбор");
-});
-
-testAsync("перегрузка провайдера НЕ путается с отказом параметра", async () => {
-  // «ResourceExhausted» — это не про параметры: повторять тот же запрос бессмысленно, надо
-  // сразу идти к следующей модели, иначе на каждую перегрузку тратится лишний запрос квоты.
-  const seen = [];
-  const impl = async (_u, o) => {
-    const body = JSON.parse(o.body);
-    seen.push(`${body.model}|${body.reasoning ? "подавл" : "без"}`);
-    if (body.model.startsWith("nvidia/")) return { ok: true, json: async () => ({ error: { message: "ResourceExhausted: Worker local total request limit reached (163/32)" } }) };
-    return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nразбор\n===1===\nвторой" } }] }) };
-  };
-  let out;
-  await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
-  assert.equal(seen.filter((x) => x.startsWith("nvidia/")).length, 1, `на перегруженную модель — один запрос, а не два: ${seen}`);
-  assert.equal(out[0], "разбор");
-});
-
-testAsync("бюджет токенов рассчитан на размышления модели", async () => {
-  let body = null;
-  const spy = async (_u, o) => { body = JSON.parse(o.body); return { ok: true, json: async () => ({ choices: [{ message: { content: "===0===\nтекст\n===1===\nтекст" } }] }) }; };
-  await withFetch(spy, () => llmComments(evs, panel));
-  assert.ok(body.max_tokens >= 8000, `рассуждающей модели нужен запас, а не ${body.max_tokens} токенов`);
-  assert.equal(body.reasoning?.exclude, true, "размышления не должны возвращаться в ответе");
+  // оборванный ответ мог быть оплачен целиком: весь max_tokens на выходе — это уже $0,16
+  assert.ok(spend.usd >= 0.16 && spend.usd < 0.2, `оценка сверху: ${spend.usd}`);
 });
 
 testAsync("пустой ответ модели объясняется в логе, а не молчит", async () => {
-  const impl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "" }, finish_reason: "length" }] }) });
   let out, said = "";
-  said = await quiet(async () => { out = await withFetch(impl, () => llmComments(evs, panel)); });
+  said = await quiet(async () => { out = await withFetch(replyMsg({ content: [] }), () => llmComments(evs, panel)); });
   assert.equal(out, null);
-  assert.match(said, /не дал текста/, "иначе «шаблон» в логе не отличить от «модель ответила, а я не разобрал»");
+  assert.match(said, /ответ без текста/, "иначе «шаблон» в логе не отличить от «модель ответила, а я не разобрал»");
+});
+
+testAsync("цена ответа считается по usage и копится в записи расхода", async () => {
+  const spend = { day: "2000-01-01", usd: 7 }; // запись прошлых суток — сегодняшний расход с нуля
+  const said = await quiet(async () => { await withFetch(reply("===0===\nразбор\n===1===\nразбор"), () => llmComments(evs, panel, { spend })); });
+  // 1200 входных × $2 + 800 выходных × $10 за миллион = $0,0024 + $0,008
+  assert.equal(spend.day, mskToday());
+  assert.ok(Math.abs(spend.usd - 0.0104) < 1e-9, `расход ${spend.usd}`);
+  assert.match(said, /Claude: claude-sonnet-5-5 · вход 1200 · выход 800, из них размышления 500 · \$0\.0104 · \d+\.\d с · stop_reason end_turn/, said);
+  await quiet(async () => { await withFetch(reply("===0===\nразбор\n===1===\nразбор"), () => llmComments(evs, panel, { spend })); });
+  assert.ok(Math.abs(spend.usd - 0.0208) < 1e-9, `второй ответ дописывается к первому: ${spend.usd}`);
+  // серверный резерв: верхний usage — только последняя попытка, все попытки — в iterations
+  const viaFallback = replyMsg({
+    model: "claude-sonnet-5",
+    content: [{ type: "text", text: "===0===\nразбор\n===1===\nразбор" }],
+    usage: { ...USAGE, iterations: [{ type: "message", input_tokens: 1000, output_tokens: 0 }, { type: "fallback_message", input_tokens: 1200, output_tokens: 800 }] },
+  });
+  const fb = { day: mskToday(), usd: 0 };
+  const saidFb = await quiet(async () => { await withFetch(viaFallback, () => llmComments(evs, panel, { spend: fb })); });
+  assert.ok(Math.abs(fb.usd - 0.0124) < 1e-9, `отклонённая попытка тоже в расходе: ${fb.usd}`);
+  assert.match(saidFb, /Claude: claude-sonnet-5 \(запрошена claude-sonnet-5-5\)/, "ответ резервной модели виден в логе");
+});
+
+testAsync("суточный потолок исчерпан — запроса нет, шаблон, причина в логе", async () => {
+  const full = capture();
+  let out = "не вызывалось";
+  const said = await quiet(async () => { out = await withEnv({ NOTIFY_LLM_DAILY_USD: undefined }, () => withFetch(full.impl, () => llmComments(evs, panel, { spend: { day: mskToday(), usd: 1 } }))); });
+  assert.equal(out, null);
+  assert.equal(full.seen.length, 0, "после исчерпания потолка в сеть не уходит ни одного запроса");
+  assert.match(said, /суточный потолок \$1 исчерпан/);
+  // «0» — выключатель: разбора нет, даже если сегодня ничего не потрачено
+  const off = capture();
+  await quiet(async () => { await withEnv({ NOTIFY_LLM_DAILY_USD: "0" }, () => withFetch(off.impl, () => llmComments(evs, panel, { spend: { day: "", usd: 0 } }))); });
+  assert.equal(off.seen.length, 0, "потолок 0 выключает разбор");
+  // своё значение потолка и расход прошлых суток
+  const raised = capture();
+  await quiet(async () => { await withEnv({ NOTIFY_LLM_DAILY_USD: "3" }, () => withFetch(raised.impl, () => llmComments(evs, panel, { spend: { day: mskToday(), usd: 2.9 } }))); });
+  assert.equal(raised.seen.length, 1, "до своего потолка запрос идёт");
+  const yesterday = capture();
+  await quiet(async () => { await withFetch(yesterday.impl, () => llmComments(evs, panel, { spend: { day: "2000-01-01", usd: 99 } })); });
+  assert.equal(yesterday.seen.length, 1, "расход прошлых суток сегодняшнему потолку не мешает");
 });
 
 testAsync("ответ, обёрнутый в markdown-блок, разбирается", async () => {
   const txt = "```\n===0===\nтекст один\n===1===\nтекст два\n```";
-  const out = await withFetch(reply(txt), () => llmComments(evs, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
   assert.equal(out[0], "текст один");
 });
 
 testAsync("единственное событие принимает связный текст без маркеров", async () => {
   const one = [evs[0]];
   const txt = "Спред расширился на три пункта — движение рядовое, но направление стоит держать в уме: кредитные премии обычно поворачивают раньше акций.";
-  const out = await withFetch(reply(txt), () => llmComments(one, panel));
+  const out = await hush(() => withFetch(reply(txt), () => llmComments(one, panel)));
   assert.equal(out[0], txt, "модель, ответившая без разметки на один вопрос, не должна терять ответ");
 });
 
 testAsync("пропущенный моделью индекс не ломает рассылку", async () => {
-  const out = await withFetch(reply('[{"i":1,"text":"только второй"}]'), () => llmComments(evs, panel));
+  const out = await hush(() => withFetch(reply('[{"i":1,"text":"только второй"}]'), () => llmComments(evs, panel)));
   assert.equal(out[0], null, "на пропуск подставится шаблон");
   assert.equal(out[1], "только второй");
 });
@@ -2207,98 +2257,73 @@ testAsync("нечитаемый ответ → шаблон, с диагност
   assert.match(said, /не разобран/, "в логе должно быть видно, что модель ответила, но ответ не разобрался");
 });
 
-testAsync("отказ API не роняет прогон и объясняет причину в логе", async () => {
-  let out;
-  const said = await quiet(async () => {
-    out = await withFetch(async () => ({ ok: false, status: 503, text: async () => "down" }), () => llmComments(evs, panel));
-  });
-  assert.equal(out, null);
-  assert.match(said, /503/, "причина отказа обязана попасть в лог");
-});
-
-testAsync("по умолчанию берётся именно бесплатная nemotron", async () => {
-  let seen = null;
-  const spy = async (_url, opt) => {
-    seen = JSON.parse(opt.body).model;
-    return { ok: true, json: async () => ({ choices: [{ message: { content: '[{"i":0,"text":"ok"},{"i":1,"text":"ok"}]' } }] }) };
-  };
-  const realModel = process.env.NOTIFY_MODEL;
-  delete process.env.NOTIFY_MODEL;
-  try {
-    await withFetch(spy, () => llmComments(evs, panel));
-  } finally {
-    if (realModel !== undefined) process.env.NOTIFY_MODEL = realModel;
-  }
-  assert.equal(seen, "nvidia/nemotron-3-ultra-550b-a55b:free");
-});
-
-testAsync("пустая переменная модели (незаданный vars) не ломает выбор бесплатной", async () => {
-  let seen = null;
-  const spy = async (_url, opt) => {
-    seen = JSON.parse(opt.body).model;
-    return { ok: true, json: async () => ({ choices: [{ message: { content: '[{"i":0,"text":"ok"},{"i":1,"text":"ok"}]' } }] }) };
-  };
-  process.env.NOTIFY_MODEL = "   ";
-  try {
-    await withFetch(spy, () => llmComments(evs, panel));
-  } finally {
-    delete process.env.NOTIFY_MODEL;
-  }
-  assert.equal(seen, "nvidia/nemotron-3-ultra-550b-a55b:free");
-});
-
-testAsync("платная модель без явного разрешения не вызывается вообще", async () => {
-  let called = false;
-  const spy = async () => {
-    called = true;
-    return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
-  };
-  process.env.NOTIFY_MODEL = "anthropic/claude-opus-4.8";
-  let out;
-  let said = "";
-  try {
-    said = await quiet(async () => {
-      out = await withFetch(spy, () => llmComments(evs, panel));
-    });
-  } finally {
-    delete process.env.NOTIFY_MODEL;
-  }
-  assert.equal(out, null, "должен быть шаблон, а не запрос");
-  assert.equal(called, false, "платный запрос не должен уходить в сеть");
-  assert.match(said, /платная/, "отказ от платной модели обязан быть объяснён в логе");
-});
-
-testAsync("платная модель уходит в сеть только при NOTIFY_ALLOW_PAID=1", async () => {
-  let seen = null;
-  const spy = async (_url, opt) => {
-    seen = JSON.parse(opt.body).model;
-    return { ok: true, json: async () => ({ choices: [{ message: { content: '[{"i":0,"text":"ok"},{"i":1,"text":"ok"}]' } }] }) };
-  };
-  process.env.NOTIFY_MODEL = "anthropic/claude-opus-4.8";
-  process.env.NOTIFY_ALLOW_PAID = "1";
-  try {
-    await withFetch(spy, () => llmComments(evs, panel));
-  } finally {
-    delete process.env.NOTIFY_MODEL;
-    delete process.env.NOTIFY_ALLOW_PAID;
-  }
-  assert.equal(seen, "anthropic/claude-opus-4.8");
-});
-
 testAsync("без ключа модель не дёргается вовсе", async () => {
-  const real = process.env.OPENROUTER_KEY;
-  delete process.env.OPENROUTER_KEY;
+  const real = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
   let called = false;
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () => { called = true; throw new Error("не должно вызываться"); };
   try {
-    assert.equal(await llmComments(evs, panel), null);
+    assert.equal(await llmComments(evs, panel, { spend: { day: "", usd: 0 } }), null);
     assert.equal(called, false);
   } finally {
     globalThis.fetch = realFetch;
-    if (real !== undefined) process.env.OPENROUTER_KEY = real;
+    if (real !== undefined) process.env.ANTHROPIC_API_KEY = real;
   }
 });
+
+/* ---- расход на разбор через настоящую main(): состояние — из памяти, сеть подменена ---- */
+
+// Московские сутки снимка k так, как их видит main() внутри runBot (часы сдвинуты на снимок + 90 с).
+const mskDayOfSnap = (snap) => new Date(Date.parse(snap.generated_at) + 90e3 + 3 * 3600e3).toISOString().slice(0, 10);
+
+testAsync("расход разбора копится в состоянии рассылки (llm_spend)", async () => {
+  const snaps = upgrade({ log: UP_LOG });
+  let r;
+  await quiet(async () => { r = await withFetch(reply("===0===\nЦель поднята с 20 до 45 %: режим выдержал удержание."), () => runBot(snaps)); });
+  assert.equal(r.sent.length, 1);
+  // 1200 входных × $2 + 800 выходных × $10 за миллион — сутки по Москве, как у снимка
+  assert.deepEqual(r.state.llm_spend, { day: mskDayOfSnap(snaps[1]), usd: 0.0104 });
+});
+
+testAsync("потолок расходов исчерпан — main() не делает запроса, сообщение о доле уходит с шаблоном", async () => {
+  const snaps = upgrade({ log: UP_LOG });
+  const base = await runBot(snaps, { only: [0] });
+  const { seen, impl } = capture();
+  let r;
+  const state = { ...base.state, llm_spend: { day: mskDayOfSnap(snaps[1]), usd: 5 } };
+  await quiet(async () => { r = await withFetch(impl, () => runBot(snaps, { state, only: [1] })); });
+  assert.equal(seen.length, 0, "после исчерпания потолка в сеть не уходит ни одного запроса");
+  assert.equal(r.sent.length, 1, "сообщение о доле от потолка не зависит");
+  assert.match(r.sent[0].text, /💬 Режим улучшился и выдержал удержание/, "вместо разбора — шаблон из записи решения");
+  assert.deepEqual(r.state.llm_spend, { day: mskDayOfSnap(snaps[1]), usd: 5 }, "расход не меняется");
+});
+
+testAsync("без пакета SDK модуль грузится, а разбор пропускается с понятной строкой в логе", async () => {
+  // Копия notify.mjs — во временном каталоге без node_modules: так выглядит прогон без установки.
+  const { mkdtemp, copyFile, writeFile: wf, rm: rmd } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const dir = await mkdtemp(join(tmpdir(), "notify-nosdk-"));
+  try {
+    await copyFile(new URL("./notify.mjs", import.meta.url), join(dir, "notify.mjs"));
+    await wf(join(dir, "run.mjs"), [
+      'const { llmComments } = await import("./notify.mjs");',
+      'globalThis.fetch = async () => { throw new Error("сеть трогать нельзя"); };',
+      'const out = await llmComments([{ kind: "release", title: "A", before: "", after: "", detail: "", note: "" }], { indicators: [] });',
+      'console.log("итог: " + JSON.stringify(out));',
+    ].join("\n"));
+    const r = spawnSync(process.execPath, [join(dir, "run.mjs")], { encoding: "utf8", env: { ...process.env, ANTHROPIC_API_KEY: TEST_KEY } });
+    assert.equal(r.status, 0, `модуль обязан грузиться без SDK: ${r.stderr}`);
+    assert.match(r.stdout, /итог: null/);
+    assert.match(r.stderr, /SDK Anthropic не установлен — разбор пропущен/);
+  } finally {
+    await rmd(dir, { recursive: true, force: true });
+  }
+});
+
+
 
 for (const [name, fn] of asyncTests) {
   try {
