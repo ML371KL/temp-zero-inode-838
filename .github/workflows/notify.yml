@@ -64,6 +64,17 @@ jobs:
           restore-keys: |
             btc21m-notify-${{ github.ref_name }}-
 
+      # SDK Anthropic — до тестов: тесты комментатора идут через настоящий SDK (сеть подменена), а
+      # рассылка зовёт его же. Ставится без записи в package.json; версия зафиксирована — на ней
+      # проверены и форма запроса, и классы ошибок. Это единственная `npm i --no-save` прогона:
+      # каждая следующая вычищала бы пакеты предыдущей. Сбой установки (недоступен npm) рассылку не
+      # останавливает: тесты покраснеют и включат осторожный режим, а без пакета скрипт пишет в лог
+      # «SDK Anthropic не установлен» и шлёт сообщения с шаблонным комментарием.
+      - name: SDK Anthropic для комментатора
+        id: sdk
+        continue-on-error: true
+        run: npm i --no-save --no-package-lock --no-audit --no-fund @anthropic-ai/sdk@1.3.0
+
       # Тесты стоят перед рассылкой, но её НЕ блокируют. Раньше красный тест молча выключал
       # уведомления целиком — включая сообщения о доле, ради которых бот существует. Теперь упавший
       # тест делает три вещи: красит прогон (последний шаг), переводит рассылку в осторожный режим
@@ -79,8 +90,13 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          # Комментатор — Claude через SDK Anthropic. Без секрета сообщения идут с шаблоном.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Необязательные переменные репозитория (Variables); незаданная приходит пустой строкой,
+          # и скрипт берёт умолчание: claude-sonnet-5-5, xhigh, потолок 1 $ в сутки.
           NOTIFY_MODEL: ${{ vars.NOTIFY_MODEL }}
+          NOTIFY_LLM_EFFORT: ${{ vars.NOTIFY_LLM_EFFORT }}
+          NOTIFY_LLM_DAILY_USD: ${{ vars.NOTIFY_LLM_DAILY_USD }}
           NOTIFY_SOURCE: json
           NOTIFY_SNAPSHOT: docs/snapshot.json
           NOTIFY_STATE: .notify/state.json
