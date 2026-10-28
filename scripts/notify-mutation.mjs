@@ -9,7 +9,7 @@
 // Запуск: node scripts/notify-mutation.mjs [часть-идентификатора]
 // В рабочую копию ничего не пишет, в сеть не ходит. В notify.yml не входит: это инструмент
 // разработчика, а не шаг рассылки (три десятка прогонов тестов на каждый снимок были бы лишними).
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,11 +134,13 @@ const MUTATIONS = [
     guard: /предупреждение о данных: одно сообщение при появлении и одно при снятии/ },
   { id: "8-имя-детектора-утверждает-факт", find: '"Слом маржинального спроса": "Совместное ухудшение спроса: ETF, стейблкоины, биржи, спот США",', put: '"Слом маржинального спроса": "Приток денег в биткоин прекратился",',
     guard: /имя детектора называет условие, а не факт о рынке/ },
-  { id: "9-числа-разбора-не-сверяются", find: "      const stray = strayNumbers(t, input);", put: "      const stray = [];",
+  { id: "9-числа-разбора-не-сверяются", find: "    const stray = strayNumbers(t, input);", put: "    const stray = [];",
     guard: /разбор с посторонним числом отбрасывается/ },
   { id: "9-вход-модели-без-решения", find: "  if (eng) {\n    const hold = Date.parse", put: "  if (false) {\n    const hold = Date.parse",
     guard: /во входе модели о смене доли есть причина, цена, режим, кандидат и оверлей/ },
-  { id: "9-модель-ждут-без-срока", find: "    if (left <= 0) {", put: "    if (false) {",
+  // С 28.10.2026 модель одна, и срок для сообщения о доле — это срок самого запроса (вместе с
+  // повторами SDK), а не проверка между моделями цепочки.
+  { id: "9-модель-ждут-без-срока", find: "  const timeoutMs = budgetMs > 0 ? Math.min(LLM_TIMEOUT_MS, budgetMs) : LLM_TIMEOUT_MS;", put: "  const timeoutMs = LLM_TIMEOUT_MS;",
     guard: /на сообщение о доле модель ждут не дольше отведённого/ },
   { id: "10-база-частот-по-всем-сменам", find: "  if (x.known && y.known && (x.overlay || y.overlay)) return sameSet(x.on, y.on) && sameSet(x.off, y.off);\n  return x.step === y.step;", put: "  return true;",
     guard: /меньше трёх таких же смен — база частот не печатается/ },
@@ -186,6 +188,13 @@ const MUTATIONS = [
 
 const only = process.argv[2] || "";
 const dir = mkdtempSync(join(tmpdir(), "notify-mutation-"));
+// Тесты комментатора идут через настоящий SDK Anthropic (сеть подменена), а копия живёт во
+// временном каталоге, где node_modules нет. Зависимости рабочей копии подключаются ссылкой — на
+// Windows это junction, ему не нужны права администратора. Ссылка снимается ДО удаления каталога:
+// рекурсивное удаление не должно даже пытаться пройти по ней в настоящий node_modules.
+const deps = join(here, "..", "node_modules");
+const depsLink = join(dir, "node_modules");
+if (existsSync(deps)) symlinkSync(deps, depsLink, "junction");
 let survived = 0, broken = 0, ran = 0;
 try {
   writeFileSync(join(dir, "notify-test.mjs"), tests);
@@ -216,6 +225,7 @@ try {
     }
   }
 } finally {
+  try { unlinkSync(depsLink); } catch {}
   rmSync(dir, { recursive: true, force: true });
 }
 console.log(`мутаций: ${ran}, убито ${ran - survived - broken}, выжило ${survived}, сломано ${broken}`);
