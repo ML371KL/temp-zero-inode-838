@@ -1,6 +1,7 @@
 // Тесты уведомлений. Все фикстуры синтетические и НЕ зависят от текущей даты: проверяется
 // поведение диффера, а не то, что сегодня опубликовал FRED.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 // Транспорт к Claude читает настройки при загрузке модуля, поэтому они задаются ДО импорта (он
 // поэтому динамический). Повторы SDK выключены: заглушка отвечает сразу, а повтор 429/529 с паузой
 // только растягивал бы прогон. Срок разбора сокращён до 5 с — заметно длиннее срока для сообщения
@@ -9,7 +10,7 @@ import assert from "node:assert/strict";
 process.env.NOTIFY_LLM_MAX_RETRIES = "0";
 process.env.NOTIFY_LLM_TIMEOUT_MS = "5000";
 for (const k of ["NOTIFY_MODEL", "NOTIFY_LLM_EFFORT", "NOTIFY_LLM_DAILY_USD", "NOTIFY_DECISION_LLM_MS", "ANTHROPIC_BASE_URL"]) delete process.env[k];
-const { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER } = await import("./notify.mjs");
+const { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, guardCheck, gParseBlocks, guardReview, guardRecord, guardOpsTick, guardWeekLine, guardWeekOf, guardAccessProblem, engineAgrees, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER } = await import("./notify.mjs");
 
 let passed = 0;
 const test = (name, fn) => {
@@ -772,7 +773,7 @@ const silently = async (fn) => {
 const plainText = (html) => html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/ /g, " ");
 // Бот идёт по ленте снимков настоящей main(): состояние — из памяти, сообщения — в массив.
 // only — номера снимков, на которых бот запускается (пропуск тактов); по умолчанию на каждом.
-async function runBot(snaps, { state = null, only = null, selftest } = {}) {
+async function runBot(snaps, { state = null, only = null, selftest, sendOps } = {}) {
   const sent = [];
   let st = state;
   const realNow = Date.now;
@@ -786,6 +787,7 @@ async function runBot(snaps, { state = null, only = null, selftest } = {}) {
         saveState: (s) => { st = JSON.parse(JSON.stringify(s)); },
         deliver: (text, ev) => { sent.push({ k, kind: ev.kind, title: ev.title, before: ev.before, after: ev.after, text: plainText(text), ev }); },
         selftest,
+        sendOps,
       }));
     }
   } finally { Date.now = realNow; }
@@ -1965,22 +1967,30 @@ const mskToday = () => new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 
 const evs = [{ kind: "zone", title: "A", before: "1", after: "2", detail: "", note: "" }, { kind: "release", title: "B", before: "", after: "", detail: "", note: "" }];
 const panel = panelOf([ind({})]);
 
-testAsync("комментарии разбираются из ответа модели", async () => {
-  const out = await hush(() => withFetch(reply('[{"i":0,"text":"первый"},{"i":1,"text":"второй"}]'), () => llmComments(evs, panel)));
-  assert.deepEqual(out, ["первый", "второй"]);
+// Разборы в фикстурах длиннее 40 знаков: короче проверка (блок 5б) считает ответ обрубком.
+const R0 = "Разбор первого события: движение рядовое и картину не меняет.";
+const R1 = "Разбор второго события: публикация подтверждает прежнюю картину.";
+
+testAsync("JSON вместо меток — брак ответа: метки ===N=== обязательны (с 29.10.2026)", async () => {
+  // Запасной разбор JSON жил ради бесплатных моделей; Claude держит формат, а нумерация в JSON
+  // не проверяема так же строго, как метки. Ответ без меток на два события — шаблон и строка в логе.
+  let out;
+  const said = await quiet(async () => { out = await withFetch(reply(JSON.stringify([{ i: 0, text: R0 }, { i: 1, text: R1 }])), () => llmComments(evs, panel)); });
+  assert.equal(out, null);
+  assert.match(said, /ответ отброшен — нет меток ===N===/);
 });
 
 testAsync("основной формат — блоки ===N===", async () => {
-  const txt = "===0===\nразбор первого события\n===1===\nразбор второго события";
+  const txt = `===0===\n${R0}\n===1===\n${R1}`;
   const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
-  assert.deepEqual(out, ["разбор первого события", "разбор второго события"]);
+  assert.deepEqual(out, [R0, R1]);
 });
 
 testAsync("рассуждение вокруг блоков не мешает разбору", async () => {
-  const txt = "Сначала подумаю: событий два, оба про кредит.\n\n===0===\nпервый текст\n\n===1===\nвторой текст\n";
+  const txt = `Сначала подумаю: событий два, оба про кредит.\n\n===0===\n${R0}\n\n===1===\n${R1}\n`;
   const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
-  assert.equal(out[0], "первый текст");
-  assert.equal(out[1], "второй текст");
+  assert.equal(out[0], R0);
+  assert.equal(out[1], R1);
 });
 
 testAsync("размышления модели в разбор не попадают: читаются только текстовые блоки", async () => {
@@ -1988,9 +1998,9 @@ testAsync("размышления модели в разбор не попада
   // размышления — отдельные блоки thinking, и в разбор идёт только text — даже если черновик
   // случайно похож на ответ с разметкой.
   const cot = "The user wants me to analyze two events.\n===0===\nчерновик внутри размышлений\n===1===\nещё черновик";
-  const impl = replyMsg({ content: [{ type: "thinking", thinking: cot, signature: "sig" }, { type: "text", text: "===0===\nразбор первого\n===1===\nразбор второго" }] });
+  const impl = replyMsg({ content: [{ type: "thinking", thinking: cot, signature: "sig" }, { type: "text", text: `===0===\n${R0}\n===1===\n${R1}` }] });
   const out = await hush(() => withFetch(impl, () => llmComments(evs, panel)));
-  assert.deepEqual(out, ["разбор первого", "разбор второго"]);
+  assert.deepEqual(out, [R0, R1]);
 });
 
 testAsync("ответ, оборванный по max_tokens, — шаблон, а не черновик", async () => {
@@ -2024,7 +2034,8 @@ testAsync("ломаный текст отбраковывается: транс�
     let out;
     const said = await quiet(async () => { out = await withFetch(reply(txt), () => llmComments(evs, panel)); });
     assert.equal(out?.[0] ?? null, null, `ломаный текст не должен доходить до читателя: ${txt.slice(10, 60)}`);
-    assert.match(said, /испорчен/, "причина брака обязана быть в логе");
+    assert.match(said, /событие 0: вырезано — (транслит|чужая письменность|латиница внутри слова)/, "причина брака обязана быть в логе");
+    assert.match(said, /событие 0: разбор отброшен — после вырезания осталось предложений: 0/, "и текст отброшенного — тоже");
   }
 });
 
@@ -2071,7 +2082,7 @@ testAsync("разбор с посторонним числом отбрасыв�
   let out;
   const said = await quiet(async () => { out = await withFetch(reply(txt), () => llmComments(numEvents, panel)); });
   assert.equal(out, null, "единственный разбор забракован — остаётся шаблон");
-  assert.match(said, /числа, которых нет во входе \(4,35\)/, "причина брака обязана быть в логе");
+  assert.match(said, /вырезано — числа не из входа: 4,35: «Приток за день составил 137 млн/, "причина и сама фраза обязаны быть в логе");
 });
 
 testAsync("разбор, все числа которого взяты из входа, проходит", async () => {
@@ -2232,9 +2243,10 @@ testAsync("суточный потолок исчерпан — запроса �
 });
 
 testAsync("ответ, обёрнутый в markdown-блок, разбирается", async () => {
-  const txt = "```\n===0===\nтекст один\n===1===\nтекст два\n```";
+  const txt = `\`\`\`\n===0===\n${R0}\n===1===\n${R1}\n\`\`\``;
   const out = await hush(() => withFetch(reply(txt), () => llmComments(evs, panel)));
-  assert.equal(out[0], "текст один");
+  assert.equal(out[0], R0);
+  assert.equal(out[1], R1);
 });
 
 testAsync("единственное событие принимает связный текст без маркеров", async () => {
@@ -2244,17 +2256,22 @@ testAsync("единственное событие принимает связн
   assert.equal(out[0], txt, "модель, ответившая без разметки на один вопрос, не должна терять ответ");
 });
 
-testAsync("пропущенный моделью индекс не ломает рассылку", async () => {
-  const out = await hush(() => withFetch(reply('[{"i":1,"text":"только второй"}]'), () => llmComments(evs, panel)));
-  assert.equal(out[0], null, "на пропуск подставится шаблон");
-  assert.equal(out[1], "только второй");
+testAsync("недостающий хвост меток не ломает рассылку, а сбой нумерации бракует ответ", async () => {
+  const out = await hush(() => withFetch(reply(`===0===\n${R0}`), () => llmComments(evs, panel)));
+  assert.equal(out[0], R0);
+  assert.equal(out[1], null, "на пропуск подставится шаблон");
+  // «===1===» у первого события приклеил бы разбор к чужому сообщению — весь ответ в брак
+  let bad;
+  const said = await quiet(async () => { bad = await withFetch(reply(`===1===\n${R0}\n===2===\n${R1}`), () => llmComments(evs, panel)); });
+  assert.equal(bad, null);
+  assert.match(said, /метки ===1=== ===2=== вместо 0…1/);
 });
 
 testAsync("нечитаемый ответ → шаблон, с диагностикой в логе", async () => {
   let out, said = "";
   said = await quiet(async () => { out = await withFetch(reply("извините, не могу"), () => llmComments(evs, panel)); });
   assert.equal(out, null);
-  assert.match(said, /не разобран/, "в логе должно быть видно, что модель ответила, но ответ не разобрался");
+  assert.match(said, /ответ отброшен — нет меток ===N===; начало: «извините, не могу»/, "в логе должно быть видно, что модель ответила, но ответ не разобрался");
 });
 
 testAsync("без ключа модель не дёргается вовсе", async () => {
@@ -2321,6 +2338,110 @@ testAsync("без пакета SDK модуль грузится, а разбо�
   } finally {
     await rmd(dir, { recursive: true, force: true });
   }
+});
+
+
+/* ---- проверка смысла разбора (блок 5б) и недельный учёт ---- */
+
+// Общие векторы с 837, 842 и 843: тот же файл гоняют тесты Python-копии проверки. Расхождение до
+// буквы причины — значит, копии разошлись.
+test("проверка разбора совпадает с общими векторами 837/838/842/843", () => {
+  const v = JSON.parse(readFileSync(new URL("./llm-guard-vectors.json", import.meta.url), "utf8"));
+  assert.ok(v.check.length >= 30 && v.parse.length >= 5, "векторы на месте");
+  for (const c of v.check) assert.deepEqual(guardCheck(c.text, c.input, c.index, c.strict, c.extra), c.want, c.name);
+  for (const c of v.parse) assert.deepEqual(gParseBlocks(c.text, c.n), [c.want, c.error], c.name);
+});
+
+test("сверка чисел смотрит на вход СВОЕГО события, а не всей пачки", () => {
+  const two = [numEvents[0], { kind: "release", title: "Минфин США", before: "962 млрд $", after: "982 млрд $", detail: "", note: "" }];
+  const input = llmInput(two, panel);
+  assert.deepEqual(strayNumbers("Счёт Минфина вырос до 982 млрд.", input, 1), []);
+  assert.deepEqual(strayNumbers("Счёт Минфина вырос до 982 млрд.", input, 0), ["982"], "число соседнего события — не из входа этого");
+  assert.deepEqual(strayNumbers("Счёт вырос на 20 млрд.", input, 1), [], "разность пары чисел события — честная арифметика");
+  assert.deepEqual(strayNumbers("Отток 58 млн против притока 137 млн — в 2,4 раза меньше.", input, 0), [], "отношение пары чисел события");
+  assert.deepEqual(strayNumbers("Приток составил 10% месячного.", input, 0), ["10"], "малое число не подтверждается цифрой даты 17.08");
+  // «на N%» — признак сравнения: допускается изменение пары чисел события с допуском на их
+  // округление (137 и 150 дают 9,5%, и «на 10%» честно). Без признака — только число из входа.
+  assert.deepEqual(strayNumbers("Приток вырос на 10% за неделю.", input, 0), []);
+});
+
+testAsync("фраза с посторонним числом вырезается, остальной разбор уходит", async () => {
+  const txt = "===0===\nЗа день в фонды пришло 137 млн долларов после оттока в 58 млн. Доходность десятилетних бумаг держится у 4,35 %. Месячный приток вырос с 3,4 до 3,5 млрд.";
+  let out;
+  const said = await quiet(async () => { out = await withFetch(reply(txt), () => llmComments(numEvents, panel)); });
+  assert.equal(out[0], "За день в фонды пришло 137 млн долларов после оттока в 58 млн. Месячный приток вырос с 3,4 до 3,5 млрд.");
+  assert.match(said, /событие 0: вырезано — числа не из входа: 4,35: «Доходность десятилетних/);
+});
+
+testAsync("разбор сверх 4 предложений и 600 знаков обрезается по границе предложения", async () => {
+  const txt = "===0===\nПервое предложение о потоках в фонды. Второе о том, что это рядовой шаг. Третье о месячной картине. Четвёртое о признаках. Пятое лишнее и отрезается.";
+  let out;
+  const said = await quiet(async () => { out = await withFetch(reply(txt), () => llmComments([numEvents[0]], panel)); });
+  assert.equal(out[0], "Первое предложение о потоках в фонды. Второе о том, что это рядовой шаг. Третье о месячной картине. Четвёртое о признаках.");
+  assert.match(said, /вырезано — сверх предела длины: «Пятое лишнее/);
+});
+
+testAsync("итог обращения ложится в недельный учёт: показано, вырезано, цена", async () => {
+  const week = {};
+  const txt = `===0===\n${R0}\n===1===\nПриток вырос на 10% за неделю. ${R1} Это видно по ряду.`;
+  await hush(() => withFetch(reply(txt), () => llmComments(evs, panel, { week })));
+  assert.equal(week.cur.week, guardWeekOf(Date.now()));
+  assert.deepEqual([week.cur.asked, week.cur.shown, week.cur.cut], [2, 2, 1]);
+  assert.ok(Math.abs(week.cur.usd - 0.0104) < 1e-9, `цена ответа: ${week.cur.usd}`);
+  const off = {};
+  await withEnv({ ANTHROPIC_API_KEY: undefined }, () => llmComments(evs, panel, { week: off }));
+  assert.deepEqual(off.cur.failed, { "нет ключа": 2 }, "без ключа события учтены как оставшиеся без разбора");
+});
+
+testAsync("отказ 401/402 и «кончились кредиты» — тревога в учёте; перегрузка — нет", async () => {
+  for (const [status, type, text, alarm] of [
+    [401, "authentication_error", "invalid x-api-key", true],
+    [402, "billing_error", "payment required", true],
+    [400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API.", true],
+    [529, "overloaded_error", "Overloaded", false],
+  ]) {
+    const week = {};
+    await quiet(() => withEnv({ NOTIFY_LLM_MAX_RETRIES: "0" }, () => withFetch(apiError(status, type, text), () => llmComments(evs, panel, { week }))));
+    assert.equal(!!week.access, alarm, `${status}: тревога ${alarm ? "нужна" : "не нужна"}`);
+    assert.deepEqual(week.cur.failed, { [`API ${status}`]: 2 });
+  }
+});
+
+testAsync("учёт: тревога о доступе один раз, «снова работает», строка за неделю — в понедельник", async () => {
+  const MON = Date.parse("2026-10-26T09:00:00Z");
+  const week = {};
+  const sent = [];
+  const send = async (t) => (sent.push(t), true);
+  guardRecord(week, MON, { asked: 2, failed: "API 401", access: { status: 401, kind: "authentication_error", message: "invalid x-api-key" } });
+  await guardOpsTick(week, MON, "838", send, "секрет в Actions.");
+  await guardOpsTick(week, MON + 60e3, "838", send, "секрет в Actions.");
+  assert.equal(sent.length, 1, "тревога о том же отказе не повторяется");
+  assert.match(sent[0], /838 · ИИ-разбор не работает/);
+  assert.match(sent[0], /401 authentication_error: ключ не принят/);
+  guardRecord(week, MON + 3600e3, { asked: 1, summary: { shown: 1, cut: 0, rejected: {} }, usd: 0.0412, ok: true });
+  await guardOpsTick(week, MON + 3600e3, "838", send, "");
+  assert.match(sent[1], /снова работает.*с 26\.10 12:00 до 26\.10 13:00 МСК/s);
+  // сбой Telegram: строка за неделю не помечается ушедшей и повторяется
+  const fail = async () => false;
+  await guardOpsTick(week, MON + 7 * 864e5, "838", fail, "");
+  assert.ok(week.report, "неотправленная строка ждёт следующего прогона");
+  await guardOpsTick(week, MON + 7 * 864e5 + 60e3, "838", send, "");
+  assert.equal(sent[2], "📊 838 · ИИ-разборы за 26.10–01.11: показано 1 из 3; отбраковано 0; без ответа API 401 2; потрачено $0,04");
+  assert.equal(week.report, undefined);
+});
+
+testAsync("main(): учёт переживает прогоны в состоянии, строку недели шлёт конец прогона", async () => {
+  const snaps = upgrade({ log: UP_LOG });
+  const base = await runBot(snaps, { only: [0] });
+  const sent = [];
+  // учёт прошлой недели в состоянии: первый же прогон новой недели отправляет её строку
+  const state = { ...base.state, llm_week: { cur: { week: "2000-W01", asked: 3, shown: 2, cut: 1, rejected: { "числа": 1 }, failed: {}, usd: 0.05 } } };
+  let r;
+  await quiet(async () => { r = await withFetch(reply("===0===\nЦель поднята с 20 до 45 %: режим выдержал удержание."), () => runBot(snaps, { state, only: [1], sendOps: async (t) => (sent.push(t), true) })); });
+  assert.equal(sent.length, 1, "строка за прошлую неделю ушла один раз");
+  assert.match(sent[0], /^📊 838 · ИИ-разборы за .*: показано 2 из 3; отбраковано 1 \(числа 1\); вырезано фраз 1; потрачено \$0,05$/);
+  assert.equal(r.state.llm_week.report, undefined, "ушедшая строка снята с очереди");
+  assert.equal(r.state.llm_week.cur.asked, 1, "разбор этого прогона уже в новой неделе");
 });
 
 

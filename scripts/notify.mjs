@@ -2495,9 +2495,9 @@ const LLM_SYSTEM = `Ты — независимый экономический �
 
 ЧЕГО ДЕЛАТЬ НЕЛЬЗЯ:
 · Начинать со слов «Что это за показатель» и вообще пересказывать определение — читателю нужен смысл, а не словарь.
-· Упоминать панель, дашборд, баллы, зоны, композит, детекторы, вклад в оценку — читатель о них не знает.
+· Упоминать панель, дашборд, баллы, зоны, композит, ядро, ячейки, ворота, якоря, детекторы, вклад в оценку и имена полей входа — читатель о них не знает.
 · Выдумывать числа, консенсус аналитиков и прогнозы, которых тебе не давали. Про ожидания рынка можно говорить только качественно.
-· Приводить числа, которых нет во входных данных. Каждое число в ответе должно быть взято из переданного тебе (округлять можно); ответ с посторонним числом отбрасывается целиком.
+· Приводить числа, которых нет во входных данных. Число бери только из своего события и из panel_context (округлять можно; отношение и разность двух данных чисел — тоже можно); год — только из дат входа.
 · Канцелярит, дисклеймеры, «важно отметить», «стоит подчеркнуть», «в заключение».
 · Приказы «покупайте / продавайте» — объясняй механику и последствия.
 · Утверждать, куда пойдёт рынок, и выдавать догадку о намерениях участников за факт. Говори «может означать», «если …, то …» и называй, что подтвердит или опровергнет версию.
@@ -2507,7 +2507,9 @@ const LLM_SYSTEM = `Ты — независимый экономический �
 
 ДАТА. Сегодняшняя дата по Москве — в поле today. Даты данных — в самих событиях. Не называй событие свежим или давним, не сверившись с этими датами.
 
-ФОРМАТ: 2–5 предложений живого русского на событие. Термин — с короткой расшифровкой прямо в тексте при первом употреблении.
+ФОРМАТ: 2–4 предложения живого русского на событие, вместе не длиннее 600 знаков. Термин — с короткой расшифровкой прямо в тексте при первом употреблении.
+
+ПРОВЕРКА. Ответ проверяется машинно: предложение с числом не из входа, прогнозом или внутренним словом вырезается, всё сверх 4 предложений и 600 знаков отрезается с конца. Самое важное ставь первым.
 
 ОТВЕТ строго такой структурой, без вступлений и заголовков:
 ===0===
@@ -2542,134 +2544,8 @@ function llmContext(panel) {
   return ctx;
 }
 
-/* Сверка чисел: каждое число из комментария модели должно находиться во входе, который она
-   получила. Проверялся только язык ответа, а числа и смысл — ничем; при этом именно разбор
-   выглядит в сообщении объяснением. Допуск — на формат, а не на содержание: число из ответа
-   считается найденным, если это запись входного числа с меньшей точностью («86 тыс.» при 86 198,
-   «около 20» при 19,5) или в другой кратности (тысячи, миллионы, миллиарды). Знак не сверяется:
-   «упал на 6,3» и «−6,3» — одно и то же. Не нашлось — комментарий отбрасывается, идёт шаблон. */
-function numberTokens(text) {
-  let s = String(text ?? "").replace(/[−–—]/g, "-").replace(/[   ]/g, " ");
-  const out = [];
-  const add = (raw, alts) => out.push({ raw: raw.trim(), alts });
-  const num = (str) => Number(str.replace(/ /g, "").replace(",", "."));
-  // С какой точностью число записано: «19,5» — до десятых, «86 000» — до тысяч. Округление до
-  // круглого допускается только у больших чисел и не глубже двух старших разрядов: «20» — это
-  // ровно двадцать, а не «от 15 до 25».
-  const precision = (str) => {
-    const t = str.replace(/ /g, "");
-    const frac = (t.split(/[.,]/)[1] || "").length;
-    if (frac) return Math.pow(10, -frac);
-    const zeros = (t.match(/0+$/) || [""])[0].length;
-    return t.length >= 4 ? Math.pow(10, Math.max(0, Math.min(zeros, t.length - 2))) : 1;
-  };
-  // мантисса со степенью: «3,177·10^11»
-  s = s.replace(/(\d+(?:[.,]\d+)?)\s*[·x×*]\s*10\^(-?\d+)/g, (m, a, e) => {
-    const v = num(a) * Math.pow(10, Number(e));
-    add(m, [[{ v, p: precision(a) * Math.pow(10, Number(e)) }], [{ v: num(a), p: precision(a) }, { v: Number(e), p: 1 }]]);
-    return " ";
-  });
-  // даты и время — по частям: «23.09.2026», «2026-09-23», «07:39»
-  s = s.replace(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/g, (m, d, mo, y) => { add(m, [[{ v: Number(d), p: 1 }, { v: Number(mo), p: 1 }, { v: Number(y), p: 1 }]]); return " "; });
-  s = s.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, (m, y, mo, d) => { add(m, [[{ v: Number(d), p: 1 }, { v: Number(mo), p: 1 }, { v: Number(y), p: 1 }]]); return " "; });
-  s = s.replace(/\b(\d{1,2}):(\d{2})\b/g, (m, h, mi) => { add(m, [[{ v: Number(h), p: 1 }, { v: Number(mi), p: 1 }]]); return " "; });
-  // остальное: «86 198», «19,5», «1.11» (последнее — либо дробь, либо «день.месяц»)
-  for (const m of s.matchAll(/\d{1,3}(?: \d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?/g)) {
-    const raw = m[0];
-    const alts = [[{ v: num(raw), p: precision(raw) }]];
-    const dm = raw.match(/^(\d{1,2})\.(\d{2})$/);
-    if (dm) alts.push([{ v: Number(dm[1]), p: 1 }, { v: Number(dm[2]), p: 1 }]);
-    add(raw, alts);
-  }
-  return out;
-}
-// Числа внутри имён собственных — не данные: «S&P 500» не обязан лежать во входе.
-const NAMED_NUMBERS = /S&P\s?500|Nasdaq[\s-]?100|Russell\s?2000|\bH\.\d+(?:\.\d+)?/gi;
-function strayNumbers(comment, input) {
-  comment = String(comment ?? "").replace(NAMED_NUMBERS, " ");
-  const allowed = [];
-  for (const t of numberTokens(input)) for (const alt of t.alts) for (const x of alt) if (finite(x.v)) allowed.push(Math.abs(x.v));
-  const found = (x) => {
-    const tol = x.p / 2 + Math.abs(x.v) * 1e-9;
-    return allowed.some((y) => [1, 1e3, 1e6, 1e9, 1e12].some((k) => Math.abs(Math.abs(x.v) - y / k) <= tol || Math.abs(Math.abs(x.v) - y * k) <= tol));
-  };
-  return numberTokens(comment).filter((t) => !t.alts.some((alt) => alt.every(found))).map((t) => t.raw);
-}
-
-/* Разбор ответа модели. Терпимый НАМЕРЕННО: бесплатные и рассуждающие модели плохо держат
-   строгий JSON (пропускают запятую, обрамляют ```-блоком, дописывают рассуждение вокруг), и
-   строгий разбор молча ронял весь комментарий в шаблон. Основной формат — блоки «===N===»,
-   но JSON тоже принимается, если модель вернула его. */
-function parseComments(txt, n) {
-  const out = new Array(n).fill(null);
-  let found = 0;
-
-  // 1) основной формат: ===N=== ... до следующего маркера
-  const marker = /^[^\S\n]*=+\s*(\d+)\s*=+[^\S\n]*$/gm;
-  const hits = [...txt.matchAll(marker)];
-  for (let k = 0; k < hits.length; k++) {
-    const idx = Number(hits[k][1]);
-    const from = hits[k].index + hits[k][0].length;
-    const to = k + 1 < hits.length ? hits[k + 1].index : txt.length;
-    const body = txt.slice(from, to).trim().replace(/^```[a-z]*\s*|\s*```$/g, "").trim();
-    if (idx >= 0 && idx < n && body) { out[idx] = body; found++; }
-  }
-  if (found) return out;
-
-  // 2) запасной формат: модель всё-таки ответила JSON-массивом
-  const start = txt.indexOf("[");
-  const end = txt.lastIndexOf("]");
-  if (start >= 0 && end > start) {
-    try {
-      const arr = JSON.parse(txt.slice(start, end + 1));
-      if (Array.isArray(arr)) {
-        for (const x of arr) {
-          const idx = Number(x?.i);
-          const body = typeof x?.text === "string" ? x.text : typeof x === "string" ? x : "";
-          if (Number.isInteger(idx) && idx >= 0 && idx < n && body) { out[idx] = body; found++; }
-        }
-      }
-    } catch {}
-  }
-  if (found) return out;
-
-  // 3) одно событие — принимаем связный текст целиком, если он похож на комментарий
-  if (n === 1) {
-    const body = txt.replace(/^```[a-z]*\s*|\s*```$/g, "").trim();
-    if (body.length >= 40 && body.length <= 4000) return [body];
-  }
-  return null;
-}
-
 // Какая модель реально ответила — нужно для честной подписи в проверке связи.
 let LAST_MODEL = "";
-
-/* Контроль качества текста. Бесплатные модели срываются в узнаваемые дефекты, и все три вида
-   наблюдались в живых прогонах:
-     · транслитерация — «kvantitativnogo uzhestocheniya» вместо «количественного ужесточения»;
-     · чужая письменность посреди фразы — «продажи حكومات»;
-     · смешение алфавитов внутри слова — «кванitative tightening».
-   Проверка доли кириллицы такое не ловит: одно латинское слово среди двадцати русских не сдвигает
-   отношение. Поэтому ищем именно дефекты, а не пропорцию. Найдено — разбор этого события
-   отбрасывается и идёт шаблон: лучше честное «разбор недоступен», чем ломаный текст у читателя.
-   Срывы видели у бесплатных моделей; у Claude проверка остаётся страховкой. */
-function textDefect(t) {
-  const s = String(t || "");
-  // Письменности, которых в русском разборе быть не может ни при каких терминах.
-  if (/[؀-ۿ֐-׿一-鿿぀-ヿ가-힯]/.test(s)) return "чужая письменность";
-  // Латиница и кириллица внутри ОДНОГО слова.
-  if (/[а-яёА-ЯЁ][a-zA-Z]|[a-zA-Z][а-яёА-ЯЁ]/.test(s)) return "смешение алфавитов внутри слова";
-  // Транслитерация: длинные СТРОЧНЫЕ латинские слова. Аббревиатуры (ETF, QT, MVRV) заглавные,
-  // имена собственные (Nasdaq, Deribit) начинаются с заглавной — они проверку проходят.
-  // Порог — ДВА и более таких слова: одиночный устоявшийся англицизм («treasuries») читателю
-  // понятен и менять из-за него модель расточительно, а вот пара слов подряд означает, что
-  // модель соскользнула на другой язык («kvantitativnogo uzhestocheniya»).
-  const translit = s.match(/(?<![A-Za-z])[a-z]{5,}(?![A-Za-z])/g) || [];
-  const ok = /^(bitcoin|ethereum|nasdaq|treasuries|futures|options|hedge|spread|basis|carry|funding|stablecoin)$/;
-  const bad = translit.filter((w) => !ok.test(w));
-  if (bad.length >= 2) return `похоже на транслитерацию: ${bad.slice(0, 3).join(", ")}`;
-  return "";
-}
 
 // Вход модели одной строкой. Вынесен отдельно, потому что с ним же сверяются числа ответа: что
 // модель получила, то она и вправе цитировать. Сегодняшняя дата — тоже вход: своих часов у модели
@@ -2773,9 +2649,11 @@ function llmCostUsd(usage) {
 // весь max_tokens на выходе. Иначе зависающая модель жгла бы деньги мимо потолка.
 const llmWorstCaseUsd = (chars) => (Math.ceil(chars / 2) * LLM_USD_PER_MTOK_IN + LLM_MAX_TOKENS * LLM_USD_PER_MTOK_OUT) / 1e6;
 
-/* Один запрос к Claude. Возвращает { text, model } — склейку текстовых блоков ответа и модель,
-   которая его дала, — либо { text: null } (с timedOut: true, если вышел срок). В любом исходе в
-   логе остаётся строка о том, что произошло; ключ не печатается нигде.
+/* Один запрос к Claude. Возвращает { text, model, usd } — склейку текстовых блоков ответа, модель,
+   которая его дала, и цену, — либо { text: null, failed } с видом отказа для недельного учёта (при
+   отказе API ещё status/kind/message, при обрыве по сроку timedOut: true). answered — API ответил,
+   пусть и без годного текста. В любом исходе в логе остаётся строка о том, что произошло; ключ не
+   печатается нигде.
    Блоки размышлений (thinking) не читаются вовсе: черновик модели к читателю попадать не должен.
    spend — запись расхода за сутки из состояния: с ней запрос сверяется с потолком и дописывает
    свою цену; без неё (тесты, проверка связи) потолок не применяется. timeoutMs — срок всего
@@ -2786,7 +2664,7 @@ async function claudeAsk({ system, user, timeoutMs = LLM_TIMEOUT_MS, spend = nul
     const spent = spentToday(spend);
     if (spent >= cap) {
       console.error(`суточный потолок $${cap} исчерпан (за ${mskDay()} МСК потрачено $${spent.toFixed(4)}) — разбор пропущен, идёт шаблон`);
-      return { text: null };
+      return { text: null, failed: "потолок $" };
     }
   }
   let Anthropic;
@@ -2794,7 +2672,7 @@ async function claudeAsk({ system, user, timeoutMs = LLM_TIMEOUT_MS, spend = nul
     ({ default: Anthropic } = await import("@anthropic-ai/sdk"));
   } catch (e) {
     console.error(`SDK Anthropic не установлен — разбор пропущен (${String(e?.code || e?.message || e).slice(0, 120)})`);
-    return { text: null };
+    return { text: null, failed: "нет SDK" };
   }
   const model = resolveModel();
   const limitMs = Math.max(1000, timeoutMs);
@@ -2826,40 +2704,562 @@ async function claudeAsk({ system, user, timeoutMs = LLM_TIMEOUT_MS, spend = nul
     console.log(`Claude: ${served}${served !== model ? ` (запрошена ${model})` : ""} · вход ${u.input_tokens ?? "?"} · выход ${u.output_tokens ?? "?"}, из них размышления ${u.output_tokens_details?.thinking_tokens ?? "?"} · $${usd.toFixed(4)} · ${secs()} с · stop_reason ${msg.stop_reason}`);
     if (msg.stop_reason === "refusal") {
       console.error(`${served}: модель отказалась отвечать (категория ${msg.stop_details?.category ?? "не указана"}) — разбора нет, идёт шаблон`);
-      return { text: null };
+      return { text: null, failed: "отказ модели", answered: true, usd };
     }
     if (msg.stop_reason === "max_tokens") {
       console.error(`${served}: не хватило max_tokens (${LLM_MAX_TOKENS}) — ответ оборван, разбора нет`);
-      return { text: null };
+      return { text: null, failed: "обрыв ответа", answered: true, usd };
     }
     const text = (msg.content || []).filter((b) => b?.type === "text").map((b) => b.text || "").join("").trim();
     if (!text) {
       console.error(`${served}: ответ без текста (блоки: ${(msg.content || []).map((b) => b?.type).join(", ") || "нет"}) — разбора нет`);
-      return { text: null };
+      return { text: null, failed: "пустой ответ", answered: true, usd };
     }
-    return { text, model: served };
+    return { text, model: served, answered: true, usd };
   } catch (e) {
     // Классы SDK — от частного к общему: срок и обрыв — подклассы APIConnectionError, а тот — APIError.
     if (e instanceof Anthropic.APIUserAbortError || e instanceof Anthropic.APIConnectionTimeoutError) {
       const est = llmWorstCaseUsd(String(system).length + String(user).length);
       addSpend(spend, est);
       console.error(`${model}: срок ответа вышел (${secs()} с при сроке ${Math.round(limitMs / 1000)} с) — разбора нет${spend ? `; в потолок записана оценка сверху $${est.toFixed(4)}` : ""}`);
-      return { text: null, timedOut: true };
+      return { text: null, timedOut: true, failed: "таймаут", usd: est };
     }
     if (e instanceof Anthropic.APIConnectionError) {
       console.error(`${model}: нет связи с API Anthropic — ${short(e.cause?.message || e.message)}`);
-      return { text: null };
+      return { text: null, failed: "сеть" };
     }
     if (e instanceof Anthropic.APIError) {
       // Код, тип и текст ошибки из тела ответа — ключа в них нет; request-id нужен для обращения в поддержку.
       console.error(`${model}: API Anthropic ответил ${e.status ?? "?"}${e.type ? ` ${e.type}` : ""} — ${short(e.error?.error?.message || e.message)}${e.requestID ? ` (request-id ${e.requestID})` : ""}`);
-      return { text: null };
+      // Статус и текст ошибки — для учёта разборов: 401/402/403 и «кончились кредиты» становятся
+      // тревогой в канал ошибок (блок 5б), а не тихим шаблоном.
+      return { text: null, failed: `API ${e.status ?? "?"}`, status: e.status, kind: e.type || "", message: short(e.error?.error?.message || e.message) };
     }
     console.error(`${model}: запрос не удался — ${short(e?.message || e)}`);
-    return { text: null };
+    return { text: null, failed: "сбой запроса" };
   }
 }
 /* ============================== конец транспорта к Claude ============================== */
+
+/* ================== 5б. ПРОВЕРКА РАЗБОРА — ОБЩАЯ ДЛЯ ПАНЕЛЕЙ 837 И 838 ==================
+   От этой строки до строки «конец проверки разбора» блок побайтово одинаков в обоих
+   репозиториях; сверка — diff двух вырезок между маркерами. Тот же алгоритм на Python живёт в
+   842/843 (pipeline/lib/llm_guard.py), а совпадение поведения стережёт общий набор векторов
+   scripts/llm-guard-vectors.json (в 842/843 — tests/llm_guard_vectors.json, файл тот же).
+
+   ЗАЧЕМ. Промпт просит не выдумывать числа, не прогнозировать и не называть устройство панели,
+   но просьба — не гарантия. До 29.10.2026 сверка чисел была только в 838 и грубая: число искалось
+   во входе ВСЕЙ пачки, честная арифметика («в 1,5 раза» из 205 и 137) отбрасывала разбор целиком,
+   любая цифра даты подтверждала малое число («10 %» сходилось с месяцем 27.10), а отброшенный
+   текст в лог не попадал. Здесь ответ проверяется машинно:
+     · числа — только из входа СВОЕГО события и общего контекста, с допуском на показанную
+       точность; отношение, разность и изменение в % пары чисел события — честны («на 195 б.п.»,
+       «в 1,5 раза»); год — только тот, что стоит в датах входа; дата и время — только из входа;
+     · прогнозы — по словарю вне «если …, то …»;
+     · внутренние слова панелей и служебные имена полей;
+     · чужая письменность, латиница внутри русского слова, транслит;
+     · предел 600 знаков и 4 предложения;
+     · метки ===N=== строго 0…n−1 без повторов.
+   Нарушившее правило предложение ВЫРЕЗАЕТСЯ, если остаётся хотя бы два предложения; иначе разбор
+   отбрасывается и идёт шаблон. Вырезанное и отброшенное пишется в лог с причиной и текстом.
+
+   УЧЁТ. Раз в неделю в канал ошибок (ALERT_BOT_*) уходит строка «показано N из M, отбраковано K
+   (причины), потрачено $X», а отказ API по доступу (401/402/403, кончились кредиты, модель снята) —
+   отдельной тревогой сразу: иначе разборы молча пропадают, а сообщения выглядят как обычно.
+   Состояние учёта — поле llm_week в .notify/state.json. */
+const G_MAX_CHARS = 600;
+const G_MAX_SENTENCES = 4;
+const G_MIN_SENTENCES = 2;
+const G_LOG_CHARS = 200;
+const G_SCAN_LIMIT = 4000;
+// Поиск повтора квадратичен по длине; разбор события не длиннее 600 знаков, повтор виден в голове.
+const G_LOOP_LIMIT = 1500;
+const G_L = "A-Za-zА-Яа-яЁё";
+const G_CYR = "А-Яа-яЁё";
+const G_NOT_L = `(?<![${G_L}])`;
+const G_END_L = `(?![${G_L}])`;
+const G_KINDS = ["числа", "прогноз", "внутренние слова", "язык", "длина", "метки", "брак текста"];
+
+// Длина и срезы — в символах, а не в единицах UTF-16: как у Python, иначе векторы разойдутся.
+const gChars = (s) => Array.from(String(s));
+const gLen = (s) => gChars(s).length;
+const gHead = (s, n) => gChars(s).slice(0, n).join("");
+const gPlain = (t) => String(t ?? "").replace(/[−‒–—]/g, "-").replace(/[    ]/g, " ");
+const gLow = (t) => gPlain(t).toLowerCase().replace(/ё/g, "е");
+
+function gShort(text, n = G_LOG_CHARS) {
+  const s = String(text ?? "").replace(/\s+/g, " ").trim();
+  return gLen(s) <= n ? s : gHead(s, n - 1) + "…";
+}
+
+// Метка без якорей строки: ответ приходил склеенным («…равновесиях.===1===»).
+const G_MARK = /={2,}[ \t]*([0-9]+)[ \t]*={2,}/g;
+const gBody = (t) => t.trim().replace(/^```[a-z]*\s*|\s*```$/g, "").trim();
+
+// Ответ модели -> [список длиной n | null, причина брака | null]. Метки обязаны идти 0, 1, … по
+// порядку и без повторов: «===1===» у первого события приклеил бы разбор к чужому сообщению.
+function gParseBlocks(text, n) {
+  text = String(text ?? "");
+  const marks = [...text.matchAll(G_MARK)];
+  if (!marks.length) {
+    const body = gBody(text);
+    if (n === 1 && gLen(body) >= 40 && gLen(body) <= G_SCAN_LIMIT) return [[body], null];
+    return [null, "нет меток ===N==="];
+  }
+  const idx = marks.map((m) => Number(m[1]));
+  const dup = [...new Set(idx.filter((i, k) => idx.indexOf(i) !== k))].sort((a, b) => a - b);
+  if (dup.length) return [null, "метки повторяются: " + dup.map((i) => `===${i}===`).join(", ")];
+  if (idx.some((i, k) => i !== k) || idx.length > n) return [null, "метки " + idx.map((i) => `===${i}===`).join(" ") + ` вместо 0…${n - 1}`];
+  const out = new Array(n).fill(null);
+  marks.forEach((m, k) => {
+    const end = k + 1 < marks.length ? marks[k + 1].index : text.length;
+    out[k] = gBody(text.slice(m.index + m[0].length, end)) || null;
+  });
+  return [out, null];
+}
+
+// Граница — знак конца, пробел и заглавная либо перевод строки. Сокращение перед точкой
+// («5 б.п. (сотых долей)», «−44 тыс. BTC») границей не считается, если дальше не русская заглавная.
+const G_SENT_END = /(?<=[.!?…])[ \t]+(?=[«"(\[А-ЯЁA-Z0-9+-])|\n+/u;
+const G_ABBR = new RegExp(`(?:^|[^${G_L}])(?:б\\.п|п\\.п|тыс|млн|млрд|трлн|руб|долл|г|гг|т\\.е|т\\.д|т\\.п|т\\.н|т\\.ч|др|см|ок|им|стр|рис|табл|прим|ср|н\\.э)\\.$`, "iu");
+function gSentences(text) {
+  const parts = String(text ?? "").trim().split(G_SENT_END).map((p) => p.trim()).filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    if (out.length && G_ABBR.test(out[out.length - 1]) && !/^[«"]?[А-ЯЁ]/u.test(part)) out[out.length - 1] += " " + part;
+    else out.push(part);
+  }
+  return out;
+}
+
+const G_MONTHS = ["январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр"];
+const G_MONTH = "(январ[ьяе]|феврал[ьяе]|март[ае]?|апрел[ьяе]|ма[йяе]|июн[ьяе]|июл[ьяе]|август[ае]?|сентябр[ьяе]|октябр[ьяе]|ноябр[ьяе]|декабр[ьяе])";
+function gMonth(word) {
+  const w = word.toLowerCase();
+  const i = G_MONTHS.findIndex((stem) => w.startsWith(stem) && (stem !== "ма" || ["май", "мая", "мае"].includes(w)));
+  return i + 1;
+}
+// Числа внутри имён и кодов — не данные: «S&P 500», «IMOEX2», «G20», «RUSFAR 3M». Так читается
+// только ответ модели; вход читается щедро, со всеми цифрами.
+const G_NAMED = new RegExp(`S&P ?500|Nasdaq[ -]?100|Russell ?2000|Euro ?Stoxx ?50|FTSE ?100|Nikkei ?225|CSI ?300|COVID-19|H\\.[0-9]+(?:\\.[0-9]+)?|(?<![${G_L}0-9])[A-Za-z]+[0-9]+[A-Za-z0-9]*|(?<![${G_L}0-9])[0-9]+[A-Za-z]+(?![${G_L}])`, "giu");
+const G_NUM = /(?<![0-9])[0-9]{1,3}(?: [0-9]{3})+(?:[.,][0-9]+)?(?![0-9])|(?<![0-9])[0-9]+(?:[.,][0-9]+)?(?![0-9])/g;
+const G_DIFF_CUE = new RegExp(`(?:^|[^${G_L}])на (?:(?:ещ[её]|почти|около|примерно|целых|всего|лишь|более|менее|чем|свыше|порядка) )*[+-]?$`, "iu");
+const G_RATIO_CUE = new RegExp(`^(?:[ -]?кратн| ?раз[а]?(?![${G_L}]))`, "iu");
+
+function gPrecision(raw) {
+  const t = raw.replace(/ /g, "");
+  const parts = t.split(/[.,]/);
+  if (parts.length > 1 && parts[1]) return Math.pow(10, -parts[1].length);
+  const zeros = t.length - t.replace(/0+$/, "").length;
+  return t.length >= 4 ? Math.pow(10, Math.max(0, Math.min(zeros, t.length - 2))) : 1;
+}
+
+// Числа текста: даты, время, годы, месяц с годом и обычные числа (значение, точность записи и
+// признак сравнения: «на 0,07» — разность, «в 1,5 раза» — отношение).
+function gTokens(text, { named = true, signed = false } = {}) {
+  let s = gPlain(text);
+  if (named) s = s.replace(G_NAMED, (m) => " ".repeat(m.length));
+  const out = [];
+  const take = (re, item) => {
+    s = s.replace(re, (...a) => {
+      const m = a[0];
+      const at = a[a.length - 2];
+      const got = item(a);
+      if (got) out.push({ ...got, raw: m.trim(), at });
+      return " ".repeat(m.length);
+    });
+  };
+  take(/(?<![0-9])([0-9]{4})-([0-9]{2})-([0-9]{2})(?:T[0-9:.]+Z?)?/g, (a) => ({ kind: "date", d: Number(a[3]), m: Number(a[2]), y: Number(a[1]) }));
+  take(/(?<![0-9.,])([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{4})(?![0-9])/g, (a) => ({ kind: "date", d: Number(a[1]), m: Number(a[2]), y: Number(a[3]) }));
+  take(new RegExp(`(?<![0-9])([0-9]{1,2})(?:-го)? ${G_MONTH}(?: ([0-9]{4}))?${G_END_L}`, "giu"), (a) => ({ kind: "date", d: Number(a[1]), m: gMonth(a[2]), y: a[3] ? Number(a[3]) : 0 }));
+  take(new RegExp(`${G_NOT_L}${G_MONTH}[а-я]* ([0-9]{4})(?![0-9])`, "giu"), (a) => ({ kind: "myear", m: gMonth(a[1]), y: Number(a[2]) }));
+  take(/(?<![0-9:])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9:])/g, (a) => ({ kind: "time", h: Number(a[1]), mi: Number(a[2]) }));
+  for (const m of s.matchAll(G_NUM)) {
+    const raw = m[0];
+    const item = { kind: "num", raw, at: m.index, v: Number(raw.replace(/ /g, "").replace(",", ".")), p: gPrecision(raw) };
+    if (/^(?:19|20)[0-9]{2}$/.test(raw)) Object.assign(item, { kind: "year", y: Number(raw) });
+    const dm = raw.match(/^([0-9]{1,2})\.([0-9]{2})$/);
+    if (dm && Number(dm[1]) >= 1 && Number(dm[1]) <= 31 && Number(dm[2]) >= 1 && Number(dm[2]) <= 12) item.dm = [Number(dm[1]), Number(dm[2])];
+    const before = m.index ? s[m.index - 1] : "";
+    if (signed && before === "-" && !new RegExp(`[${G_L}0-9]`, "u").test(m.index > 1 ? s[m.index - 2] : " ")) item.v = -item.v;
+    if (G_DIFF_CUE.test(s.slice(0, m.index))) item.cue = "diff";
+    else if (G_RATIO_CUE.test(s.slice(m.index + raw.length))) item.cue = "ratio";
+    out.push(item);
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+// Число из JSON входа -> [значение, точность]: по кратчайшей записи, целое — до единиц.
+function gJsonNumber(v) {
+  if (v === Math.trunc(v)) return [v, 1];
+  const [mant, exp] = String(v).toLowerCase().split("e");
+  const decimals = (mant.split(".")[1] || "").length - (exp ? Number(exp) : 0);
+  return [v, Math.pow(10, -Math.max(decimals, 0))];
+}
+
+// Что модели дали про ОДНО событие: его поля и общий контекст, без чужих событий пачки. extra —
+// предметная часть промпта (до раздела формата): её числа модели тоже даны.
+function gEvidence(userInput, index, extra = null) {
+  const ev = { nums: [], own: [], dates: [], times: new Set(), years: new Set() };
+  const num = (v, p, own) => {
+    ev.nums.push([v, p]);
+    if (own) ev.own.push([v, p]);
+  };
+  const text = (t, own) => {
+    for (const x of gTokens(t, { named: false, signed: true })) {
+      if (x.kind === "date") {
+        ev.dates.push([x.d, x.m, x.y]);
+        if (x.y) ev.years.add(x.y);
+      } else if (x.kind === "myear") ev.years.add(x.y);
+      else if (x.kind === "time") ev.times.add(`${x.h}:${x.mi}`);
+      else {
+        if (x.kind === "year") ev.years.add(x.y);
+        if (x.dm) ev.dates.push([x.dm[0], x.dm[1], 0]);
+        num(x.v, x.p, own);
+      }
+    }
+  };
+  const walk = (node, own) => {
+    if (Array.isArray(node)) for (const v of node) walk(v, own);
+    else if (node && typeof node === "object") {
+      for (const [key, val] of Object.entries(node)) {
+        if (key === "events" && Array.isArray(val) && !own) {
+          val.forEach((e, pos) => {
+            const isObj = e && typeof e === "object" && !Array.isArray(e);
+            if ((isObj && "i" in e ? e.i : pos) === index) walk(isObj ? Object.fromEntries(Object.entries(e).filter(([k]) => k !== "i")) : e, true);
+          });
+          continue;
+        }
+        text(key, own);
+        walk(val, own);
+      }
+    } else if (typeof node === "number") {
+      if (Number.isFinite(node)) num(...gJsonNumber(node), own);
+    } else if (typeof node === "string") text(node, own);
+  };
+  let data = userInput;
+  if (typeof userInput === "string") {
+    try {
+      data = JSON.parse(userInput);
+    } catch {
+      data = userInput;
+    }
+  }
+  walk(data, false);
+  if (extra) text(extra, false);
+  return ev;
+}
+
+const G_SCALES = [1, 1e3, 1e6, 1e9, 1e12];
+function gFound(v, p, pool) {
+  const tol = p / 2 + Math.abs(v) * 1e-9;
+  const av = Math.abs(v);
+  return pool.some(([y]) => G_SCALES.some((k) => Math.abs(av - Math.abs(y) * k) <= tol || Math.abs(av - Math.abs(y) / k) <= tol));
+}
+// Число из пары чисел СВОЕГО события: отношение, разность или изменение в %.
+function gDerived(v, p, cue, own) {
+  const av = Math.abs(v);
+  for (let i = 0; i < own.length; i++) {
+    for (let j = 0; j < own.length; j++) {
+      const [a, pa] = own[i];
+      const [b, pb] = own[j];
+      if (i === j || b === 0) continue;
+      if (cue === "ratio") {
+        if (a === 0) continue;
+        const r = Math.abs(a) / Math.abs(b);
+        if (Math.abs(av - r) <= p / 2 + r * (pa / 2 / Math.abs(a) + pb / 2 / Math.abs(b))) return true;
+      } else {
+        if (Math.abs(av - Math.abs(a - b)) <= p / 2 + (pa + pb) / 2) return true;
+        const c = Math.abs(a - b) / Math.abs(b) * 100;
+        if (Math.abs(av - c) <= p / 2 + 100 * (pa / 2 + pb / 2 * Math.abs(a) / Math.abs(b)) / Math.abs(b)) return true;
+      }
+    }
+  }
+  return false;
+}
+// Числа предложения, которых нет во входе своего события.
+function gStrayNumbers(sentence, ev) {
+  const bad = [];
+  for (const t of gTokens(sentence)) {
+    let ok;
+    if (t.kind === "date") ok = ev.dates.some(([d, m, y]) => d === t.d && m === t.m && (!t.y || !y || y === t.y));
+    else if (t.kind === "myear") ok = ev.years.has(t.y);
+    else if (t.kind === "time") ok = ev.times.has(`${t.h}:${t.mi}`);
+    else if (t.kind === "year") ok = ev.years.has(t.y) || gFound(t.v, 1, ev.nums);
+    else {
+      ok = gFound(t.v, t.p, ev.nums);
+      if (!ok && t.dm) ok = ev.dates.some(([d, m]) => d === t.dm[0] && m === t.dm[1]);
+      if (!ok && t.cue) ok = gDerived(t.v, t.p, t.cue, ev.own);
+    }
+    if (!ok) bad.push(t.raw);
+  }
+  return bad;
+}
+
+// Устройство панелей и служебные имена полей входа: «ворот открыты» и «якоря_в_работе» протекали.
+const G_JARGON = new RegExp(`${G_NOT_L}(?:композит[а-я]*|балл(?:а|ов|ы|ам|ами|ах|е)?|ядр(?:о|а|у|ом|е)|ячейк[а-я]*|ячеек|ворот(?:а|ам|ами|ах)?|якор(?:ь|я|ей|ю|ям|ями|ях|ем|е)|веер[а-я]*|детектор[а-я]*|дашборд[а-я]*|панел(?:ь|и|ью|ей|ям|ями|ях)|монитор(?:ы|ов|ам|ами|ах)?)${G_END_L}|[${G_L}]+_[${G_L}0-9_]+`, "iu");
+const G_VERBS = "вырастет|вырастут|подрастет|подрастут|упадет|упадут|снизится|снизятся|понизится|понизятся|повысится|повысятся|подорожает|подорожают|подешевеет|подешевеют|укрепится|укрепятся|ослабнет|ослабнут|ослабеет|развернется|развернутся|отскочит|отскочат|обвалится|обвалятся|просядет|просядут|восстановится|восстановятся";
+// Уверенность о будущем рынка. Ловит узнаваемое, а не всякий прогноз: остальное держит промпт.
+const G_FORECAST = new RegExp(`${G_NOT_L}(?:скорее всего|наверняка|неизбежно|непременно|неминуемо|гарантированно|маловероятно|несомненно|дно будет|не разворот|разворота не будет|(?:рост|отскок|разворот|подъем|снижение|падение) начнется|начнется (?:устойчивый |настоящий )?(?:рост|отскок|разворот|подъем|снижение|падение)|(?:${G_VERBS})|продолжи(?:т|м|ть)? (?:рост|падение|снижение|укрепление|ослабление|расти|падать|снижаться|дорожать|дешеветь|укрепляться|слабеть)|продолжат (?:рост|падение|снижение|расти|падать|снижаться|дорожать|дешеветь)|(?:пойдет|пойдут|уйдет|уйдут) (?:вверх|вниз|выше|ниже)|(?:будет|будут) (?:расти|падать|снижаться|дорожать|дешеветь|укрепляться|слабеть)|станет началом|даст (?:короткий |мощный |сильный )?(?:отскок|рост|импульс))${G_END_L}`, "u");
+// Курс направлением — при strict (843) режется и внутри «если».
+const G_FORECAST_RATE = new RegExp(`${G_NOT_L}(?:курс|рубл|доллар|юан)[а-я]* (?:(?:скорее всего|вероятно|наверняка|точно|снова|быстро) )?(?:пойдет|вернется|уйдет|составит|достигнет|будет стоить|укрепится|ослабнет|подешевеет|подорожает)${G_END_L}`, "u");
+const G_IF = new RegExp(`${G_NOT_L}(?:если|в случае|при условии)${G_END_L}`, "u");
+const G_FOREIGN = /[؀-ۿ֐-׿一-鿿぀-ヿ가-힯]/u;
+const G_MIXED = new RegExp(`[${G_CYR}][A-Za-z]|[A-Za-z][${G_CYR}]`, "u");
+const G_TRANSLIT_OK = new Set(["bitcoin", "ethereum", "nasdaq", "treasuries", "futures", "options", "hedge", "spread", "basis", "carry", "funding", "stablecoin"]);
+
+// -> [вид, причина] | null
+function gSentenceFault(sentence, ev, strict) {
+  const low = gLow(sentence);
+  if (G_FOREIGN.test(sentence)) return ["язык", "чужая письменность"];
+  const mx = sentence.match(G_MIXED);
+  if (mx) {
+    const word = sentence.match(new RegExp(`[${G_L}]*${mx[0]}[${G_L}]*`, "u"));
+    return ["язык", "латиница внутри слова: " + (word ? word[0] : mx[0])];
+  }
+  const tr = (sentence.match(/(?<![A-Za-z])[a-z]{5,}(?![A-Za-z])/g) || []).filter((w) => !G_TRANSLIT_OK.has(w));
+  if (tr.length) return ["язык", "транслит: " + tr.slice(0, 3).join(", ")];
+  const j = sentence.match(G_JARGON);
+  if (j) return ["внутренние слова", "внутреннее слово: " + j[0]];
+  let f = strict ? low.match(G_FORECAST_RATE) : null;
+  if (!f) {
+    f = low.match(G_FORECAST);
+    if (f && G_IF.test(low)) f = null;
+  }
+  if (f) return ["прогноз", "прогноз: " + f[0]];
+  const stray = ev ? gStrayNumbers(sentence, ev) : [];
+  if (stray.length) return ["числа", "числа не из входа: " + stray.slice(0, 4).join(", ")];
+  return null;
+}
+
+function gWholeFault(text) {
+  const t = String(text ?? "").trim();
+  if (gLen(t) < 40) return "слишком короткий ответ";
+  const head = gHead(t, G_SCAN_LIMIT);
+  if (/([^\n]{12,}?)\1{2,}/u.test(gHead(t, G_LOOP_LIMIT))) return "текст зациклился";
+  if (t.includes("```") || t.startsWith("{")) return "вместо текста разметка или JSON";
+  const cyr = (head.match(new RegExp(`[${G_CYR}]`, "gu")) || []).length;
+  const lat = (head.match(/[A-Za-z]/g) || []).length;
+  if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) return `ответ не на русском (кириллицы ${Math.floor(100 * cyr / (cyr + lat) + 0.5)}%)`;
+  return null;
+}
+
+// Проверить разбор одного события. userInput — вход модели (JSON-строка или объект), index —
+// номер события, strict — запрет курса и внутри «если» (843), extra — предметная часть промпта.
+// -> { text: итог | null, cut: [[фраза, причина, вид]], reject: причина | null, kind: вид | null }
+function guardCheck(text, userInput = null, index = 0, strict = false, extra = null) {
+  const res = { text: null, cut: [], reject: null, kind: null };
+  try {
+    const whole = gWholeFault(text);
+    if (whole) return { ...res, reject: whole, kind: whole.includes("русском") ? "язык" : "брак текста" };
+    const ev = userInput !== null && userInput !== undefined ? gEvidence(userInput, index, extra) : null;
+    const kept = [];
+    for (const s of gSentences(text)) {
+      const fault = gSentenceFault(s, ev, strict);
+      if (fault) res.cut.push([gShort(s), fault[1], fault[0]]);
+      else kept.push(s);
+    }
+    if (res.cut.length && kept.length < G_MIN_SENTENCES) {
+      const kinds = res.cut.map((c) => c[2]);
+      const count = (k) => kinds.filter((x) => x === k).length;
+      const kind = G_KINDS.reduce((best, k) => (count(k) > count(best) ? k : best), G_KINDS[0]);
+      return { ...res, kind, reject: `после вырезания осталось предложений: ${kept.length} (` + res.cut.slice(0, 3).map((c) => c[1]).join("; ") + ")" };
+    }
+    const over = [];
+    while (kept.length && (kept.length > G_MAX_SENTENCES || gLen(kept.join(" ")) > G_MAX_CHARS)) over.unshift(kept.pop());
+    for (const s of over) res.cut.push([gShort(s), "сверх предела длины", "длина"]);
+    if (over.length && kept.length < G_MIN_SENTENCES) {
+      return { ...res, kind: "длина", reject: `длиннее предела: ${gLen([...kept, ...over].join(" "))} знаков, ${kept.length + over.length} предложений` };
+    }
+    res.text = kept.join(" ");
+    return res;
+  } catch (e) {
+    return { ...res, text: null, reject: `проверка упала: ${e?.name || "Error"}: ${gShort(e?.message || e, 120)}`, kind: "брак текста" };
+  }
+}
+
+// Весь ответ модели -> [комментарии длиной n с null на месте брака, сводка { shown, cut, rejected }].
+// say — журнал: вырезанное и отброшенное уходит туда с причиной и началом текста.
+function guardReview(text, userInput, n, { strict = false, extra = null, say = () => {} } = {}) {
+  const log = (m) => {
+    try {
+      say(m);
+    } catch {}
+  };
+  const summary = { shown: 0, cut: 0, rejected: {} };
+  const bump = (k, by = 1) => (summary.rejected[k] = (summary.rejected[k] || 0) + by);
+  const [blocks, err] = gParseBlocks(text, n);
+  if (!blocks) {
+    log(`ответ отброшен — ${err}; начало: «${gShort(text)}»`);
+    bump("метки", n);
+    return [new Array(n).fill(null), summary];
+  }
+  const out = new Array(n).fill(null);
+  blocks.forEach((block, i) => {
+    if (block === null) {
+      log(`событие ${i}: разбора в ответе нет`);
+      bump("метки");
+      return;
+    }
+    const res = guardCheck(block, userInput, i, strict, extra);
+    for (const [phrase, why] of res.cut) log(`событие ${i}: вырезано — ${why}: «${phrase}»`);
+    if (res.text) {
+      out[i] = res.text;
+      summary.shown++;
+      summary.cut += res.cut.length;
+    } else {
+      log(`событие ${i}: разбор отброшен — ${res.reject}; текст: «${gShort(block)}»`);
+      bump(res.kind);
+    }
+  });
+  return [out, summary];
+}
+
+// ---------- недельный учёт и тревога о доступе к API ----------
+const G_ACCESS_WORDS = {
+  401: "ключ не принят: отозван или неверен",
+  402: "отказ по оплате: кончились кредиты или не прошёл платёж",
+  403: "у ключа нет доступа к модели",
+  404: "модель недоступна",
+  400: "кончились кредиты",
+};
+// Отказ API, при котором разборов не будет, пока человек не вмешается. Нехватку кредитов Anthropic
+// отдаёт и как 402, и как 400 «credit balance is too low».
+function guardAccessProblem(status, message = "") {
+  const msg = String(message || "").toLowerCase();
+  if ([401, 402, 403].includes(status)) return true;
+  if (status === 400 && (msg.includes("credit") || msg.includes("billing"))) return true;
+  return status === 404 && msg.includes("model");
+}
+const G_MSK_MS = 3 * 3600e3;
+// ISO-неделя по Москве: «2026-W44».
+function guardWeekOf(ms) {
+  const m = new Date(ms + G_MSK_MS);
+  const d = new Date(Date.UTC(m.getUTCFullYear(), m.getUTCMonth(), m.getUTCDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7)); // четверг той же ISO-недели
+  const y = d.getUTCFullYear();
+  const week = Math.ceil(((d - Date.UTC(y, 0, 1)) / 864e5 + 1) / 7);
+  return `${y}-W${String(week).padStart(2, "0")}`;
+}
+function gWeekSpan(week) {
+  const [y, w] = week.split("-W").map(Number);
+  const jan4 = Date.UTC(y, 0, 4);
+  const monday = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * 864e5 + (w - 1) * 7 * 864e5;
+  const dm = (ms) => new Date(ms).toISOString().slice(5, 10).split("-").reverse().join(".");
+  return `${dm(monday)}–${dm(monday + 6 * 864e5)}`;
+}
+const gEmptyWeek = (week) => ({ week, asked: 0, shown: 0, cut: 0, rejected: {}, failed: {}, usd: 0 });
+function gRoll(stats, ms) {
+  const week = guardWeekOf(ms);
+  const cur = stats.cur && typeof stats.cur === "object" && !Array.isArray(stats.cur) ? stats.cur : null;
+  if (!cur) stats.cur = gEmptyWeek(week);
+  else if (cur.week !== week) {
+    stats.report = cur;
+    stats.cur = gEmptyWeek(week);
+  }
+  return stats.cur;
+}
+// Дописать в учёт итог одного обращения к модели. stats — объект состояния (поле llm_week).
+function guardRecord(stats, ms, { asked = 0, summary = null, failed = null, usd = 0, access = null, ok = false } = {}) {
+  try {
+    const cur = gRoll(stats, ms);
+    cur.asked = (Number(cur.asked) || 0) + asked;
+    if (summary) {
+      cur.shown = (Number(cur.shown) || 0) + (summary.shown || 0);
+      cur.cut = (Number(cur.cut) || 0) + (summary.cut || 0);
+      for (const [k, v] of Object.entries(summary.rejected || {})) cur.rejected[k] = (Number(cur.rejected[k]) || 0) + v;
+    }
+    if (failed) cur.failed[failed] = (Number(cur.failed[failed]) || 0) + (asked || 1);
+    cur.usd = Math.round(((Number(cur.usd) || 0) + (Number(usd) || 0)) * 1e6) / 1e6;
+    if (access) {
+      if (stats.access?.status !== access.status) stats.access = { ...access, since: new Date(ms).toISOString(), alerted: false };
+    } else if (ok && stats.access) {
+      stats.recovered = { ...stats.access, at: new Date(ms).toISOString() };
+      delete stats.access;
+    }
+  } catch {}
+  return stats;
+}
+const gMoney = (usd) => `$${usd.toFixed(2).replace(".", ",")}`;
+const gEsc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function guardWeekLine(panel, rec) {
+  const head = `📊 ${panel} · ИИ-разборы за ${gWeekSpan(rec.week)}: `;
+  const asked = Number(rec.asked) || 0;
+  if (!asked) return head + `событий для разбора не было; потрачено ${gMoney(Number(rec.usd) || 0)}`;
+  const byCount = (o) => Object.entries(o || {}).filter(([, v]) => v).sort((a, b) => b[1] - a[1]);
+  const parts = [`показано ${Number(rec.shown) || 0} из ${asked}`];
+  const rej = byCount(rec.rejected);
+  parts.push(rej.length ? `отбраковано ${rej.reduce((s, [, v]) => s + v, 0)} (` + rej.map(([k, v]) => `${k} ${v}`).join(", ") + ")" : "отбраковано 0");
+  if (rec.cut) parts.push(`вырезано фраз ${Number(rec.cut)}`);
+  const fail = byCount(rec.failed);
+  if (fail.length) parts.push("без ответа " + fail.map(([k, v]) => `${k} ${v}`).join(", "));
+  parts.push("потрачено " + gMoney(Number(rec.usd) || 0));
+  return head + parts.join("; ");
+}
+const gMsk = (iso) => {
+  const ms = Date.parse(iso || "");
+  if (!Number.isFinite(ms)) return "?";
+  const t = new Date(ms + G_MSK_MS).toISOString();
+  return `${t.slice(8, 10)}.${t.slice(5, 7)} ${t.slice(11, 16)}`;
+};
+function guardAccessAlert(panel, acc, where) {
+  return `🔴 <b>${gEsc(panel)} · ИИ-разбор не работает</b>\n` +
+    `API Anthropic ответил ${acc.status} ${gEsc(acc.kind || "")}: ${gEsc(G_ACCESS_WORDS[acc.status] || "отказ по доступу")}. ${gEsc(gShort(acc.message || "", 160))}\n` +
+    "События уходят без разбора, сама рассылка работает.\n" +
+    `Смотреть: console.anthropic.com → API Keys и Billing; ${gEsc(where)}`;
+}
+function guardRecoveryLine(panel, acc) {
+  return `🟢 <b>${gEsc(panel)} · ИИ-разбор снова работает</b>\nAPI Anthropic отвечает; отказ ${acc.status} длился с ${gEsc(gMsk(acc.since))} до ${gEsc(gMsk(acc.at))} МСК.`;
+}
+// Раз в прогон: тревога о доступе, «снова работает» и строка за прошлую неделю. send(text) ->
+// Promise<boolean>; ушедшее помечается только после успеха — сбой Telegram повторится следующим
+// прогоном. -> список того, что ушло (для лога).
+async function guardOpsTick(stats, ms, panel, send, where) {
+  const sent = [];
+  try {
+    gRoll(stats, ms);
+    const acc = stats.access;
+    if (acc && !acc.alerted && (await send(guardAccessAlert(panel, acc, where)))) {
+      acc.alerted = true;
+      sent.push(`тревога: API ${acc.status}`);
+    }
+    const rec = stats.recovered;
+    if (rec && (!rec.alerted || (await send(guardRecoveryLine(panel, rec))))) {
+      delete stats.recovered;
+      if (rec.alerted) sent.push("снова работает");
+    }
+    const rep = stats.report;
+    if (rep && (await send(guardWeekLine(panel, rep)))) {
+      delete stats.report;
+      sent.push(`неделя ${rep.week}`);
+    }
+  } catch {}
+  return sent;
+}
+// Отправка в общий канал ошибок панелей (тот же бот, что у сторожа: ALERT_BOT_TOKEN/ALERT_CHAT_ID).
+// Нет переменных — false: строка дождётся прогона, где канал настроен.
+async function guardSendOps(text) {
+  const token = process.env.ALERT_BOT_TOKEN;
+  const chat = process.env.ALERT_CHAT_ID;
+  if (!token || !chat) return false;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chat, text, parse_mode: "HTML", disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) console.error(`канал ошибок: telegram ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+    return res.ok;
+  } catch (e) {
+    console.error(`канал ошибок недоступен: ${String(e?.message || e).slice(0, 160)}`);
+    return false;
+  }
+}
+/* ============================== конец проверки разбора ============================== */
+
+// Числа фразы, которых нет во входе события index — для тестов и разбора боевых логов.
+const strayNumbers = (comment, input, index = 0) => gStrayNumbers(comment, gEvidence(input, index));
 
 // Разбор пачки событий одним запросом: модель получает все события сразу и отвечает блоками
 // «===N===». Возвращает массив комментариев (null на месте отброшенного) либо null — тогда все
@@ -2867,46 +3267,31 @@ async function claudeAsk({ system, user, timeoutMs = LLM_TIMEOUT_MS, spend = nul
 // budgetMs — сколько всего можно ждать разбор. Задаётся, когда в пачке есть сообщение о доле:
 // понижение по правилу исполнения немедленное, и ждать модель полный срок (LLM_TIMEOUT_MS, вместе
 // с повторами SDK) оно не должно. Вышел срок — уходит шаблон из записи решения.
-async function llmComments(events, panel, { budgetMs = 0, spend = null } = {}) {
-  if (!process.env.ANTHROPIC_API_KEY || !events.length) return null;
+// week — недельный учёт из состояния (поле llm_week, блок 5б): итог обращения дописывается туда.
+async function llmComments(events, panel, { budgetMs = 0, spend = null, week = null } = {}) {
+  if (!events.length) return null;
+  const at = Date.now();
+  if (!process.env.ANTHROPIC_API_KEY) {
+    if (week) guardRecord(week, at, { asked: events.length, failed: "нет ключа" });
+    return null;
+  }
   const input = llmInput(events, panel);
   const timeoutMs = budgetMs > 0 ? Math.min(LLM_TIMEOUT_MS, budgetMs) : LLM_TIMEOUT_MS;
-  const { text: txt, model, timedOut } = await claudeAsk({ system: LLM_SYSTEM, user: input, timeoutMs, spend });
+  const res = await claudeAsk({ system: LLM_SYSTEM, user: input, timeoutMs, spend });
+  const { text: txt, model, timedOut } = res;
   if (!txt) {
     if (timedOut && budgetMs > 0) console.error("время на разбор для сообщения о доле вышло — комментарии из шаблона");
+    if (week) {
+      const access = res.status && guardAccessProblem(res.status, res.message) ? { status: res.status, kind: res.kind, message: res.message } : null;
+      guardRecord(week, at, { asked: events.length, failed: res.failed || "нет ответа", usd: res.usd || 0, access, ok: !!res.answered });
+    }
     return null;
   }
-  const parsed = parseComments(txt, events.length);
-  if (!parsed) {
-    // ДИАГНОСТИКА: без неё «шаблон» в логе не отличить от «модель ответила, а я не разобрал».
-    console.error(`${model}: ответ не разобран (${txt.length} симв.). Начало: ${txt.slice(0, 250).replace(/\s+/g, " ")}`);
-    return null;
-  }
-  // Страховка по языку: промпт требует русский, но требование можно и проигнорировать —
-  // англоязычный разбор до читателя доходить не должен. Считаем долю кириллицы среди букв.
-  for (let k = 0; k < parsed.length; k++) {
-    const t = parsed[k];
-    if (!t) continue;
-    const cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
-    const lat = (t.match(/[a-zA-Z]/g) || []).length;
-    if (cyr + lat >= 40 && cyr / (cyr + lat) < 0.5) {
-      console.error(`${model}: ответ на событие ${k} не на русском (кириллицы ${Math.round((100 * cyr) / (cyr + lat))}%) — отброшен`);
-      parsed[k] = null;
-      continue;
-    }
-    const defect = textDefect(t);
-    if (defect) {
-      console.error(`${model}: ответ на событие ${k} испорчен — ${defect}; отброшен`);
-      parsed[k] = null;
-      continue;
-    }
-    // Числа ответа сверяются со входом: постороннее число — комментарий отброшен, идёт шаблон.
-    const stray = strayNumbers(t, input);
-    if (stray.length) {
-      console.error(`${model}: в ответе на событие ${k} есть числа, которых нет во входе (${stray.slice(0, 4).join(", ")}) — отброшен`);
-      parsed[k] = null;
-    }
-  }
+  // Проверка смысла (блок 5б): числа своего события, прогнозы, внутренние слова, язык, длина,
+  // метки. Вырезанное и отброшенное — в лог с причиной и текстом; модель ответила — разбор есть,
+  // шаблон идёт только на месте брака. Предметная часть промпта (до «ФОРМАТ:») — тоже вход.
+  const [parsed, summary] = guardReview(txt, input, events.length, { extra: LLM_SYSTEM.split("ФОРМАТ:")[0], say: (m) => console.error(`${model}: ${m}`) });
+  if (week) guardRecord(week, at, { asked: events.length, summary, usd: res.usd || 0, ok: true });
   if (parsed.every((t) => !t)) {
     console.error(`${model}: годных разборов нет — комментарии из шаблона`);
     return null;
@@ -3414,8 +3799,11 @@ async function main(io = {}) {
   // запрос сверяется с потолком NOTIFY_LLM_DAILY_USD. Объект один на прогон — транспорт дописывает
   // в него цену ответа, persist() уносит на диск.
   const llmSpend = spendOf(prev.llm_spend);
+  // Недельный учёт разборов и отказов API (блок 5б): поле llm_week, строка раз в неделю и тревога о
+  // доступе уходят в канал ошибок в конце прогона.
+  const llmWeek = prev.llm_week && typeof prev.llm_week === "object" && !Array.isArray(prev.llm_week) ? prev.llm_week : {};
   const persist = async () => {
-    const state = { ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, shown: shownSeen, alloc_trend: trend, alloc_changes: allocChanges, llm_spend: llmSpend };
+    const state = { ...(baseline || prev), sent: sentIndex, revised_points: revisedSeen, shown: shownSeen, alloc_trend: trend, alloc_changes: allocChanges, llm_spend: llmSpend, llm_week: llmWeek };
     if (selftestAlertAt) state.selftest_alert_at = selftestAlertAt;
     if (io.saveState) return io.saveState(state);
     await mkdir(dirname(STATE_PATH), { recursive: true });
@@ -3430,7 +3818,7 @@ async function main(io = {}) {
     // модель дольше отведённого нельзя — понижение по правилу исполнения немедленное.
     const ask = capped.map((ev, idx) => ({ ev, idx })).filter((x) => !NO_COMMENT.has(x.ev.kind));
     const urgent = capped.some((ev) => ev.kind === "allocation" || ev.kind === "pause");
-    const got = ask.length ? await llmComments(ask.map((x) => x.ev), panel, { budgetMs: urgent ? DECISION_LLM_BUDGET_MS : 0, spend: llmSpend }) : null;
+    const got = ask.length ? await llmComments(ask.map((x) => x.ev), panel, { budgetMs: urgent ? DECISION_LLM_BUDGET_MS : 0, spend: llmSpend, week: llmWeek }) : null;
     // Оплаченный запрос — на диск сразу, до рассылки: упавший на Telegram прогон не должен стереть
     // его из суточного расхода (состояние сохраняется при любом исходе, см. notify.yml). База
     // сравнения при этом не двигается — baseline ещё null.
@@ -3475,6 +3863,16 @@ async function main(io = {}) {
   baseline = snapshotState(panel, prev, all);
   await persist();
   console.log(dry ? "dry-run: ничего не отправлено, база сравнения обновлена" : `отправлено сообщений: ${sent}`);
+  // Учёт ИИ-разборов (блок 5б): тревога при отказе API по доступу и строка за прошлую неделю — в канал
+  // ошибок. Каждым прогоном: неделя без событий — тоже неделя, а недоставленное уйдёт следующим.
+  const sendOps = io.sendOps || (dry || io.deliver ? null : guardSendOps);
+  if (sendOps) {
+    const out = await guardOpsTick(llmWeek, now, "838", sendOps, "секрет ANTHROPIC_API_KEY в настройках репозитория (Actions).");
+    if (out.length) {
+      console.log(`канал ошибок: ${out.join("; ")}`);
+      await persist();
+    }
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("notify.mjs")) {
@@ -3484,4 +3882,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, rememberShown, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, trackWarnings, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER };
+export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, rememberShown, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, guardCheck, gParseBlocks, guardReview, guardRecord, guardOpsTick, guardWeekLine, guardWeekOf, guardAccessProblem, engineAgrees, trackWarnings, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER };
