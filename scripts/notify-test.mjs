@@ -2325,6 +2325,158 @@ testAsync("без пакета SDK модуль грузится, а разбо�
 
 
 
+/* ---------- транспорт Telegram и NEXUS (аудит ботов 28.10.2026, C6/C8; одинаково в 837 и 838) ----------
+   Сеть подменяется заглушкой fetch: срок ответа, 429 с retry_after, повтор без разметки при
+   «can't parse entities», обрезка по границе строки. Сон подменяется — тесты не ждут. */
+// Свой импорт у блока: общая строка импорта в начале файла общая для многих правок.
+const { sendTelegram, sendNexusEvent, clipTelegram, TG_TIMEOUT_MS, NEXUS_TIMEOUT_MS } = await import("./notify.mjs");
+const TG_NET_ENV = { TELEGRAM_BOT_TOKEN: "TEST", TELEGRAM_CHAT_ID: "1", NEXUS_EVENTS_URL: "https://nexus.test/api/events", NEXUS_INGEST_TOKEN: "TEST", NEXUS_SOURCE_ID: "TEST" };
+// Подменяет сеть, окружение и вывод на время fn; ответ на каждый запрос даёт handler(вызов, номер с 1).
+async function withTelegramNet(handler, fn) {
+  const realFetch = globalThis.fetch;
+  const saved = Object.fromEntries(Object.keys(TG_NET_ENV).map((k) => [k, process.env[k]]));
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const call = { url: String(url), init, body: init.body ? JSON.parse(init.body) : null };
+    calls.push(call);
+    return handler(call, calls.length);
+  };
+  Object.assign(process.env, TG_NET_ENV);
+  const [log, err] = [console.log, console.error];
+  const said = [];
+  console.log = (...a) => said.push(a.join(" "));
+  console.error = (...a) => said.push(a.join(" "));
+  try {
+    return await fn(calls, said);
+  } finally {
+    globalThis.fetch = realFetch;
+    console.log = log;
+    console.error = err;
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+const tgReply = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const tgOk = () => tgReply(200, { ok: true, result: { message_id: 1 } });
+const tg429 = (s) => tgReply(429, { ok: false, error_code: 429, description: `Too Many Requests: retry after ${s}`, parameters: { retry_after: s } });
+// Зависший сервер: ответа нет, пока запрос не оборвут по сроку.
+const tgHang = (call) => new Promise((_, reject) => call.init.signal?.addEventListener("abort", () => reject(call.init.signal.reason), { once: true }));
+// Ограничитель для самого теста: зависшая отправка не должна вешать набор.
+function settleWithin(ms, promise) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`не завершилось за ${ms} мс`)), ms);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+const rejectionOf = (promise) => promise.then(() => null, (e) => e);
+
+test("транспорт: сроки ответа — Telegram 15 с, NEXUS 5 с", () => {
+  assert.equal(TG_TIMEOUT_MS, 15000);
+  assert.equal(NEXUS_TIMEOUT_MS, 5000);
+});
+
+testAsync("транспорт: зависший Telegram обрывается по сроку, и это не доставка", () =>
+  withTelegramNet(tgHang, async (calls) => {
+    const e = await settleWithin(3000, rejectionOf(sendTelegram("<b>Тест</b>", { timeoutMs: 50 })));
+    assert.ok(e instanceof Error, "зависший Telegram обязан давать ошибку, а не тихий успех");
+    assert.match(e.message, /нет ответа за/);
+    assert.equal(calls.length, 1, "после обрыва по сроку повтора нет: сообщение могло дойти");
+  }));
+
+testAsync("транспорт: зависший хаб NEXUS обрывается по сроку и рассылку не держит", () =>
+  withTelegramNet(tgHang, async (calls, said) => {
+    await settleWithin(3000, sendNexusEvent("<b>Тест</b>", "ключ", "2026-10-29T00:00:00.000Z", { timeoutMs: 50 }));
+    assert.equal(calls.length, 1);
+    assert.ok(said.some((s) => /NEXUS недоступен: нет ответа/.test(s)), said.join(" | "));
+  }));
+
+testAsync("транспорт: 429 — одно ожидание retry_after и повтор", () =>
+  withTelegramNet((call, n) => (n === 1 ? tg429(7) : tgOk()), async (calls) => {
+    const slept = [];
+    await sendTelegram("<b>Тест</b>", { sleep: async (ms) => slept.push(ms) });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(slept, [7000]);
+    assert.equal(calls[1].body.parse_mode, "HTML", "повтор с той же разметкой");
+  }));
+
+testAsync("транспорт: второй 429 и запрет длиннее минуты — ошибка без лишнего ожидания", async () => {
+  await withTelegramNet(() => tg429(7), async (calls) => {
+    const slept = [];
+    const e = await rejectionOf(sendTelegram("x", { sleep: async (ms) => slept.push(ms) }));
+    assert.match(e?.message || "", /telegram 429/);
+    assert.equal(calls.length, 2, "ровно один повтор");
+    assert.deepEqual(slept, [7000]);
+  });
+  await withTelegramNet(() => tg429(3600), async (calls) => {
+    const slept = [];
+    const e = await rejectionOf(sendTelegram("x", { sleep: async (ms) => slept.push(ms) }));
+    assert.match(e?.message || "", /telegram 429/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(slept, [], "час не ждём: сообщение уйдёт следующим прогоном");
+  });
+});
+
+testAsync("транспорт: «can't parse entities» — повтор тем же текстом без разметки", () =>
+  withTelegramNet(
+    (call, n) => (n === 1 ? tgReply(400, { ok: false, error_code: 400, description: 'Bad Request: can\'t parse entities: Can\'t find end tag corresponding to start tag "b"' }) : tgOk()),
+    async (calls) => {
+      await sendTelegram("<b>Доля: 80% → 50%</b>\nS&amp;P 500 &lt; средней за 200 дней");
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1].body.parse_mode, undefined);
+      assert.equal(calls[1].body.text, "Доля: 80% → 50%\nS&P 500 < средней за 200 дней");
+    }
+  ));
+
+testAsync("транспорт: прочие отказы и обрыв соединения — ошибка без повтора", async () => {
+  await withTelegramNet(() => tgReply(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }), async (calls) => {
+    const e = await rejectionOf(sendTelegram("x"));
+    assert.match(e?.message || "", /telegram 403: Forbidden: bot was blocked/);
+    assert.equal(calls.length, 1);
+  });
+  await withTelegramNet(() => {
+    throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+  }, async (calls) => {
+    const e = await rejectionOf(sendTelegram("x"));
+    assert.match(e?.message || "", /сеть — ECONNRESET/);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("обрезка: длинное сообщение режется по границе строки, разметка остаётся целой", () => {
+  const lines = [];
+  for (let i = 0; lines.join("\n").length < 6000; i++) lines.push(`<b>Строка ${i}</b>: S&amp;P 500 &lt; средней · ${"x".repeat(40)}`);
+  const long = lines.join("\n");
+  const out = clipTelegram(long);
+  assert.ok(out.length <= 4000, `длина ${out.length}`);
+  const kept = out.slice(0, -1);
+  assert.ok(out.endsWith("…") && long.startsWith(kept), "срез — начало исходного текста и многоточие");
+  assert.equal(long[kept.length], "\n", "срез по границе строки");
+  assert.equal((kept.match(/<b>/g) || []).length, (kept.match(/<\/b>/g) || []).length, "теги парные");
+  // Одна длинная строка: срез по пробелу, сущность не рвётся, незакрытый тег закрывается.
+  const one = clipTelegram("<i>" + "слово &amp; ".repeat(900) + "</i>");
+  assert.ok(one.length <= 4000, `длина ${one.length}`);
+  assert.match(one, /…<\/i>$/);
+  assert.doesNotMatch(one.replace(/…<\/i>$/, ""), /&[#a-z0-9]*$/i, "обрывок сущности на срезе");
+  assert.equal(clipTelegram("<b>коротко</b>"), "<b>коротко</b>", "короткий текст не трогается");
+});
+
+test("renderMessage: длинный разбор не рвёт HTML-сущность и не оставляет тег без пары", () => {
+  // Пять сдвигов: при любом префиксе сообщения срез хотя бы раз пришёлся бы внутрь «&amp;».
+  for (let shift = 0; shift < 5; shift++) {
+    const msg = renderMessage({ kind: "release", title: "T", before: "", after: "", detail: "" }, "y".repeat(shift) + "&".repeat(2000));
+    assert.ok(msg.length <= 4000, `длина ${msg.length}`);
+    assert.doesNotMatch(msg.replace(/…(<\/[a-z]+>)*$/, ""), /&[#a-z0-9]*$/i, `сдвиг ${shift}: обрывок сущности на срезе`);
+    for (const tag of ["b", "i"]) {
+      const opened = (msg.match(new RegExp(`<${tag}>`, "g")) || []).length;
+      const closed = (msg.match(new RegExp(`</${tag}>`, "g")) || []).length;
+      assert.equal(opened, closed, `сдвиг ${shift}: <${tag}> без пары`);
+    }
+  }
+});
+
 for (const [name, fn] of asyncTests) {
   try {
     await fn();

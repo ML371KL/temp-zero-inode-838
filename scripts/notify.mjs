@@ -2476,8 +2476,7 @@ function renderMessage(ev, comment) {
     lines.push("");
     lines.push("💬 " + esc(comment));
   }
-  const text = lines.join("\n");
-  return text.length > 4000 ? text.slice(0, 3990) + "…" : text;
+  return clipTelegram(lines.join("\n"));
 }
 
 /* ================================== 5. КОММЕНТАРИИ ================================== */
@@ -2919,33 +2918,123 @@ async function llmComments(events, panel, { budgetMs = 0, spend = null } = {}) {
 
 /* =================================== 6. ОТПРАВКА =================================== */
 
-async function sendTelegram(text) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chat = process.env.TELEGRAM_CHAT_ID;
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chat,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      link_preview_options: { is_disabled: true },
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`telegram ${res.status}: ${body.slice(0, 300)}`);
+// Транспорт (аудит ботов 28.10.2026, C6/C8; одинаков в 837 и 838). Сроки ответа: без них зависший
+// Telegram держал рассылку до ~300 с на сообщение (собственный срок fetch на заголовки), зависший
+// хаб — столько же, при тайм-ауте всего прогона в 10–12 минут.
+const TG_TIMEOUT_MS = 15000;
+const NEXUS_TIMEOUT_MS = 5000;
+// 429: Telegram сам называет срок запрета. Ждём его один раз и не дольше минуты; иначе сообщение не
+// попадает в индекс доставленного и уходит следующим прогоном.
+const RETRY_AFTER_MAX_S = 60;
+// Telegram принимает до 4096 символов после разбора разметки; 4000 — с запасом на «…» и закрывающие
+// теги, которые дописывает обрезка.
+const TG_TEXT_LIMIT = 4000;
+const CANT_PARSE = /can't parse entities/i;
+
+// Где резать длинный текст: по последней границе строки до предела; если так пропадает больше
+// половины — по последнему пробелу; если и его нет — по самому пределу, не разрывая суррогатную пару.
+function cutPoint(s, room) {
+  const nl = s.lastIndexOf("\n", room);
+  if (nl >= room / 2) return nl;
+  const sp = s.lastIndexOf(" ", room);
+  if (sp >= room / 2) return sp;
+  const code = s.charCodeAt(room - 1);
+  return code >= 0xd800 && code <= 0xdbff ? room - 1 : room;
+}
+
+// Обрезка HTML-сообщения под предел Telegram. Каждая строка сообщения — законченный кусок разметки,
+// поэтому граница строки безопасна; обрывок тега или HTML-сущности на месте среза отбрасывается, а
+// незакрытые теги закрываются. Прежний slice(0, 3990) мог разрезать «&amp;» или оставить «<b>» без
+// пары — и Telegram отвергал сообщение целиком (400 can't parse entities).
+function clipTelegram(text, limit = TG_TEXT_LIMIT) {
+  const s = String(text);
+  if (s.length <= limit) return s;
+  const head = s.slice(0, cutPoint(s, limit - 64)).replace(/<[^>]*$/, "").replace(/&#?[a-zA-Z0-9]*$/, "");
+  const open = [];
+  for (const m of head.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g)) {
+    const tag = m[2].toLowerCase();
+    if (!m[1]) open.push(tag);
+    else if (open.lastIndexOf(tag) >= 0) open.splice(open.lastIndexOf(tag), 1);
   }
+  return head.trimEnd() + "…" + open.reverse().map((t) => `</${t}>`).join("");
+}
+
+// Тот же текст без разметки — для повтора, когда Telegram не разобрал HTML: сообщение важнее шрифта.
+function telegramPlain(text, limit = TG_TEXT_LIMIT) {
+  const s = String(text)
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  return s.length <= limit ? s : s.slice(0, cutPoint(s, limit - 1)).trimEnd() + "…";
+}
+
+// Один запрос к Telegram. Обрыв соединения и срок ответа — исключение с понятной причиной; ответ с
+// ошибкой — разобранный исход (код, описание, retry_after).
+async function tgPost(body, timeoutMs) {
+  let res;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError") throw new Error(`telegram: нет ответа за ${timeoutMs / 1000} с`);
+    throw new Error(`telegram: сеть — ${error?.cause?.code || error?.cause?.message || error?.message || error}`);
+  }
+  if (res.ok) return { ok: true, status: res.status };
+  const raw = await res.text().catch(() => "");
+  let data = null;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    /* не JSON */
+  }
+  return { ok: false, status: res.status, description: String(data?.description || raw).slice(0, 300), retryAfter: data?.parameters?.retry_after };
+}
+
+// Отправка. 429 — одно ожидание названного срока (≤ 60 с) и повтор; 400 «can't parse entities» —
+// повтор тем же текстом без разметки. Остальное, включая обрыв и срок ответа, — исключение: сообщение
+// не попадает в индекс доставленного и уходит следующим прогоном (повтор после обрыва в том же
+// прогоне мог бы продублировать уже доставленное). opts — швы для тестов: timeoutMs и sleep.
+async function sendTelegram(text, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? TG_TIMEOUT_MS;
+  const pause = opts.sleep ?? sleep;
+  let body = {
+    chat_id: process.env.TELEGRAM_CHAT_ID,
+    text: clipTelegram(text),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    link_preview_options: { is_disabled: true },
+  };
+  let waited = false;
+  let r = await tgPost(body, timeoutMs);
+  while (!r.ok) {
+    if (r.status === 429 && !waited) {
+      const wait = r.retryAfter == null ? 1 : Number(r.retryAfter);
+      if (!(Number.isFinite(wait) && wait >= 0 && wait <= RETRY_AFTER_MAX_S)) break;
+      waited = true;
+      console.log(`Telegram 429: повтор через ${wait} с`);
+      await pause(wait * 1000);
+    } else if (r.status === 400 && body.parse_mode && CANT_PARSE.test(r.description)) {
+      console.error(`Telegram не разобрал разметку (${r.description}) — повтор без parse_mode`);
+      const { parse_mode: _drop, ...rest } = body;
+      body = { ...rest, text: telegramPlain(text) };
+    } else break;
+    r = await tgPost(body, timeoutMs);
+  }
+  if (!r.ok) throw new Error(`telegram ${r.status}: ${r.description}`);
 }
 
 // Второй независимый канал: сохраняет ровно тот же текст в приватной ленте NEXUS.
-// Сбой ленты не влияет ни на Telegram, ни на состояние решающего контура.
-async function sendNexusEvent(text, eventId, occurredAt) {
+// Сбой ленты не влияет ни на Telegram, ни на состояние решающего контура; зависший хаб
+// обрывается по сроку и рассылку не держит.
+async function sendNexusEvent(text, eventId, occurredAt, opts = {}) {
   const url = process.env.NEXUS_EVENTS_URL;
   const token = process.env.NEXUS_INGEST_TOKEN;
   const source = process.env.NEXUS_SOURCE_ID;
   if (!url || !token || !source) return;
+  const timeoutMs = opts.timeoutMs ?? NEXUS_TIMEOUT_MS;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -2954,12 +3043,16 @@ async function sendNexusEvent(text, eventId, occurredAt) {
         authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ source, text, eventId, occurredAt }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) console.error(`NEXUS HTTP ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
   } catch (error) {
-    console.error(`NEXUS недоступен: ${error?.message || error}`);
+    console.error(`NEXUS недоступен: ${error?.name === "TimeoutError" ? `нет ответа за ${timeoutMs / 1000} с` : error?.message || error}`);
   }
 }
+
+// Экспорт транспорта — отдельной инструкцией: общая строка export в конце файла общая для многих правок.
+export { sendTelegram, sendNexusEvent, clipTelegram, telegramPlain, TG_TIMEOUT_MS, NEXUS_TIMEOUT_MS };
 
 /* ================================ 7. СОСТОЯНИЕ И MAIN ================================ */
 
@@ -3247,7 +3340,7 @@ async function main(io = {}) {
     }
     const text = `${pingMessage(panel)}\n\n${verdictLine}`;
     if (DRY) console.log(text.replace(/<[^>]+>/g, ""));
-    else await sendTelegram(text.length > 4000 ? text.slice(0, 3990) + "…" : text);
+    else await sendTelegram(text); // обрезку под предел Telegram делает сам транспорт
     console.log(DRY ? "пинг: dry-run, ничего не отправлено" : "пинг отправлен");
     return;
   }
