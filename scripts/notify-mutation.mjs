@@ -134,8 +134,20 @@ const MUTATIONS = [
     guard: /предупреждение о данных: одно сообщение при появлении и одно при снятии/ },
   { id: "8-имя-детектора-утверждает-факт", find: '"Слом маржинального спроса": "Совместное ухудшение спроса: ETF, стейблкоины, биржи, спот США",', put: '"Слом маржинального спроса": "Приток денег в биткоин прекратился",',
     guard: /имя детектора называет условие, а не факт о рынке/ },
-  { id: "9-числа-разбора-не-сверяются", find: "    const stray = strayNumbers(t, input);", put: "    const stray = [];",
+  // --- проверка смысла разбора (блок 5б, 29.10.2026) ---
+  { id: "9-числа-разбора-не-сверяются", find: "  const stray = ev ? gStrayNumbers(sentence, ev) : [];", put: "  const stray = [];",
     guard: /разбор с посторонним числом отбрасывается/ },
+  { id: "9-числа-из-всей-пачки", find: 'if ((isObj && "i" in e ? e.i : pos) === index) walk(', put: "if (true) walk(",
+    guard: /сверка чисел смотрит на вход СВОЕГО события/ },
+  { id: "9-нумерация-меток-не-проверяется", find: "  if (idx.some((i, k) => i !== k) || idx.length > n) return [null, ", put: "  if (false) return [null, ",
+    guard: /сбой нумерации бракует ответ/ },
+  { id: "9-проверка-не-подключена", find: "  const [parsed, summary] = guardReview(txt, input, events.length,",
+    put: "  const parsed = gParseBlocks(txt, events.length)[0] || new Array(events.length).fill(null), summary = null;\n  if (false) guardReview(txt, input, events.length,",
+    guard: /фраза с посторонним числом вырезается/ },
+  { id: "9-тревога-доступа-не-ставится", find: "  if ([401, 402, 403].includes(status)) return true;", put: "  return false;",
+    guard: /отказ 401\/402 и «кончились кредиты» — тревога в учёте/ },
+  { id: "9-учёт-недели-не-шлётся-из-main", find: "  const sendOps = io.sendOps || (dry || io.deliver ? null : guardSendOps);", put: "  const sendOps = null;",
+    guard: /main\(\): учёт переживает прогоны/ },
   { id: "9-вход-модели-без-решения", find: "  if (eng) {\n    const hold = Date.parse", put: "  if (false) {\n    const hold = Date.parse",
     guard: /во входе модели о смене доли есть причина, цена, режим, кандидат и оверлей/ },
   // С 28.10.2026 модель одна, и срок для сообщения о доле — это срок самого запроса (вместе с
@@ -198,6 +210,8 @@ if (existsSync(deps)) symlinkSync(deps, depsLink, "junction");
 let survived = 0, broken = 0, ran = 0;
 try {
   writeFileSync(join(dir, "notify-test.mjs"), tests);
+  // общие векторы проверки разбора (блок 5б) читаются тестами рядом с собой
+  writeFileSync(join(dir, "llm-guard-vectors.json"), readFileSync(join(here, "llm-guard-vectors.json")));
   // сначала — что немутированная копия зелёная: иначе «красный» ничего не доказывает
   writeFileSync(join(dir, "notify.mjs"), source);
   const clean = spawnSync(process.execPath, [join(dir, "notify-test.mjs")], { encoding: "utf8" });

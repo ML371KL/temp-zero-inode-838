@@ -92,6 +92,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Комментатор — Claude через SDK Anthropic. Без секрета сообщения идут с шаблоном.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Канал ошибок панелей (тот же бот, что у сторожа): раз в неделю строка учёта ИИ-разборов
+          # и тревога, если API Anthropic отказал по доступу (ключ отозван, кончились кредиты).
+          # Без секретов строка ждёт прогона, где канал настроен, — рассылку это не трогает.
+          ALERT_BOT_TOKEN: ${{ secrets.ALERT_BOT_TOKEN }}
+          ALERT_CHAT_ID: ${{ secrets.ALERT_CHAT_ID }}
           # Необязательные переменные репозитория (Variables); незаданная приходит пустой строкой,
           # и скрипт берёт умолчание: claude-sonnet-5-5, xhigh, потолок 1 $ в сутки.
           NOTIFY_MODEL: ${{ vars.NOTIFY_MODEL }}
