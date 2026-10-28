@@ -3051,6 +3051,9 @@ async function sendNexusEvent(text, eventId, occurredAt, opts = {}) {
   }
 }
 
+// Экспорт транспорта — отдельной инструкцией: общая строка export в конце файла общая для многих правок.
+export { sendTelegram, sendNexusEvent, clipTelegram, telegramPlain, TG_TIMEOUT_MS, NEXUS_TIMEOUT_MS };
+
 /* ================================ 7. СОСТОЯНИЕ И MAIN ================================ */
 
 // Идемпотентность: база сравнения двигается ОДИН раз в конце прогона, а список уже доставленных
@@ -3481,4 +3484,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   });
 }
 
-export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, rememberShown, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, trackWarnings, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER, sendTelegram, sendNexusEvent, clipTelegram, telegramPlain, TG_TIMEOUT_MS, NEXUS_TIMEOUT_MS };
+export { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, rememberShown, appendTrend, appendChanges, significance, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, trackWarnings, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER };

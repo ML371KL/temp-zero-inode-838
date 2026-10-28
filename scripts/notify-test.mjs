@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 process.env.NOTIFY_LLM_MAX_RETRIES = "0";
 process.env.NOTIFY_LLM_TIMEOUT_MS = "5000";
 for (const k of ["NOTIFY_MODEL", "NOTIFY_LLM_EFFORT", "NOTIFY_LLM_DAILY_USD", "NOTIFY_DECISION_LLM_MS", "ANTHROPIC_BASE_URL"]) delete process.env[k];
-const { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER, sendTelegram, sendNexusEvent, clipTelegram, TG_TIMEOUT_MS, NEXUS_TIMEOUT_MS } = await import("./notify.mjs");
+const { diff, renderMessage, templateComment, fromSnapshotJSON, snapshotState, llmComments, sentKey, pruneSent, rememberRevised, appendTrend, appendChanges, decisionChanges, thresholdFrom, humanRelease, releaseOf, pingMessage, main, llmInput, strayNumbers, engineAgrees, fmtValue, HUMAN, MACRO_CADENCE, KIND_ORDER } = await import("./notify.mjs");
 
 let passed = 0;
 const test = (name, fn) => {
@@ -2328,6 +2328,8 @@ testAsync("без пакета SDK модуль грузится, а разбо�
 /* ---------- транспорт Telegram и NEXUS (аудит ботов 28.10.2026, C6/C8; одинаково в 837 и 838) ----------
    Сеть подменяется заглушкой fetch: срок ответа, 429 с retry_after, повтор без разметки при
    «can't parse entities», обрезка по границе строки. Сон подменяется — тесты не ждут. */
+// Свой импорт у блока: общая строка импорта в начале файла общая для многих правок.
+const { sendTelegram, sendNexusEvent, clipTelegram, TG_TIMEOUT_MS, NEXUS_TIMEOUT_MS } = await import("./notify.mjs");
 const TG_NET_ENV = { TELEGRAM_BOT_TOKEN: "TEST", TELEGRAM_CHAT_ID: "1", NEXUS_EVENTS_URL: "https://nexus.test/api/events", NEXUS_INGEST_TOKEN: "TEST", NEXUS_SOURCE_ID: "TEST" };
 // Подменяет сеть, окружение и вывод на время fn; ответ на каждый запрос даёт handler(вызов, номер с 1).
 async function withTelegramNet(handler, fn) {
