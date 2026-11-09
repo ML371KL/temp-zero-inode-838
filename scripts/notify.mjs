@@ -2101,8 +2101,12 @@ function diff(prevState, panel) {
     // оно уже не меняется: по сравнению с прошлым тактом из 73 суточных изменений притока
     // приходило 19 — те, что случайно совпали со сдвигом даты.
     const seen = dict.drift ? shownMap[i.id] : null;
-    const unseen = !!seen && hasValue(seen.v) && seen.v !== fmtValue(i);
-    if (i.scheduled && !dict.quiet && ((changed && (dateAdvanced || (sameDate && i.updates && !dict.drift))) || (dateAdvanced && unseen))) {
+    // Смена метода, а не новость о значении (09.11.2026: месячный приток на биржи стал считаться по
+    // остатку — −61 → +33 тыс. BTC при тех же данных): у карточки с пометкой drift сменилась подпись
+    // источника. Строка «было → стало» не идёт, а база показанного переписывается в seedShown.
+    const methodMoved = !!(dict.drift && was?.source && i.source && was.source !== i.source);
+    const unseen = !methodMoved && !!seen && hasValue(seen.v) && seen.v !== fmtValue(i);
+    if (i.scheduled && !dict.quiet && !methodMoved && ((changed && (dateAdvanced || (sameDate && i.updates && !dict.drift))) || (dateAdvanced && unseen))) {
       releaseGroups.push({ i, was, update: !dateAdvanced });
     }
     // Ревизия: дата наблюдения та же, а значение переписали.
@@ -3572,10 +3576,14 @@ function rememberShown(prev, events, now) {
 // прошлом сообщении о ней. Пока такого сообщения не было (первый запуск, новая карточка, состояние
 // прежнего формата), за известное принимается значение, которое бот застал первым: иначе её
 // строка ждала бы дня, когда число сменится ровно в такт сдвига даты.
-function seedShown(prev, panel, now) {
+// Сменилась подпись источника по сравнению с прошлым тактом (prevIndicators) — значение посчитано
+// другим методом, и за известное принимается новое: иначе на ближайшем сдвиге даты читатель получил
+// бы смену метода как скачок показателя.
+function seedShown(prev, panel, now, prevIndicators = null) {
   const out = { ...(prev || {}) };
   for (const i of panel.indicators || []) {
-    if (!HUMAN[i.id]?.drift || out[i.id] || i.stale || i.degraded) continue;
+    const before = prevIndicators?.[i.id]?.source, methodMoved = !!(before && i.source && before !== i.source);
+    if (!HUMAN[i.id]?.drift || (out[i.id] && !methodMoved) || i.stale || i.degraded) continue;
     const v = fmtValue(i);
     if (hasValue(v)) out[i.id] = { v, n: finite(i.value_num) ? i.value_num : null, d: i.observed_at || "", at: new Date(now).toISOString() };
   }
@@ -3930,7 +3938,7 @@ async function main(io = {}) {
     revisedSeen = rememberRevised(revisedSeen, queue.filter((e) => e.revisedPoints), now);
     shownSeen = rememberShown(shownSeen, queue, now);
   }
-  shownSeen = seedShown(shownSeen, panel, now);
+  shownSeen = seedShown(shownSeen, panel, now, prev?.indicators);
   // В базу идут ВСЕ события прогона, включая отфильтрованные как уже доставленные: память «о чём
   // сказано» (пауза объявлена, предупреждение объявлено) не должна зависеть от того, в каком из
   // двух прогонов — упавшем или повторном — сообщение ушло.

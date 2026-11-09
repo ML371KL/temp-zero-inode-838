@@ -94,8 +94,12 @@ const MUTATIONS = [
     guard: /приток на биржи приходит раз в сутки — при сдвиге даты/ },
   { id: "4-drift-вторая-строка-на-ту-же-дату", find: "    if (dict.drift && shown?.d && i.observed_at && i.observed_at <= shown.d) continue;", put: "",
     guard: /приток на биржи приходит раз в сутки — при сдвиге даты/ },
-  { id: "4-drift-без-первого-значения", find: "  shownSeen = seedShown(shownSeen, panel, now);", put: "",
+  { id: "4-drift-без-первого-значения", find: "  shownSeen = seedShown(shownSeen, panel, now, prev?.indicators);", put: "",
     guard: /приток на биржи приходит раз в сутки — при сдвиге даты/ },
+  { id: "4-drift-смена-метода-как-скачок", find: "    if (i.scheduled && !dict.quiet && !methodMoved && (", put: "    if (i.scheduled && !dict.quiet && (",
+    guard: /смена метода у суточной карточки — не скачок показателя/ },
+  { id: "4-drift-смена-метода-без-новой-базы", find: "  shownSeen = seedShown(shownSeen, panel, now, prev?.indicators);", put: "  shownSeen = seedShown(shownSeen, panel, now);",
+    guard: /смена метода у суточной карточки — не скачок показателя/ },
   // --- п. 5–10 ---
   { id: "5-порог-пересчёта-с-границей-масштаба", find: "    if ((Math.abs(newV - oldV) / top) * 100 < REVISION_MIN_PCT) { out.dust++; continue; }", put: "    if ((Math.abs(newV - oldV) / scale) * 100 < REVISION_MIN_PCT) { out.dust++; continue; }",
     guard: /порог пересчёта считается от величины точки и у ряда с малыми числами/ },

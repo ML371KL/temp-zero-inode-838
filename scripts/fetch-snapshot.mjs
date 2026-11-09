@@ -1309,7 +1309,74 @@ function exchangeFlowSupplyWarning(check){
   if(!check||!finite(check.gap_btc)||!(Math.abs(check.gap_btc)>CM_FLOW_SUPPLY_TOLERANCE_BTC))return null;
   // Округление — по модулю: разрыв −5 000,5 BTC обязан стать −5 001, а не «ровно на допуске».
   return{source:"coinmetrics",code:"exchange_flow_supply_mismatch",value:Math.sign(check.gap_btc)*Math.round(Math.abs(check.gap_btc)),threshold:CM_FLOW_SUPPLY_TOLERANCE_BTC,unit:`BTC за ${check.days} дней`,
-    text:`Потоки бирж расходятся с остатком на ${ruThousands(check.gap_btc)} BTC за ${check.days} дней`,affects:["exchange_supply","exchange_netflow_30d"]};
+    text:`Потоки бирж Coin Metrics расходятся с остатком на ${ruThousands(check.gap_btc)} BTC за ${check.days} дней — панель считает их по остатку`,affects:["exchange_supply","exchange_netflow_30d"]};
+}
+// ВОССТАНОВЛЕНИЕ ПОТОКОВ БИРЖ ПО ОСТАТКУ (09.11.2026, решение владельца). Причина разрыва из сверки выше
+// установлена по меткам расчёта поставщика: всю историю по 09.04.2026 Coin Metrics пересчитал 02–20.04.2026
+// по единой разметке биржевых адресов, а с 10.04.2026 каждый день считается один раз, наутро, и больше не
+// пересматривается. Адрес, который разметка опознала позже, приносит в остаток свой баланс, а приток на
+// него задним числом не дописывается: приток занижен примерно на 10 %, и потоки показывают отток, которого
+// нет (212 суток из 213 — разрыв одного знака). Свидетель — резервы бирж с доказательством резервов
+// (Binance, OKX, Bitfinex, Bybit по DefiLlama): с 10.04 по 08.11.2026 они +169 тыс. BTC, остаток Coin
+// Metrics +101 тыс., потоки −330 тыс. По этой ноге 22.07.2026 включился пол восстановления 80 %, которого
+// по остатку не было бы; с апреля семья 54 дня из 207 давала ложное подтверждение восстановления.
+//
+// Правило: в сутках, где тождество приток − отток = Δостатка нарушено больше чем на CM_FLOW_REPAIR_MIN_BTC,
+// недостающий приток (при оттоке сверх остатка — недостающий отток) дописывается так, чтобы тождество
+// выполнялось. Исключение — сутки переразметки, разрыв больше CM_RELABEL_JUMP_BTC: остаток в них прыгает на
+// баланс кошельков, опознанных разом, — это монеты прошлых дней, а не поток этих суток, и поток в них
+// остаётся измеренным. До апреля разрыв не превышал 1,3 тыс. BTC в сутки, после — 9,5 тыс. в обычные сутки
+// и 12–44 тыс. в четыре скачка (06.05, 13.08, 03.11, 04.11). На недельных окнах такой ряд ближе всех к
+// резервам бирж: корреляция 0,73 и знак совпадает в 73 % окон против 0,71 и 50 % у потоков как есть и 0,59
+// и 70 % у остатка со скачками; порог стоит на плато 8–15 тыс.
+//
+// Потоки поставщик часто выкладывает раньше остатка (49 суток из 213 с апреля, до 50 минут): сутки, за
+// которые остатка ещё нет, проверить нечем, и сырой поток на 1–3 такта качал бы недельную ногу туда и
+// обратно — тот же класс артефакта, что включил пол 22.07. Поэтому потоки читаются только по последние
+// сутки остатка; без ряда остатка восстановления нет вовсе и потоки идут как есть.
+//
+// Сырой пакет не меняется: хэши винтажей, сверка разрыва и кэш видят ровно то, что отдал поставщик.
+// Восстановление делается при чтении (cmSeries) вне POLICY-LOCK — правило семьи прежнее, исправлен вход.
+// Когда поставщик снова пересчитает историю, тождество восстановится и функция станет тождественной.
+const CM_FLOW_REPAIR_MIN_BTC=100,CM_RELABEL_JUMP_BTC=10000;
+function repairExchangeFlowsV1(by){
+  const summary={repaired_days:0,inflow_added_btc:0,outflow_added_btc:0,relabel_days:[],held_back_days:0};
+  if(!by||typeof by!=="object")return{data:by,summary};
+  const supply=series(by.SplyExNtv||[]);
+  if(!supply.length)return{data:by,summary};
+  const lastSupplyDay=dayKey(last(supply).t),upToSupply=rows=>rows.filter(p=>dayKey(p.t)<=lastSupplyDay);
+  const rawIn=series(by.FlowInExNtv||[]),rawOut=series(by.FlowOutExNtv||[]),inflow=upToSupply(rawIn),outflow=upToSupply(rawOut);
+  summary.held_back_days=new Set([...rawIn,...rawOut].map(p=>dayKey(p.t)).filter(d=>d>lastSupplyDay)).size;
+  const outByDay=new Map(outflow.map(p=>[dayKey(p.t),p.v])),supplyByDay=new Map(supply.map(p=>[dayKey(p.t),p.v]));
+  const fixedIn=new Map(),fixedOut=new Map();
+  for(const p of inflow){
+    const d=dayKey(p.t),out=outByDay.get(d),s=supplyByDay.get(d),sPrev=supplyByDay.get(dayKey(p.t-DAY));
+    if(!finite(out)||!finite(s)||!finite(sPrev))continue;
+    const gap=(p.v-out)-(s-sPrev);
+    if(!(Math.abs(gap)>CM_FLOW_REPAIR_MIN_BTC))continue;
+    if(Math.abs(gap)>CM_RELABEL_JUMP_BTC){summary.relabel_days.push({day:d,gap_btc:Math.sign(gap)*Math.round(Math.abs(gap))});continue;}
+    if(gap<0){fixedIn.set(d,p.v-gap);summary.inflow_added_btc-=gap;}
+    else{fixedOut.set(d,out+gap);summary.outflow_added_btc+=gap;}
+    summary.repaired_days++;
+  }
+  summary.inflow_added_btc=Math.round(summary.inflow_added_btc);summary.outflow_added_btc=Math.round(summary.outflow_added_btc);
+  if(!fixedIn.size&&!fixedOut.size&&!summary.held_back_days)return{data:by,summary};
+  const patch=(rows,fixed)=>rows.map(p=>fixed.has(dayKey(p.t))?{t:p.t,v:fixed.get(dayKey(p.t))}:p);
+  return{data:{...by,FlowInExNtv:patch(inflow,fixedIn),FlowOutExNtv:patch(outflow,fixedOut)},summary};
+}
+// Восстановленный вид пакета запоминается на сам объект пакета: один расчёт на такт, а подмена пакета
+// (новый сбор, резерв из кэша, тест) сама даёт новый расчёт.
+const cmRepairMemo=new WeakMap();
+function cmRepaired(){
+  const by=data("coinmetrics");
+  if(!by||typeof by!=="object")return{data:by,summary:null};
+  if(!cmRepairMemo.has(by))cmRepairMemo.set(by,repairExchangeFlowsV1(by));
+  return cmRepairMemo.get(by);
+}
+// Суточный поток после восстановления — вход недельной ноги теневого кандидата v3.
+function cmNetflowSeries(){
+  const out=new Map(cmSeries("FlowOutExNtv").map(p=>[dayKey(p.t),p.v]));
+  return cmSeries("FlowInExNtv").filter(p=>finite(out.get(dayKey(p.t)))).map(p=>({t:p.t,v:p.v-out.get(dayKey(p.t))}));
 }
 async function fetchCoinMetrics(){
   const start=new Date(NOW-5*365*DAY).toISOString().slice(0,10),errors=[];
@@ -1596,7 +1663,30 @@ function metric(def){return{
   value:def.value??(finite(def.value_num)?String(def.value_num):"—"),unit:def.unit||"",delta:def.delta||"",note:def.note||"",score:finite(def.score)?clamp(Math.round(Number(def.score)*2)/2,-2,2):null,
   source:def.source||"",source_url:def.source_url||SOURCE_URLS[def.source]||"",source_urls:uniqueHttps(def.source_urls?.length?def.source_urls:[def.source_url||SOURCE_URLS[def.source]]),observed_at:def.observed_at||null,stale:!!def.stale,series:(def.series||[]).slice(-180)
 };}
-function cmSeries(id){return series(data("coinmetrics")?.[id]||[]);}
+// Ряды Coin Metrics так, как их читает панель: потоки бирж — после восстановления по остатку
+// (repairExchangeFlowsV1), остальные метрики — как отдал поставщик.
+function cmSeries(id){return series(cmRepaired().data?.[id]||[]);}
+// Карточка «Exchange netflow · 30 дней» не голосует и показывает месячное движение монет. На месячном окне
+// скачок переразметки по большей части приходится на монеты того же окна: изменение остатка как есть
+// ближе всего к резервам бирж (корреляция 0,83, знак совпадает в 81 % окон против 0,68 и 69 % у ряда без
+// скачков и 0,70 и 19 % у потоков как есть). Поэтому значение и ряд карточки — изменение остатка за 30
+// дней. Карточка создаётся в POLICY-LOCK, здесь меняются только её значение, ряд и подпись источника;
+// балла у неё нет. Новая подпись источника — сигнал боту уведомлений, что ряд пересчитан сменой метода,
+// а не пересмотром данных поставщика. Правка постоянная: при согласованных рядах изменение остатка за 30
+// дней и есть сумма потоков, а переключение туда-обратно рассылало бы смену метода на каждом пересчёте.
+function presentExchangeNetflow30d(metrics){
+  const m=metrics.find(x=>x?.id==="exchange_netflow_30d");
+  if(!m)return metrics;
+  const reserve=cmSeries("SplyExNtv"),byDay=new Map(reserve.map(p=>[dayKey(p.t),p.v])),change=[];
+  for(const p of reserve){const base=byDay.get(dayKey(p.t-30*DAY));if(finite(base))change.push({t:p.t,v:p.v-base});}
+  const nf30=last(change)?.v;
+  if(!finite(nf30))return metrics;
+  m.value_num=nf30;
+  m.value=`${nf30>=0?"+":""}${formatCompact(nf30,0)} BTC`;
+  m.series=change.slice(-180);
+  m.source="Coin Metrics · остаток бирж";
+  return metrics;
+}
 function bcSeries(id){return series(data("blockchain_onchain")?.[id]||[]);}
 // Подпись резерва MVRV живёт ВНУТРИ POLICY-LOCK:scoring_and_regimes_v1 (вызов chooseWholeSeries и текст
 // карточки mvrv_cycle), и хэш секции менять нельзя — это правка замороженной policy v1. Резерв же сменил
@@ -2297,7 +2387,7 @@ function buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,d
       recovery_state:state("recovery"),macro_shock_state:state("macro_shock"),distribution_state:state("distribution"),
       mvrv_percentile:num(mvrv?.value_num),valuation_score:num(mvrv?.score)},
     families,
-    series:{hashrate:rows.hashrate||[],difficulty:rows.difficulty||[],exchange_supply:rows.exchange_supply||[],price_daily:rows.price_daily||[],mvrv:rows.mvrv||[],mvrv_deep:rowsOrNull(rows.mvrv_deep)},
+    series:{hashrate:rows.hashrate||[],difficulty:rows.difficulty||[],exchange_supply:rows.exchange_supply||[],exchange_netflow:rows.exchange_netflow||[],price_daily:rows.price_daily||[],mvrv:rows.mvrv||[],mvrv_deep:rowsOrNull(rows.mvrv_deep)},
     // Даты макрокарточек: суточный фикс кандидата читает их на день старше остальных входов и публикует возраст.
     observed_at:{mvrv:observedAt.mvrv??null,coinmetrics:observedAt.coinmetrics??null,etf:observedAt.etf??null,network:observedAt.network??null,market:observedAt.market??null,mvrv_deep:observedAt.mvrv_deep??null,
       macro_liquidity:card("liquidity_regime")?.observed_at??null,macro_conditions:card("financial_conditions")?.observed_at??null,macro_stress:card("system_stress")?.observed_at??null},
@@ -2320,7 +2410,7 @@ function compute(){
   // Теневой слой конкатенируется ПОСЛЕ голосующих карточек: familyStats/детекторы фильтруют по
   // vote, поэтому порядок и состав решающего контура не меняются.
   const votingMetrics=buildMetrics(),shadowMetrics=buildShadowMetrics();
-  const metrics=relabelMvrvFallback([...votingMetrics,...shadowMetrics]),blocks={};
+  const metrics=presentExchangeNetflow30d(relabelMvrvFallback([...votingMetrics,...shadowMetrics])),blocks={};
   for(const [k,b] of Object.entries(BLOCKS))blocks[k]={...b,strategic:familyStats(metrics,k,"strategic"),tactical:familyStats(metrics,k,"tactical")};
   const {detectors,hardOverride}=buildDetectors(metrics);
   let strategicRaw=0,sw=0,tacticalRaw=0,tw=0;
@@ -2399,7 +2489,7 @@ function compute(){
   if(sourceStates.etf?.legs!==undefined&&optional("etf_legs",()=>sourceStates.etf.legs)===null)delete sourceStates.etf.legs;
   const dataWarnings=optional("data_warnings",()=>buildDataWarningsV1({etfLegs:sourceStates.etf?.legs,flowSupplyCheck:datasets.coinmetrics?.flow_supply_check??exchangeFlowSupplyCheck(data("coinmetrics"))}));
   const variantInputs=optional("variant_inputs",()=>buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,decision,metrics,blocks,detectors,
-    series:{hashrate:netSeries("hashrate"),difficulty:netSeries("difficulty"),exchange_supply:cmSeries("SplyExNtv"),price_daily:marketSeries("price"),mvrv:mvrvV1,mvrv_deep:series(data("mvrv_deep")||[])},
+    series:{hashrate:netSeries("hashrate"),difficulty:netSeries("difficulty"),exchange_supply:cmSeries("SplyExNtv"),exchange_netflow:cmNetflowSeries(),price_daily:marketSeries("price"),mvrv:mvrvV1,mvrv_deep:series(data("mvrv_deep")||[])},
     observedAt:{mvrv:mvrvV1.length?iso(last(mvrvV1).t):null,coinmetrics:obs("coinmetrics"),etf:obs("etf"),network:obs("network"),market:obs("market"),mvrv_deep:obs("mvrv_deep")}}));
   const shadowValues=optional("shadow_values",()=>Object.fromEntries(shadowMetrics.map(x=>[x.id,num(x.value_num)])));
   const monitorArgs={previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta,shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}};
@@ -2471,7 +2561,7 @@ export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS,
   // Для воспроизведения эпизодов на настоящем счёте: тест подставляет наборы данных и зовёт ту самую
   // buildMetrics, что стоит под замком, а не её копию (scripts/collector-etf-episode.mjs).
   buildMetrics, datasets as collectorDatasets,
-  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS, validateMvrvDeep,
+  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, repairExchangeFlowsV1, CM_FLOW_REPAIR_MIN_BTC, CM_RELABEL_JUMP_BTC, presentExchangeNetflow30d, cmNetflowSeries, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS, validateMvrvDeep,
   buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS,
   collect, compute, monitorCallArguments, fetchCoinMetrics };
 
