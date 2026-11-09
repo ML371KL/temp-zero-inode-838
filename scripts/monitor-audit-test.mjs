@@ -873,7 +873,7 @@ const variantInputs=target=>({price:60_000,hard_override:false,v1:{state:"transi
   const view=(target,extra={})=>({target_pct:target,base_target_pct:target,state:"transition",candidate:"transition",fix_at:iso(T0),next_fix_at:iso(T0+DAY),floor:{active:false,rung:null,closes:0},binding_overlays:[],inputs:{a:1},reason_codes:["between_fixes"],...extra});
   const engineOf=(v3,daily={target_pct:45,state:"transition",fix_at:iso(T0)})=>()=>({state:{k:1},variants:{policy_v3_shadow:v3,v1_daily_close:daily,v1_floor_handoff:{target_pct:45,carry:false},v1_no_cftc:{target_pct:45}}});
   const run=(monitor,hour,engine)=>tick(monitor,T0+hour*HOUR,60_000,{strategic:"transition"},engine===null?{}:{variantInputs:variantInputs(45),variantEngine:engine});
-  const OWN=["id","version","status","created","base_suite","evaluated_at","acceptance","acceptance_status"];
+  const OWN=["id","version","revision","revised","status","created","base_suite","evaluated_at","acceptance","acceptance_status"];
   const engineKeys=block=>Object.keys(block).filter(key=>!OWN.includes(key)).sort();
   const healthy=run(run(null,0,null),1,engineOf(view(45)));
   assert.deepEqual(engineKeys(healthy.v3_candidate),Object.keys(view(45)).sort(),"фикстура: в блоке — поля движка и свои поля монитора");

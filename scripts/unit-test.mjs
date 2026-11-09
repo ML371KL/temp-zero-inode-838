@@ -7,7 +7,7 @@ import {
   quoteDispersion, convertDailyUsdFlowsToBtc, estimatedSupply, normalizeToContract, crossCheck, SERIES_CONTRACT, validateMarket, parseCoinbaseCandles, parseBitstampOhlc, parseMempoolHashrate, parseFredCsv, request,
   closedDaysOnly, krakenDatedBasis, oiPurgeWindow,
   updateCanonRegistry, carryCanonDays, ETF_CANON_HOLD_TTL, ETF_CANON_HOLD_MAX_DAYS, ETF_CANON_REGISTRY_TTL, ETF_LEG_NAMES, parseEtfFlowJson,
-  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, validateMvrvDeep, MVRV_DEEP_MIN_POINTS,
+  exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, repairExchangeFlowsV1, CM_FLOW_REPAIR_MIN_BTC, CM_RELABEL_JUMP_BTC, presentExchangeNetflow30d, cmNetflowSeries, collectorDatasets, validateMvrvDeep, MVRV_DEEP_MIN_POINTS,
   buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS
 } from "./fetch-snapshot.mjs";
 import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES,
@@ -935,7 +935,7 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   ok(Math.abs(got.supply_change_btc-(-33396.90))<0.01,`изменение остатка за те же 30 дней: ${got.supply_change_btc}`);
   ok(Math.abs(got.gap_btc-(-61725.28))<0.01,`разрыв: ${got.gap_btc}`);
   eq(exchangeFlowSupplyWarning(got),{source:"coinmetrics",code:"exchange_flow_supply_mismatch",value:-61725,threshold:5000,unit:"BTC за 30 дней",
-    text:"Потоки бирж расходятся с остатком на 61,7 тыс. BTC за 30 дней",affects:["exchange_supply","exchange_netflow_30d"]},"предупреждение — ровно по контракту снимка");
+    text:"Потоки бирж Coin Metrics расходятся с остатком на 61,7 тыс. BTC за 30 дней — панель считает их по остатку",affects:["exchange_supply","exchange_netflow_30d"]},"предупреждение — ровно по контракту снимка");
   // Согласованные ряды (потоки равны изменению остатка) предупреждения не дают.
   const honest=real.map((r,i)=>i?[r[0],r[1],r[1]-(r[3]-real[i-1][3]),r[3]]:r);
   ok(Math.abs(exchangeFlowSupplyCheck(pack(honest)).gap_btc)<1e-6,"при выполненном тождестве разрыв равен нулю");
@@ -945,8 +945,68 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   const gap=g=>exchangeFlowSupplyWarning({days:30,gap_btc:g});
   eq([gap(5000),gap(-5000)],[null,null],"ровно на допуске предупреждения нет");
   eq([gap(5000.5)?.value,gap(-5000.5)?.value],[5001,-5001],"за допуском — предупреждение со знаком разрыва");
-  eq(gap(5200)?.text,"Потоки бирж расходятся с остатком на 5,2 тыс. BTC за 30 дней","в тексте — модуль разрыва в тысячах с запятой");
+  eq(gap(5200)?.text,"Потоки бирж Coin Metrics расходятся с остатком на 5,2 тыс. BTC за 30 дней — панель считает их по остатку","в тексте — модуль разрыва в тысячах с запятой");
   eq([gap(NaN),gap(null),exchangeFlowSupplyWarning(null)],[null,null,null],"без измерения предупреждения нет");
+  // ВОССТАНОВЛЕНИЕ ПОТОКОВ ПО ОСТАТКУ (09.11.2026). На настоящих рядах аудита: после восстановления каждые
+  // сутки, кроме суток переразметки, выполняют тождество, и сверка за 30 дней разрыва не находит.
+  {
+    const raw=pack(real),before=JSON.stringify(raw),fixed=repairExchangeFlowsV1(raw);
+    eq(JSON.stringify(raw),before,"сырой пакет не меняется — восстанавливается копия");
+    eq(fixed.summary.relabel_days,[],"в окне аудита суток переразметки нет");
+    ok(fixed.summary.repaired_days>=25,`восстановлены почти все сутки окна: ${fixed.summary.repaired_days}`);
+    const chk=exchangeFlowSupplyCheck(fixed.data);
+    ok(Math.abs(chk.gap_btc)<=30*CM_FLOW_REPAIR_MIN_BTC,`после восстановления разрыв за 30 дней в пределах допуска суток: ${chk.gap_btc}`);
+    ok(Math.abs(fixed.summary.inflow_added_btc-fixed.summary.outflow_added_btc-61725)<30*CM_FLOW_REPAIR_MIN_BTC,`дописанный приток закрывает разрыв: ${JSON.stringify(fixed.summary)}`);
+    ok(fixed.data.FlowInExNtv.every((p,i)=>p.v>=raw.FlowInExNtv[i].v)&&fixed.data.FlowOutExNtv.every((p,i)=>p.v>=raw.FlowOutExNtv[i].v),"восстановление только дописывает поток, не вычитает");
+    eq(fixed.data.SplyExNtv,raw.SplyExNtv,"остаток не трогается");
+    // Согласованные ряды — тот же объект без копии: при выполненном тождестве функция тождественна.
+    const consistent=pack(honest),same=repairExchangeFlowsV1(consistent);
+    ok(same.data===consistent,"согласованный пакет возвращается как есть");
+    eq(same.summary.repaired_days,0,"и ничего не восстанавливается");
+  }
+  // Пороги: разрыв до CM_FLOW_REPAIR_MIN_BTC — шум, больше CM_RELABEL_JUMP_BTC — переразметка, поток остаётся измеренным.
+  {
+    eq([CM_FLOW_REPAIR_MIN_BTC,CM_RELABEL_JUMP_BTC],[100,10000],"пороги восстановления");
+    // День i: приток 20 000, отток 20 000 + g + Δ, остаток меняется на −Δ… строим так, чтобы разрыв суток был ровно g.
+    const day=i=>Date.parse("2026-10-01T00:00:00Z")+i*D;
+    const build=gaps=>{const S=[2_700_000],inR=[],outR=[],supR=[{t:day(0),v:S[0]}];
+      gaps.forEach((g,k)=>{const i=k+1,dS=-500;S.push(S[k]+dS);supR.push({t:day(i),v:S[i]});inR.push({t:day(i),v:20000});outR.push({t:day(i),v:20000-dS-g});});
+      return{FlowInExNtv:inR,FlowOutExNtv:outR,SplyExNtv:supR};};
+    const by=build([-100,-100.5,-9999,-10000,-10000.5,-43726,+2502]),r=repairExchangeFlowsV1(by);
+    const net=k=>r.data.FlowInExNtv[k].v-r.data.FlowOutExNtv[k].v;
+    ok(Math.abs(net(0)-(20000-by.FlowOutExNtv[0].v))<1e-9,"разрыв ровно 100 BTC — шум, поток как есть");
+    for(const k of [1,2,3])ok(Math.abs(net(k)-(-500))<1e-6,`сутки ${k}: поток восстановлен до изменения остатка`);
+    for(const k of [4,5])ok(Math.abs(net(k)-(20000-by.FlowOutExNtv[k].v))<1e-9,`сутки ${k}: переразметка — поток измеренный`);
+    eq(r.summary.relabel_days.map(x=>x.gap_btc),[-10001,-43726],"сутки переразметки перечислены с разрывом");
+    ok(Math.abs(net(6)-(-500))<1e-6&&r.data.FlowOutExNtv[6].v>by.FlowOutExNtv[6].v&&r.data.FlowInExNtv[6].v===20000,"отток сверх остатка: дописывается отток, приток не трогается");
+    // Первые сутки без остатка накануне не восстанавливаются: сравнивать не с чем.
+    const noPrev={...by,SplyExNtv:by.SplyExNtv.slice(1)};
+    ok(Math.abs((repairExchangeFlowsV1(noPrev).data.FlowInExNtv[0].v-repairExchangeFlowsV1(noPrev).data.FlowOutExNtv[0].v)-(20000-by.FlowOutExNtv[0].v))<1e-9,"без остатка накануне сутки остаются как есть");
+    eq([repairExchangeFlowsV1(null).data,repairExchangeFlowsV1({}).summary.repaired_days],[null,0],"пустой пакет не роняет");
+    // Потоки вышли раньше остатка: сутки без остатка в чтение не идут, пока остатка за них нет.
+    const early={...by,FlowInExNtv:[...by.FlowInExNtv,{t:day(8),v:5000}],FlowOutExNtv:[...by.FlowOutExNtv,{t:day(8),v:30000}]},re=repairExchangeFlowsV1(early);
+    eq([re.summary.held_back_days,re.data.FlowInExNtv.length,re.data.FlowOutExNtv.length],[1,7,7],"поток раньше остатка придержан");
+    const consistentEarly={FlowInExNtv:[{t:day(1),v:100},{t:day(2),v:100}],FlowOutExNtv:[{t:day(1),v:50},{t:day(2),v:50}],SplyExNtv:[{t:day(0),v:1000},{t:day(1),v:1050}]},ce=repairExchangeFlowsV1(consistentEarly);
+    eq([ce.summary.repaired_days,ce.summary.held_back_days,ce.data.FlowInExNtv.map(p=>p.t)],[0,1,[day(1)]],"и в согласованном пакете — копия без опередивших суток");
+    const noSupply={FlowInExNtv:by.FlowInExNtv,FlowOutExNtv:by.FlowOutExNtv},ns=repairExchangeFlowsV1(noSupply);
+    ok(ns.data===noSupply&&ns.summary.held_back_days===0,"без ряда остатка потоки идут как есть");
+  }
+  // Панель читает восстановленные потоки: cmSeries → недельная нога v1 и вход теневого v3; карточка
+  // месячного потока показывает изменение остатка за 30 дней.
+  {
+    const saved=collectorDatasets.coinmetrics;
+    try{
+      collectorDatasets.coinmetrics={data:pack(real)};
+      const nf=cmNetflowSeries(),sup=new Map(pack(real).SplyExNtv.map(p=>[p.t,p.v]));
+      ok(nf.length===real.length&&nf.slice(1).every(p=>Math.abs(p.v-(sup.get(p.t)-sup.get(p.t-D)))<=CM_FLOW_REPAIR_MIN_BTC),"суточный поток панели = изменение остатка");
+      const card=[{id:"exchange_netflow_30d",value_num:-95122,value:"-95 тыс. BTC",source:"coinmetrics",series:[]}];
+      presentExchangeNetflow30d(card);
+      ok(Math.abs(card[0].value_num-(-33396.90))<0.01,`месячная карточка — изменение остатка: ${card[0].value_num}`);
+      eq([card[0].value,card[0].source],["-33 тыс. BTC","Coin Metrics · остаток бирж"],"значение и подпись источника карточки");
+      collectorDatasets.coinmetrics={data:pack(honest)};
+      ok(cmNetflowSeries().every((p,i)=>Math.abs(p.v-(honest[i][1]-honest[i][2]))<1e-9),"новый пакет — новый расчёт, согласованные потоки как есть");
+    }finally{collectorDatasets.coinmetrics=saved;}
+  }
   // Метрики публикуются не одновременно: край окна — последний день, где есть все три ряда.
   const lagging=pack(real);lagging.FlowInExNtv=lagging.FlowInExNtv.slice(0,-1);
   eq(exchangeFlowSupplyCheck(lagging,{days:29}).as_of,"2026-10-08T00:00:00.000Z","край окна — последний общий день трёх рядов");
@@ -1119,7 +1179,7 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   eq(got,{price:82766,hard_override:false,
     v1:{state:"transition",candidate:"transition",critical_ok:true,target_pct:45,recovery_state:"watch",macro_shock_state:"fired",distribution_state:"calm",mvrv_percentile:42.4,valuation_score:0},
     families:{macro:{liquidity:0,conditions:-2,stress:-.5},demand:{etf:-.5,stablecoins:0,exchange_supply:null,institutional:0},cycle:{valuation:0,network:0,activity:.5,miners:0,trend:2}},
-    series:{hashrate:rows,difficulty:rows,exchange_supply:rows,price_daily:rows,mvrv:rows,mvrv_deep:null},
+    series:{hashrate:rows,difficulty:rows,exchange_supply:rows,exchange_netflow:[],price_daily:rows,mvrv:rows,mvrv_deep:null},
     observed_at:{mvrv:"m",coinmetrics:"c",etf:"e",network:"n",market:"k",mvrv_deep:null,macro_liquidity:"l",macro_conditions:null,macro_stress:"s"}},"входы вариантов — ровно по SPEC 1.4: семьи с null на месте отсутствующей, пустой глубокий ряд — null; даты макрокарточек — с самих карточек, отсутствующая — null");
   const bare=buildVariantInputsV1({});
   eq([bare.price,bare.hard_override,bare.v1.state,bare.v1.critical_ok,bare.v1.target_pct,bare.v1.recovery_state,bare.series.mvrv_deep,bare.families],[null,false,null,false,null,"calm",null,{macro:{},demand:{},cycle:{}}],"пустой вход не роняет сборку и не выдумывает значений");

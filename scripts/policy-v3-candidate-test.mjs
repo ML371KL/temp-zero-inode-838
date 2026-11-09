@@ -116,7 +116,7 @@ const targets = (variants, keys = LINE_KEYS) => keys.map(k => variants[k].target
   assert.equal(C.status, "shadow_candidate", "кандидат — тень, а не живое решение");
   assert.equal(C.created, "2026-10-10");
   assert.equal(C.base_suite, POLICY_SUITE_V1.id);
-  assert.deepEqual(REAL.policyV3CandidateMetadata(), { id: C.id, version: 1, status: "shadow_candidate", created: "2026-10-10", base_suite: POLICY_SUITE_V1.id });
+  assert.deepEqual(REAL.policyV3CandidateMetadata(), { id: C.id, version: 1, revision: 2, revised: "2026-11-09", status: "shadow_candidate", created: "2026-10-10", base_suite: POLICY_SUITE_V1.id });
   const frozen = x => !x || typeof x !== "object" || (Object.isFrozen(x) && Object.values(x).every(frozen));
   assert.ok(frozen(C), "контракт заморожен на всю глубину");
   assert.deepEqual(Object.keys(C.lines), LINE_KEYS);
@@ -435,6 +435,33 @@ checks.exchangeEconomicZero = m => {
   assert.equal(m.scoreExchangeSupplyV3({ reserve: null, now }).reason, "exchange_supply_missing");
   assert.equal(m.scoreExchangeSupplyV3({ reserve: falling, now: at(9) + 4 * DAY + 1 }).reason, "exchange_supply_stale");
   assert.notEqual(m.scoreExchangeSupplyV3({ reserve: falling, now: at(9) + 4 * DAY }).score, null);
+  // Ревизия 2: недельная нога — сумма восстановленного суточного потока. На согласованных рядах она
+  // совпадает с изменением остатка до последнего BTC; отличается только сутками переразметки.
+  const flowOf = rows => rows.slice(1).map((p, i) => ({ t: p.t, v: p.v - rows[i].v }));
+  for (const reserve of [rising, falling]) {
+    const byReserve = m.scoreExchangeSupplyV3({ reserve, now }), byFlow = m.scoreExchangeSupplyV3({ reserve, netflow: flowOf(reserve), now });
+    assert.deepEqual([byReserve.flow_basis, byFlow.flow_basis], ["reserve", "netflow"]);
+    for (const k of ["score", "flow_change_btc", "flow_percentile", "flow_leg", "reserve_change_pct", "reserve_leg"]) assert.ok(Object.is(byReserve[k], byFlow[k]) || Math.abs(byReserve[k] - byFlow[k]) < 1e-6, `согласованные ряды: ${k} ${byReserve[k]} против ${byFlow[k]}`);
+  }
+  {
+    // Остаток падает как обычно, но четыре дня назад прыгнул на +45 тыс. — опознаны кошельки, поток суток −2 тыс.
+    const jumpAt = at(9) - 4 * DAY, steady = daily(at(9), 1700, (i, n) => 4_000_000 - 100 * i);
+    const jumped = steady.map(p => ({ t: p.t, v: p.v + (p.t >= jumpAt ? 45_000 : 0) }));
+    const flow = flowOf(jumped).map(p => (p.t === jumpAt ? { t: p.t, v: -2_000 } : p));
+    const byReserve = m.scoreExchangeSupplyV3({ reserve: jumped, now }), byFlow = m.scoreExchangeSupplyV3({ reserve: jumped, netflow: flow, now });
+    assert.ok(byReserve.flow_change_btc > 40_000 && byReserve.flow_leg <= -1, "по остатку скачок выдаётся за недельный приток");
+    assert.ok(Math.abs(byFlow.flow_change_btc - (-2_600)) < 1e-6, `по потоку — шесть обычных суток и измеренный поток суток переразметки: ${byFlow.flow_change_btc}`);
+    assert.ok(byFlow.flow_leg >= 0, "и нога не голосует против");
+    assert.equal(byFlow.reserve_change_pct, byReserve.reserve_change_pct, "нога остатка за 90 дней считается по остатку как есть");
+    // Поток не доходит до последнего дня остатка — нога честно возвращается к остатку.
+    assert.equal(m.scoreExchangeSupplyV3({ reserve: jumped, netflow: flow.slice(0, -1), now }).flow_basis, "reserve");
+    // Поток на сутки впереди остатка обрезается по остатку, а не роняет ногу на ревизию 1.
+    const ahead = [...flow, { t: flow.at(-1).t + DAY, v: 99_999 }], ah = m.scoreExchangeSupplyV3({ reserve: jumped, netflow: ahead, now: now + DAY });
+    assert.deepEqual([ah.flow_basis, ah.flow_change_btc], ["netflow", byFlow.flow_change_btc], "поток впереди остатка обрезается");
+    // Пропущенные сутки потока не превращаются в нулевой поток: окна через дыру нет.
+    const holedFlow = flow.filter(p => p.t !== at(9) - 2 * DAY), hf = m.scoreExchangeSupplyV3({ reserve: jumped, netflow: holedFlow, now });
+    assert.deepEqual([hf.flow_basis, hf.flow_change_btc], ["netflow", null], "последнее окно через дыру не считается");
+  }
 };
 
 // 3.3. Оценка: «дёшево» — согласием двух окон, «дорого» — одним окном, как в v1.
@@ -899,7 +926,7 @@ checks.publishedShape = m => {
   assert.deepEqual(v3.inputs.bands, { macro: "adverse", demand: "adverse", cycle: "supportive" });
   assert.deepEqual(Object.keys(v3.inputs.families), ["network", "exchange_supply", "valuation", "trend"]);
   assert.deepEqual(v3.inputs.families.network, { v3: 0, v1: 0, hashrate_30d_change_pct: 0, difficulty_90d_change_pct: 0 });
-  assert.deepEqual(v3.inputs.families.exchange_supply, { v3: 0, v1: 0, change_7d_btc: 0, change_7d_percentile: 50, reserve_90d_change_pct: 0, reserve_90d_percentile: 50 });
+  assert.deepEqual(v3.inputs.families.exchange_supply, { v3: 0, v1: 0, change_7d_btc: 0, change_7d_basis: "reserve", change_7d_percentile: 50, reserve_90d_change_pct: 0, reserve_90d_percentile: 50 });
   assert.deepEqual([v3.inputs.mvrv_percentile, v3.inputs.deep_window_used, v3.inputs.deep_points, v3.inputs.critical_ok, v3.inputs.notes], [20, true, 2400, true, []]);
   assert.ok(Math.abs(v3.inputs.mvrv_percentile_deep - 20) < 1);
   // Входы фикса — одного возраста: тренд, MVRV и остаток бирж — за вчера.
@@ -1055,6 +1082,9 @@ const SOURCE = readFileSync(new URL("../docs/policy-v3-candidate.mjs", import.me
     ["шкала хешрейта сдвинута", "leg_bands_pct: [-5, -15]", "leg_bands_pct: [-10, -15]", 1, ["hashrateSmoothed"]],
     ["рост остатка голосует «за»", "out.flow_leg = finite(p) ? (flow > 0 ? Math.min(lowGoodV1Port(p), 0) : lowGoodV1Port(p)) : null;", "out.flow_leg = finite(p) ? lowGoodV1Port(p) : null;", 1, ["exchangeEconomicZero", "exchangeMatchesReference"]],
     ["недельное изменение через дыру в ряду", "&& s[i].t - s[j].t <= P.flow_max_span_days * DAY", "", 1, ["exchangeEconomicZero"]],
+    ["нога потоков не читает восстановленный поток", "out.flow_basis = flow.length && last(flow).t === last(s).t ? \"netflow\" : \"reserve\";", "out.flow_basis = \"reserve\";", 1, ["exchangeEconomicZero"]],
+    ["сумма потока через пропущенные сутки", "if (flow[i].t - first.t !== (P.flow_change_days - 1) * DAY) continue;", "", 1, ["exchangeEconomicZero"]],
+    ["поток впереди остатка не обрезается", "cleanSeries(netflow, t).filter(p => p.t <= last(s).t);", "cleanSeries(netflow, t);", 1, ["exchangeEconomicZero"]],
     ["окно потоков 30 дней", "flow_change_days: 7,", "flow_change_days: 30,", 1, ["exchangeMatchesReference"]],
     ["«дёшево» по одному окну", "const cheap = p <= P.cheap_max_percentile && (deep === null || deep <= P.cheap_max_percentile);", "const cheap = p <= P.cheap_max_percentile;", 1, ["valuationTwoWindows", "twoWindowsInEngine"]],
     ["якорь recovery по одному окну", "&& (deep === null || deep < P.recovery_anchor_below_percentile);", ";", 1, ["valuationTwoWindows", "twoWindowsInEngine"]],

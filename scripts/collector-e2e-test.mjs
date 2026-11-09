@@ -113,6 +113,14 @@ try{
     const check=exchangeFlowSupplyCheck(cold.state.datasets.coinmetrics.data),warning=s.data_warnings.find(x=>x.code==="exchange_flow_supply_mismatch");
     assert.ok(Math.abs(check.gap_btc)>5000,"фикстура обязана давать разрыв больше допуска, иначе проверка пуста");
     assert.deepEqual([warning?.source,warning?.value,warning?.threshold,warning?.affects],["coinmetrics",Math.sign(check.gap_btc)*Math.round(Math.abs(check.gap_btc)),5000,["exchange_supply","exchange_netflow_30d"]]);
+    // Потоки синтетики расходятся с остатком, поэтому панель считает их по остатку: месячная карточка —
+    // изменение остатка за 30 дней с новой подписью источника, а сырой пакет в состоянии остаётся как был.
+    {
+      const supply=cold.state.datasets.coinmetrics.data.SplyExNtv,lastS=supply.at(-1),base=supply.find(p=>p.t===lastS.t-30*86400000),card=s.metrics.find(x=>x.id==="exchange_netflow_30d");
+      assert.ok(base&&Math.abs(card.value_num-(lastS.v-base.v))<1e-6,`карточка месяца — изменение остатка: ${card.value_num}`);
+      assert.equal(card.source,"Coin Metrics · остаток бирж");
+      assert.ok(Math.abs(exchangeFlowSupplyCheck(cold.state.datasets.coinmetrics.data).gap_btc-check.gap_btc)<1e-9,"в состоянии лежит сырой пакет поставщика");
+    }
     // На качество решения и состояние источника предупреждение не влияет.
     assert.equal(s.sources.coinmetrics.state,"mock");
     assert.equal(s.decision.quality.status,"good","предупреждение о данных не имеет права понижать качество решения");
@@ -235,8 +243,8 @@ console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_met
       assert.deepEqual(v.families[block],Object.fromEntries(s.expected.map(f=>[f,s.families[f]??null])),`${block}: баллы семей — из блока, отсутствующая семья — null`);
     }
     assert.deepEqual([Object.keys(v.families.macro),Object.keys(v.families.demand),Object.keys(v.families.cycle)],[["liquidity","conditions","stress"],["etf","stablecoins","exchange_supply","institutional"],["valuation","network","activity","miners","trend"]],"двенадцать среднесрочных семей по трём блокам");
-    assert.deepEqual(Object.keys(v.series),["hashrate","difficulty","exchange_supply","price_daily","mvrv","mvrv_deep"]);
-    for(const [name,min] of [["hashrate",300],["difficulty",60],["exchange_supply",180],["price_daily",1200],["mvrv",180]]){
+    assert.deepEqual(Object.keys(v.series),["hashrate","difficulty","exchange_supply","exchange_netflow","price_daily","mvrv","mvrv_deep"]);
+    for(const [name,min] of [["hashrate",300],["difficulty",60],["exchange_supply",180],["exchange_netflow",180],["price_daily",1200],["mvrv",180]]){
       assert.ok(v.series[name].n>=min,`ряд ${name}: ${v.series[name].n} точек`);
       assert.ok(Number.isFinite(v.series[name].last.t)&&Number.isFinite(v.series[name].last.v),`ряд ${name}: точки {t,v}`);
     }

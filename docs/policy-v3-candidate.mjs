@@ -36,6 +36,10 @@ const OVERLAYS_V1 = POLICY_V1.allocation_overlays;
 export const POLICY_V3_CANDIDATE = deepFreeze({
   id: "btc-decision-suite-v3-candidate",
   version: 1,
+  // Ревизия 2 (09.11.2026): нога потоков бирж не принимает скачок остатка в сутки переразметки
+  // за недельный приток — см. changes[exchange_flow_from_reserve].revision_2.
+  revision: 2,
+  revised: "2026-11-09",
   status: "shadow_candidate",
   created: "2026-10-10",
   base_suite: "btc-decision-suite-v1",
@@ -134,6 +138,7 @@ export const POLICY_V3_CANDIDATE = deepFreeze({
         id: "exchange_flow_from_reserve",
         v1: "Нога потоков — сумма FlowInExNtv − FlowOutExNtv за 7 дней.",
         v3: "Нога потоков — изменение остатка бирж SplyExNtv за 7 дней: перцентиль по 1 460 таким изменениям, шкала lowGood, при росте остатка не выше 0. Нога остатка за 90 дней — как в v1.",
+        revision_2: "09.11.2026: недельное изменение — сумма суточного потока, восстановленного сборщиком по остатку; в сутках переразметки (разрыв больше 10 тыс. BTC) поток остаётся измеренным, и скачок остатка за недельный приток не выдаётся. С той же даты v1 читает те же восстановленные потоки, и нога v3 совпадает с ногой v1.",
         why: "С 05.05.2026 потоки Coin Metrics расходятся с остатком бирж того же поставщика каждый день в одну сторону: две ноги одной семьи описывают разные величины.",
         numbers: "За 158 дней потоки показывают отток на 321 тыс. BTC больше, чем убыл остаток; балл семьи выше счёта по остатку в 113 днях из 190 и ни разу не ниже. На дневной сетке: 44,0 / 1,42 / −40,8 против 43,0 / 1,39 / −40,8 с 2013 года; 18,2 / 0,78 против 17,5 / 0,74 в эру ETF. На часах кандидата: 42,5 / 1,38 против 42,3 / 1,37 с 06.2018; 22,2 / 0,94 против 21,4 / 0,91 в эру ETF.",
       },
@@ -229,8 +234,8 @@ export const POLICY_V3_CANDIDATE = deepFreeze({
 });
 
 export function policyV3CandidateMetadata() {
-  const { id, version, status, created, base_suite } = POLICY_V3_CANDIDATE;
-  return { id, version, status, created, base_suite };
+  const { id, version, revision, revised, status, created, base_suite } = POLICY_V3_CANDIDATE;
+  return { id, version, revision, revised, status, created, base_suite };
 }
 
 export const SHADOW_VARIANTS_STATE_VERSION = 1;
@@ -429,16 +434,32 @@ export function scoreNetworkV3({ hashrate, difficulty, now } = {}) {
 
 // «Биржевое предложение». Нога потоков считается по тому же ряду остатка, что и нога за 90 дней:
 // с мая 2026 потоки поставщика расходятся с его же остатком, и две ноги описывали разные величины.
-export function scoreExchangeSupplyV3({ reserve, now } = {}) {
+// Ревизия 2 (09.11.2026): недельное изменение — сумма суточного потока, который сборщик восстановил по
+// остатку (приток − отток = Δостатка во всех сутках, кроме суток переразметки, где поток измеренный).
+// От изменения остатка за 7 дней она отличается только в сутках переразметки: скачок остатка на баланс
+// кошельков, опознанных разом, — монеты прошлых дней, и за недельный приток он не выдаётся. Без ряда
+// потока, а также если он не доходит до последнего дня остатка, нога считается по остатку, как в ревизии 1.
+export function scoreExchangeSupplyV3({ reserve, netflow, now } = {}) {
   const P = SCORING.exchange_supply, t = toMs(now);
-  const out = { score: null, flow_change_btc: null, flow_percentile: null, flow_leg: null, reserve_change_pct: null, reserve_percentile: null, reserve_leg: null, observed_at: null, reason: null };
+  const out = { score: null, flow_basis: null, flow_change_btc: null, flow_percentile: null, flow_leg: null, reserve_change_pct: null, reserve_percentile: null, reserve_leg: null, observed_at: null, reason: null };
   if (t === null) { out.reason = "invalid_now"; return out; }
   const s = cleanSeries(reserve, t);
   if (!s.length) { out.reason = "exchange_supply_missing"; return out; }
   if (t - last(s).t > P.max_age_days * DAY) { out.reason = "exchange_supply_stale"; return out; }
   out.observed_at = last(s).t;
-  const changes = [];
-  for (let i = 0, j = 0; i < s.length; i++) {
+  // Поток, опередивший остаток, обрезается по его последнему дню; отставший — честный возврат к остатку.
+  const changes = [], flow = cleanSeries(netflow, t).filter(p => p.t <= last(s).t);
+  out.flow_basis = flow.length && last(flow).t === last(s).t ? "netflow" : "reserve";
+  if (out.flow_basis === "netflow") {
+    // Сумма ровно за flow_change_days суток подряд: сутки без потока не превращаются в нулевой поток.
+    for (let i = P.flow_change_days - 1; i < flow.length; i++) {
+      const first = flow[i - P.flow_change_days + 1];
+      if (flow[i].t - first.t !== (P.flow_change_days - 1) * DAY) continue;
+      let sum = 0;
+      for (let k = i - P.flow_change_days + 1; k <= i; k++) sum += flow[k].v;
+      changes.push({ t: flow[i].t, v: sum });
+    }
+  } else for (let i = 0, j = 0; i < s.length; i++) {
     const target = s[i].t - P.flow_change_days * DAY;
     while (j + 1 < i && s[j + 1].t <= target) j++;
     // Дыра в ряду не выдаётся за недельное изменение: база не старше девяти дней.
@@ -571,7 +592,7 @@ const noCftcMeta = prev => (prev && typeof prev === "object" && KNOWN_STATES.inc
 function v3Inputs(now, inp) {
   const exclude = SCORING.non_voting_families, v1 = inp.families, notes = [];
   const network = scoreNetworkV3({ hashrate: inp.series.hashrate, difficulty: inp.series.difficulty, now });
-  const exchange = scoreExchangeSupplyV3({ reserve: inp.series.exchange_supply, now });
+  const exchange = scoreExchangeSupplyV3({ reserve: inp.series.exchange_supply, netflow: inp.series.exchange_netflow, now });
   const deep = mvrvDeepPercentileV3({ mvrvDeep: inp.series.mvrv_deep, now });
   const valuation = scoreValuationV3({ percentile: inp.v1.mvrv_percentile, percentileDeep: deep.percentile });
   const trend = scoreTrendV3({ priceDaily: inp.series.price_daily, now });
@@ -613,7 +634,7 @@ function v3Inputs(now, inp) {
     bands: { macro: bandV1Port(blocks.macro), demand: bandV1Port(blocks.demand), cycle: bandV1Port(blocks.cycle) },
     families: {
       network: { v3: round(network.score, 1), v1: v1.cycle.network, hashrate_30d_change_pct: round(network.hashrate_change_pct), difficulty_90d_change_pct: round(network.difficulty_change_pct) },
-      exchange_supply: { v3: round(exchange.score, 1), v1: v1.demand.exchange_supply, change_7d_btc: round(exchange.flow_change_btc, 0), change_7d_percentile: round(exchange.flow_percentile, 1), reserve_90d_change_pct: round(exchange.reserve_change_pct), reserve_90d_percentile: round(exchange.reserve_percentile, 1) },
+      exchange_supply: { v3: round(exchange.score, 1), v1: v1.demand.exchange_supply, change_7d_btc: round(exchange.flow_change_btc, 0), change_7d_basis: exchange.flow_basis, change_7d_percentile: round(exchange.flow_percentile, 1), reserve_90d_change_pct: round(exchange.reserve_change_pct), reserve_90d_percentile: round(exchange.reserve_percentile, 1) },
       valuation: { v3: valuation.score, v1: v1.cycle.valuation },
       trend: { v3: trend.score, v1: v1.cycle.trend, close: round(trend.close), ma_200d: round(trend.ma_200d), ma_20w: round(trend.ma_20w), ma_200w: round(trend.ma_200w) },
     },

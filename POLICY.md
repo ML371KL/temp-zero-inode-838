@@ -43,6 +43,23 @@ Data-source repairs, schema validation and display fixes may continue without cr
 when they do not alter the economic decision rule. Any change that can alter the target allocation
 for the same valid input snapshot is a policy change.
 
+**Data repair, 2026-11-09 (owner-approved): Coin Metrics exchange flows.** The provider recomputed its
+whole history up to 2026-04-09 on one address-labelling set (2026-04-02…20) and has computed every day
+since 2026-04-10 once, never revising it. A wallet labelled later brings its balance into `SplyExNtv`,
+but the inflow that put the coins there is never added to `FlowInExNtv`: from 2026-04-10 to 2026-11-08
+the flows show −330k BTC while the balance rose by 101k (proof-of-reserve wallets of Binance, OKX,
+Bitfinex and Bybit: +169k). The packet therefore fails its own identity, ΔSplyExNtv = FlowIn − FlowOut,
+and is not a valid input in the sense above. The collector now reads repaired flows
+(`repairExchangeFlowsV1`, outside the lock): on a day where the identity is off by more than 100 BTC the
+missing inflow (or outflow) is added so that it holds, except relabelling days — a gap above 10,000 BTC,
+where the balance jumps by wallets labelled at once — which keep the measured flow. The scoring code,
+its lock digest and `policy_hash` are unchanged; the raw packet, its vintage hashes and the mismatch
+warning are unchanged. The repair can change the target: the family is one of three recovery-floor
+confirmations, and on 2026-07-22 the biased flow leg alone switched the 80% floor on (54 of 207 days
+since April carried a confirmation that the balance did not support, none the other way). On the live
+state of 2026-11-09 the family moves 0 → −0.5 and the target stays 20%. When the provider recomputes
+history again the identity holds and the repair becomes a no-op.
+
 ## Forward/OOS evidence and pre-declared review
 
 The live snapshot stores an append-only, hash-chained decision log and daily as-collected evidence.
@@ -211,7 +228,7 @@ floor are unchanged.
 |---|---|---|---|
 | Clock | every snapshot (15 minutes since 2026-08-07): downgrade after 2 snapshots, upgrade after 48 hours and ≥12 snapshots without a single counter snapshot | once per UTC day, on the first snapshot at or after 06:00 UTC: worse — on that fix, better — on the second consecutive fix with the same candidate; emergency is immediate | the backtest evaluated the regime daily; in production the meaning of the hysteresis changed with the collector's cadence, and 12 one-or-two-snapshot flips in 83 days reset a running upgrade seven times |
 | Hashrate leg | last daily point vs the point 90 days earlier | 30-day mean vs the 30-day mean ending 90 days earlier | one daily estimate carries 8% noise, a difference of two — 12% against a 10pp scale step |
-| Exchange flow leg | FlowIn − FlowOut over 7 days | 7-day change of the exchange balance | since 2026-05-05 the provider's flows diverge from its own balance every day in one direction |
+| Exchange flow leg | FlowIn − FlowOut over 7 days | 7-day change of the exchange balance; revision 2 (2026-11-09): 7-day sum of the repaired daily flow, so a relabelling jump is not a week's inflow — the same leg v1 reads since the data repair above | since 2026-05-05 the provider's flows diverge from its own balance every day in one direction |
 | "Cheap" valuation (+1 score, recovery anchor, capitulation floor) | one rolling 4-year window | agreement of the 4-year window and the full history since 2010; honest fallback to one window if the deep series is short or stale | the 2022 bottom leaves the 4-year window by January 2027 and the thresholds rise with no change in the market |
 | Trend | live price against averages that include today's unclosed candle | last closed day — the same age as MVRV | the floor was switched on by inputs of different ages |
 | Recovery floor | 80% on a single snapshot | 40 / 60 / 80 by consecutive fixes with the detector good (the v2 graduation) | one reading should not move the target by 60pp |
