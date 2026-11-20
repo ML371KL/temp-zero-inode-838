@@ -117,7 +117,9 @@ function variantInputsOf(s,priceSeries){
   const own=id=>(metric(id).series||[]).filter(p=>finite(p?.t)&&finite(p?.v)).map(p=>({t:Number(p.t),v:Number(p.v)}));
   return{
     price:s.price,hard_override:!!s.override,
-    v1:{state:s.regime?.strategic??null,candidate:s.regime_meta?.strategic?.candidate??s.regime?.strategic??null,critical_ok:criticalOk,target_pct:s.decision?.target_pct??null,recovery_state:state("recovery"),macro_shock_state:state("macro_shock"),distribution_state:state("distribution"),mvrv_percentile:s.decision?.inputs?.mvrv_percentile??null,valuation_score:metric("mvrv_cycle").score??null},
+    // Состояние v1: в снимке выпуска 2.15.0 и новее оно лежит в опоре (reference_v1) — опубликованные режим и
+    // решение там боевого набора v3; в прежних снимках опубликованные режим и решение и есть v1.
+    v1:(ref=>({state:(ref?.regime??s.regime)?.strategic??null,candidate:(ref?.regime_meta??s.regime_meta)?.strategic?.candidate??(ref?.regime??s.regime)?.strategic??null,critical_ok:criticalOk,target_pct:(ref?.decision??s.decision)?.target_pct??null,recovery_state:state("recovery"),macro_shock_state:state("macro_shock"),distribution_state:state("distribution"),mvrv_percentile:(ref?.decision??s.decision)?.inputs?.mvrv_percentile??null,valuation_score:metric("mvrv_cycle").score??null}))(s.reference_v1??null),
     families,
     series:{
       hashrate:rawUntil("hashrate",metric("network_security").observed_at)??own("network_security"),
@@ -148,6 +150,9 @@ function step(snapshot,commit){
   const ph=published.shadow_hysteresis||{},pp=previous.monitoring.shadow_hysteresis||{};
   const before=monitor;
   monitor=updateForwardMonitorV1({
+    // Снимок выпуска 2.15.0 и новее несёт опору — решение прежних правил v1: от неё монитор считает
+    // тени v0 и v2 и линию policy_v1_frozen.
+    ...(snapshot.reference_v1?.decision?{referenceDecision:snapshot.reference_v1.decision,referenceRegimeMeta:{strategic:snapshot.reference_v1.regime_meta?.strategic??null,tactical:snapshot.regime_meta?.tactical??null}}:{}),
     previousMonitor:monitor,now,price:snapshot.price,decision:snapshot.decision,inputSummary,sourceVintages:snapshot.source_vintages,revisionAlerts:snapshot.source_revision_alerts||[],
     cashQuotePct:published.last_cash_quote_pct,cashQuoteBasis:published.last_cash_quote_basis,priceSeries,previousSnapshotPresent:true,regimeMeta:snapshot.regime_meta,
     shadowHysteresis:{upgrade_hold_reset_by_degraded:(ph.upgrade_hold_resets_by_degraded||0)-(pp.upgrade_hold_resets_by_degraded||0),risk_off_confirmed_under_min_interval:(ph.risk_off_confirmed_under_min_interval||0)-(pp.risk_off_confirmed_under_min_interval||0)},

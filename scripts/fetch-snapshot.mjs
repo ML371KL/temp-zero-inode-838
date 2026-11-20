@@ -2525,7 +2525,7 @@ function compute(){
   // фикса монитору передаётся разница фиксов, а не разница соседних снимков.
   const fixDiff=fixedNow&&priorLiveMeta?.fix&&liveMeta.fix?optional("fix_diff",()=>fixDiffV3(priorLiveMeta.fix,liveMeta.fix,metrics)):null;
   const liveInputs=liveCalc?optional("live_inputs",()=>liveInputsV3(liveCalc,iso(NOW))):null;
-  const referenceV1={regime:{strategic:regimeV1.strategic},regime_meta:{strategic:stableS},decision:{status:decisionV1.status,strategic:decisionV1.strategic,base_target_pct:decisionV1.base_target_pct,target_pct:decisionV1.target_pct,binding_overlays:decisionV1.binding_overlays,inputs:decisionV1.inputs,state_hash:decisionV1.state_hash}};
+  const referenceV1={regime:{strategic:regimeV1.strategic},regime_meta:{strategic:stableS},decision:{policy_id:decisionV1.policy_id,policy_hash:decisionV1.policy_hash,status:decisionV1.status,strategic:decisionV1.strategic,tactical:decisionV1.tactical,base_target_pct:decisionV1.base_target_pct,target_pct:decisionV1.target_pct,binding_overlays:decisionV1.binding_overlays,inputs:decisionV1.inputs,quality:{status:decisionV1.quality.status},state_hash:decisionV1.state_hash}};
   const monitorArgs={previousMonitor,referenceDecision:decisionV1,referenceRegimeMeta:regimeMetaV1,variantRun,now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta,shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}};
   // Монитор получает входы теневых линий, значения теневых карточек, рождение кандидата и разницу
   // снимков (SPEC 1.3). Если он упал НА НИХ, повторяется прежний вызов без них: живая линия v1 и
