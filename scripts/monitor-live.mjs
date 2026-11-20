@@ -4,7 +4,9 @@ import { allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
+import { POLICY_SUITE_V3 } from "../docs/policy-suite-v3.mjs";
 import { policySuiteDigestV1, sha256, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
+import { policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
 
 const DEFAULT_URL="https://tzi-838.pages.dev/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
@@ -13,7 +15,7 @@ const PACKAGE_VERSION=JSON.parse(readFileSync(new URL("../package.json",import.m
 // Сверяются все модули, которые читает страница или по которым ведётся теневой учёт: кандидат v3
 // и объявление теневых утверждений опубликованы рядом со страницей, и их расхождение с
 // репозиторием — тот же класс отказа выкладки, что и у остальных.
-const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs","policy-v3-candidate.mjs","shadow-hypotheses-v1.mjs"];
+const PUBLISHED_ASSETS=["index.html","policy-v1.mjs","model-policy-v1.mjs","execution-policy-v1.mjs","policy-suite-v1.mjs","action-gate-v1.mjs","policy-v2-candidate.mjs","policy-v3-candidate.mjs","policy-suite-v3.mjs","shadow-hypotheses-v1.mjs"];
 const normalizedAsset=text=>String(text).replace(/\r\n/g,"\n");
 
 export async function validatePublishedAssetsV1(snapshotUrl,fetchImpl=fetch){
@@ -55,17 +57,21 @@ export function validateSnapshotV1(snapshot,now=Date.now()){
   if(actionGate.code==="time_invalid")issues.push("generated_at_invalid");
   else if(actionGate.code==="snapshot_in_future")issues.push("generated_at_in_future");
   else if(actionGate.code==="snapshot_stale")issues.push(`snapshot_stale:${ageHours.toFixed(1)}h`);
-  const expectedPolicyHash=policySuiteDigestV1();
-  if(POLICY_SUITE_V1.contract_sha256!==expectedPolicyHash)issues.push("local_policy_contract_mismatch");
-  if(snapshot?.policy_suite?.contract_sha256!==expectedPolicyHash)issues.push("snapshot_policy_contract_mismatch");
   const d=snapshot?.decision;
+  // Боевой набор — v3. Окно выпуска: правка в main опережает первый сбор новым кодом на один цикл,
+  // и свежий снимок с решением прежнего набора — штатная гонка, как и рассинхрон версии выше.
+  // Протухший снимок прежнего набора — уже отказ: новый код не собирает.
+  const supersededInWindow=d?.policy_id===POLICY_SUITE_V1.id&&ageHours<=1.5,suite=supersededInWindow?POLICY_SUITE_V1:POLICY_SUITE_V3;
+  const expectedPolicyHash=suite.contract_sha256;
+  if(POLICY_SUITE_V1.contract_sha256!==policySuiteDigestV1()||POLICY_SUITE_V3.contract_sha256!==policySuiteDigestV3())issues.push("local_policy_contract_mismatch");
+  if(snapshot?.policy_suite?.contract_sha256!==expectedPolicyHash)issues.push("snapshot_policy_contract_mismatch");
   if(!d)issues.push("decision_missing");
   else{
-    if(d.policy_id!==POLICY_SUITE_V1.id||d.policy_hash!==expectedPolicyHash)issues.push("decision_policy_mismatch");
+    if(d.policy_id!==suite.id||d.policy_hash!==expectedPolicyHash)issues.push("decision_policy_mismatch");
     const copy={...d};delete copy.decision_hash;
     if(d.decision_hash!==sha256(copy))issues.push("decision_hash_mismatch");
-    const reproduced=allocationDecisionV1({strategic:d.inputs?.strategic,recoveryState:d.inputs?.recovery_state,macroShockState:d.inputs?.macro_shock_state,mvrvPercentile:d.inputs?.mvrv_percentile});
-    if(reproduced.status!==d.status||reproduced.base_target_pct!==d.base_target_pct||reproduced.target_pct!==d.target_pct||JSON.stringify(reproduced.binding_overlays)!==JSON.stringify(d.binding_overlays))issues.push("decision_reproduction_failure");
+    // Запись проверяется правилом набора, названного в ней самой (scripts/live-decision-v3.mjs).
+    if(!reproduceDecisionV3(d).ok)issues.push("decision_reproduction_failure");
     if(d.status==="actionable"&&!finite(d.target_pct))issues.push("actionable_target_missing");
     if(d.status!=="actionable")issues.push("decision_not_actionable");
     if(!["good","degraded"].includes(d.quality?.status))issues.push("decision_quality_not_actionable");

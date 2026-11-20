@@ -86,7 +86,17 @@ export function targetChangeCauseV1({kind,strategicFrom,strategicTo,overlaysFrom
 
 // Запись о смене цели либо null, если цель не менялась. `previous` — состояние до этого прогона:
 // последняя известная конечная цель, режим и оверлеи предыдущей записи журнала решений.
-export function targetChangeRecordV1({at,price,previous,decision,regimeBirth=null,tickDiff=null,candidateSince=null,gateOpen=true}={}){
+// Короткое имя набора правил для текста: «btc-decision-suite-v3» → «v3».
+const suiteLabel=id=>String(id??"").match(/suite-(v\d+)/)?.[1]||"?";
+// Причина смены цели на прогоне, где сменился набор правил. Разница соседних снимков здесь причиной
+// не называется: цель изменило правило, а не рынок.
+function policySwitchCause(policySwitch,{strategicFrom,strategicTo,overlaysFrom,overlaysTo}){
+  const added=overlaysTo.filter(o=>!overlaysFrom.includes(o)),removed=overlaysFrom.filter(o=>!overlaysTo.includes(o));
+  const parts=[`смена боевых правил ${suiteLabel(policySwitch.from)} → ${suiteLabel(policySwitch.to)}`,...added.map(o=>`${OVERLAY[o]||o} включён`),...removed.map(o=>`${OVERLAY[o]||o} снят`)];
+  if(strategicFrom!==strategicTo)parts.push(`режим «${REGIME[strategicFrom]||strategicFrom}» → «${REGIME[strategicTo]||strategicTo}»`);
+  return{text:parts.join("; "),families:[],detectors:[],candidate_since:null};
+}
+export function targetChangeRecordV1({at,price,previous,decision,regimeBirth=null,tickDiff=null,candidateSince=null,gateOpen=true,policySwitch=null}={}){
   const to=decision?.target_pct,from=previous?.target_pct;
   if(!finite(to)||(finite(from)&&Number(from)===Number(to)))return null;
   const overlaysFrom=Array.isArray(previous?.binding_overlays)?previous.binding_overlays:[],overlaysTo=Array.isArray(decision.binding_overlays)?decision.binding_overlays:[];
@@ -96,12 +106,15 @@ export function targetChangeRecordV1({at,price,previous,decision,regimeBirth=nul
   const kind=start?"start":regimeChanged&&overlayChanged?"both":overlayChanged?"overlay":"regime";
   const cause=start
     ?{text:`старт наблюдения: режим «${REGIME[strategicTo]||strategicTo}»`,families:[],detectors:[],candidate_since:null}
+    :policySwitch?policySwitchCause(policySwitch,{strategicFrom,strategicTo,overlaysFrom,overlaysTo})
     :targetChangeCauseV1({kind,strategicFrom,strategicTo,overlaysFrom,overlaysTo,regimeBirth,tickDiff,candidateSince});
   return{
     t:at,from_pct:start?null:Number(from),to_pct:Number(to),direction:start?"start":Number(to)>Number(from)?"up":"down",price:finite(price)?Number(price):null,
     strategic_from:strategicFrom,strategic_to:strategicTo,overlays_from:overlaysFrom,overlays_to:overlaysTo,kind,cause,
     // Смена при закрытом гейте витрины записывается, но помечается: панель цель не показывала, монитор её не исполнял.
     ...(gateOpen?{}:{gate:"closed"}),
+    // Запись, на которой сменился набор правил, помечена: уведомления и витрина не объясняют её рынком.
+    ...(policySwitch&&!start?{policy_switch:{from:policySwitch.from??null,to:policySwitch.to??null}}:{}),
   };
 }
 

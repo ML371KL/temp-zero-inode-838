@@ -1,7 +1,9 @@
 import { readFileSync, statSync, existsSync } from "node:fs";
 import { allocationDecisionV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
 import { policySuiteMetadataV1, POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
+import { POLICY_SUITE_V3, policySuiteMetadataV3 } from "../docs/policy-suite-v3.mjs";
 import { monitorRetentionLimitsV1, policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
+import { liveAllocationMetadataV3, policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
 import { PUBLIC_SNAPSHOT_MAX_BYTES, optionalSnapshotProblemsV1, optionalSnapshotBytesV1, publicSnapshotAtLimitsV1, publicSnapshotAtLimitsWarningV1 } from "./public-snapshot-contract.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
@@ -33,8 +35,14 @@ const sorted=a=>(a||[]).every((x,i)=>i===0||Number(x.t)>=Number(a[i-1].t));
 const last=a=>a?.length?a[a.length-1]:null;
 const requiredBlocks=["macro","demand","cycle","leverage","market"];
 const allowedSourceStates=new Set(["ok","partial","stale","fail","mock"]);
-const expectedPolicy=policyMetadataV1();
-const expectedSuite=policySuiteMetadataV1();
+// БОЕВОЙ НАБОР — v3 (выпуск 2.15.0). Снимок с решением прежнего набора v1 допустим в одном случае:
+// это снимок, с которого выпуск стартует, — он лежит в репозитории до первого сбора новым кодом, а
+// эта проверка идёт ПЕРЕД сбором. Отвергни она его, сбор не начался бы вовсе, и снимок набора v3
+// не появился бы никогда. Кандидат на публикацию (REQUIRE_LIVE=1) обязан нести решение набора v3.
+const supersededSuite=s.decision?.policy_id===POLICY_SUITE_V1.id&&process.env.REQUIRE_LIVE!=="1";
+const liveSuite=supersededSuite?POLICY_SUITE_V1:POLICY_SUITE_V3;
+const expectedPolicy=supersededSuite?policyMetadataV1():liveAllocationMetadataV3();
+const expectedSuite=supersededSuite?policySuiteMetadataV1():policySuiteMetadataV3();
 // ВНИМАНИЕ: пороги обязаны совпадать с FRED_SERIES[*].ttl в коллекторе — unit-test это проверяет.
 // Рассинхрон не «мягкая» ошибка: коллектор примет наблюдение, self-test под REQUIRE_LIVE отвергнет
 // кандидата, и сайт замрёт на прошлом снимке до конца недели.
@@ -57,13 +65,15 @@ if(s.policy===undefined){
   else warn.push("published snapshot predates policy-v1 metadata; next successful live run will add it");
 }else if(JSON.stringify(s.policy)!==JSON.stringify(expectedPolicy))fail.push(`snapshot policy mismatch:${JSON.stringify(s.policy)}`);
 if(JSON.stringify(s.policy_suite)!==JSON.stringify(expectedSuite))fail.push(`snapshot policy suite mismatch:${JSON.stringify(s.policy_suite)}`);
-if(POLICY_SUITE_V1.contract_sha256!==policySuiteDigestV1())fail.push("local policy suite digest mismatch");
-if(!s.decision||s.decision.policy_id!==POLICY_SUITE_V1.id||s.decision.policy_hash!==POLICY_SUITE_V1.contract_sha256)fail.push("server decision/policy hash missing or mismatched");
+if(POLICY_SUITE_V1.contract_sha256!==policySuiteDigestV1()||POLICY_SUITE_V3.contract_sha256!==policySuiteDigestV3())fail.push("local policy suite digest mismatch");
+if(supersededSuite)warn.push("snapshot carries a decision of the superseded suite v1; the next collection installs suite v3");
+if(!s.decision||s.decision.policy_id!==liveSuite.id||s.decision.policy_hash!==liveSuite.contract_sha256)fail.push("server decision/policy hash missing or mismatched");
 else{
   const copy={...s.decision};delete copy.decision_hash;
   if(s.decision.decision_hash!==sha256(copy))fail.push("server decision hash mismatch");
-  const reproduced=allocationDecisionV1({strategic:s.decision.inputs?.strategic,recoveryState:s.decision.inputs?.recovery_state,macroShockState:s.decision.inputs?.macro_shock_state,mvrvPercentile:s.decision.inputs?.mvrv_percentile});
-  if(JSON.stringify({status:reproduced.status,base:reproduced.base_target_pct,target:reproduced.target_pct,binding:reproduced.binding_overlays})!==JSON.stringify({status:s.decision.status,base:s.decision.base_target_pct,target:s.decision.target_pct,binding:s.decision.binding_overlays}))fail.push("server decision cannot be reproduced from recorded inputs");
+  // Запись проверяется правилом набора, названного в ней самой (scripts/live-decision-v3.mjs).
+  const reproduced=reproduceDecisionV3(s.decision);
+  if(!reproduced.ok)fail.push(`server decision cannot be reproduced from recorded inputs (${reproduced.reason})`);
   if(s.decision.status==="actionable"&&!strictFinite(s.decision.target_pct))fail.push("actionable decision has no target");
 }
 if(s.source_vintages?.mode!=="as_collected"||!s.source_vintages?.sources||s.source_vintages.contract_sha256!==sha256(s.source_vintages.sources))fail.push("point-in-time source vintage contract invalid");

@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { POLICY_V1, allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { POLICY_SUITE_V3, policySuiteContractV3 } from "../docs/policy-suite-v3.mjs";
-import { POLICY_V3_CANDIDATE, allocationDecisionV3 } from "../docs/policy-v3-candidate.mjs";
+import { POLICY_V3_CANDIDATE, allocationDecisionV3, policyV3CandidateMetadata } from "../docs/policy-v3-candidate.mjs";
 
 // Тот же канонический вид и тот же хэш, что в forward-monitor-v1.mjs (импорт оттуда дал бы цикл).
 function stableStringify(value){
@@ -30,6 +30,9 @@ const isNum=x=>typeof x==="number"&&Number.isFinite(x);
 const num=x=>isNum(x)?x:null;
 const str=x=>typeof x==="string"&&x?x:null;
 const iso=t=>new Date(t).toISOString();
+// Метаданные правила аллокации для снимка: движок кандидата, поставленный на бой набором v3.
+// Сам модуль движка не правится (его статус там — «теневой кандидат»): боевым его делает набор.
+export function liveAllocationMetadataV3(){return{...policyV3CandidateMetadata(),status:"live",live_suite:POLICY_SUITE_V3.id,live_approved_at:POLICY_SUITE_V3.approved_at};}
 export const LIVE_REGIMES_V3=Object.freeze(["defensive","deteriorating","transition","unconfirmed_positive","constructive"]);
 const EMERGENCY="emergency",CHEAP_SCORE=1;
 
@@ -208,7 +211,8 @@ export function liveRegimeBirthV3({previousBirth=null,previousMeta=null,meta,met
   const diff=fixDiffV3(prev.fix,meta.fix,metrics),blocks={};
   for(const key of Object.keys(meta.fix?.blocks||{})){
     const from=prev.fix?.blocks?.[key],to=meta.fix.blocks[key];
-    if(isNum(from)&&isNum(to)&&BAND(from)!==BAND(to))blocks[key]={from,to,band_from:BAND(from),band_to:BAND(to)};
+    // Как в buildRegimeBirthV1: блок записывается при любой смене балла; полосы — для текста причины.
+    if(isNum(from)&&isNum(to)&&from!==to)blocks[key]={from,to,band_from:BAND(from),band_to:BAND(to)};
   }
   return{t:iso(now),candidate:meta.candidate,from_candidate:prev.candidate,price:num(price),blocks,families:(diff?.families||[]).slice(0,8),detectors:diff?.detectors||[],note:diff?null:"no_previous_fix"};
 }

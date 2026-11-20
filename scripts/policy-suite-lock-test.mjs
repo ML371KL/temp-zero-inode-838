@@ -62,3 +62,6 @@ assert.equal(shocked.target_pct,5,"macro shock must block the recovery floor thr
 assert.equal(shocked.inputs.macro_shock_state,"fired");
 
 console.log(`Policy suite lock OK: ${POLICY_SUITE_V1.id} ${POLICY_SUITE_V1.contract_sha256.slice(0,12)}`);
+
+// Боевой набор v3 (выпуск 2.15.0): замок контракта, сборка и проверка записи решения — отдельным модулем.
+await import("./live-decision-v3-test.mjs");

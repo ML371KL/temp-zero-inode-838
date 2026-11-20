@@ -3,6 +3,7 @@ import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
 import { POLICY_V1, allocationDecisionV1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
 import { POLICY_SUITE_V1, policySuiteContractV1 } from "../docs/policy-suite-v1.mjs";
+import { POLICY_SUITE_V3 } from "../docs/policy-suite-v3.mjs";
 import { POLICY_V2_CANDIDATE, allocationDecisionV2Candidate, evaluateAcceptanceV2, evaluateReviewV2, policyV2CandidateMetadata, riskOffConfirmationDeferredV2, updateV2ShadowState } from "../docs/policy-v2-candidate.mjs";
 import { DAILY_INPUT_SUMMARY_DAYS, pruneDailyInputSummaryV1 } from "./public-snapshot-contract.mjs";
 import { STRATEGY_REGISTRY_V1, applyMonitorBackfillV1 } from "./monitor-backfill-v1.mjs";
@@ -13,6 +14,9 @@ import { closeDrawdownPctV1, closedRowsV1, comparisonsV1, rowPathV1, rowsFromV1,
 import { TREND_LINE_NAMES_V1, evaluateTrendLinesV1, trendLinesPublicV1 } from "./monitor-trend-lines-v1.mjs";
 
 const DAY=86_400_000,YEAR_DAYS=365.25;
+// Линия прежних правил v1 после смены боевого набора (выпуск 2.15.0).
+export const FROZEN_V1_LINE="policy_v1_frozen";
+const suiteIdOfHash=hash=>hash===POLICY_SUITE_V1.contract_sha256?POLICY_SUITE_V1.id:hash===POLICY_SUITE_V3.contract_sha256?POLICY_SUITE_V3.id:null;
 // ПРЕДЕЛЫ ХРАНЕНИЯ списков монитора — в одном месте: ими пользуется сам монитор и по ним считается
 // проекция размера снимка «все лимиты разом» (publicSnapshotAtLimitsV1). Предел списка, которого нет
 // в этом перечне, проекция не увидит — так страж размера не видел событий решения.
@@ -321,9 +325,14 @@ function strategyStats(strategy,closedDaily,name){
   };
 }
 
+// Наборы, решения которых монитор принимает: прежний (его решения — в журнале и в опоре) и боевой.
+// Какой набор обязан стоять в опубликованном снимке, решают гейт публикации и сторож, не монитор.
+const KNOWN_SUITE_HASHES_V1=Object.freeze({[POLICY_SUITE_V1.id]:POLICY_SUITE_V1.contract_sha256,[POLICY_SUITE_V3.id]:POLICY_SUITE_V3.contract_sha256});
 function operationalIssuesV1(decision){
   const issues=[];
-  if(decision.policy_hash!==POLICY_SUITE_V1.contract_sha256)issues.push("policy_hash_mismatch");
+  // Запись без policy_id — прежняя форма: проверяется как набор v1.
+  const expectedHash=decision.policy_id===undefined?POLICY_SUITE_V1.contract_sha256:KNOWN_SUITE_HASHES_V1[decision.policy_id];
+  if(expectedHash===undefined||decision.policy_hash!==expectedHash)issues.push("policy_hash_mismatch");
   if(decision.status==="actionable"&&!finite(decision.target_pct))issues.push("missing_target_for_actionable_regime");
   if(decision.quality?.status==="paused")issues.push("decision_paused");
   return issues;
@@ -502,7 +511,7 @@ const realRegime=state=>strategicRank(state)>0;
 //  variantInputs — входы движка вариантов (null — движок не вызывается, линии держат прежнюю цель);
 //  shadowValues — value_num восьми теневых карточек; regimeBirth, tickDiff — причины для журнала смен цели;
 //  variantEngine — подмена движка вариантов в тестах.
-export function updateForwardMonitorV1({previousMonitor,now,price,decision,inputSummary,sourceVintages,revisionAlerts=[],cashQuotePct=null,cashQuoteBasis="treasury_bill_discount",priceSeries=[],previousSnapshotPresent=false,regimeMeta=null,shadowHysteresis=null,v2Inputs=null,variantInputs=null,shadowValues=null,regimeBirth=null,tickDiff=null,variantEngine=undefined}){
+export function updateForwardMonitorV1({previousMonitor,now,price,decision,inputSummary,sourceVintages,revisionAlerts=[],cashQuotePct=null,cashQuoteBasis="treasury_bill_discount",priceSeries=[],previousSnapshotPresent=false,regimeMeta=null,shadowHysteresis=null,v2Inputs=null,variantInputs=null,shadowValues=null,regimeBirth=null,tickDiff=null,variantEngine=undefined,referenceDecision=null,referenceRegimeMeta=null,variantRun:precomputedVariantRun=null}){
   if(!finite(price)||Number(price)<=0)throw new Error("forward monitor requires a positive price");
   const cfg=MODEL_POLICY_V1.forward_monitoring,at=new Date(now).toISOString(),date=at.slice(0,10),simple=simpleTargets(priceSeries);
   const costRate=cfg.transaction_cost_bps_per_full_turnover/10_000;
@@ -528,7 +537,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // политики отбрасывается (засев пересчитает его из событий), а новые линии рождаются заново с
   // записью о перезапуске: короткая честная история лучше длинной с дырой.
   if(previousMonitor?.schema===1&&monitor.accounting_at!==undefined&&monitor.accounting_at!==monitor.last_at)optional("accounting_gap",()=>{
-    const restarted=[...VARIANT_LINES_V1,TRANCHED_LINE_V1,...TREND_LINE_NAMES_V1].filter(name=>monitor.strategies[name]);
+    const restarted=[...VARIANT_LINES_V1,TRANCHED_LINE_V1,...TREND_LINE_NAMES_V1,FROZEN_V1_LINE].filter(name=>monitor.strategies[name]);
     for(const name of restarted){delete monitor.strategies[name];delete monitor.strategy_meta?.[name];for(const row of monitor.daily||[]){delete row.targets?.[name];delete row.nav?.[name];delete row.path?.[name];}}
     delete monitor.tranche_state;
     if(monitor.strategies.policy_v1){delete monitor.strategies.policy_v1.gross_nav;delete monitor.strategies.policy_v1.exposure_pct_days;}
@@ -539,10 +548,18 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // цели, краткосрочное состояние в дневных строках (scripts/monitor-backfill-v1.mjs). Засев идемпотентен.
   if(previousMonitor?.schema===1)optional("backfill",()=>applyMonitorBackfillV1(monitor,{at,costRate}));
   monitor.strategy_meta=monitor.strategy_meta||{};
+  // Род и подпись линии — из реестра: при смене боевого набора линия policy_v1 остаётся ключом
+  // боевой политики, а её подпись обязана это говорить.
+  for(const [name,meta] of Object.entries(monitor.strategy_meta)){const registry=STRATEGY_REGISTRY_V1[name];if(registry&&meta&&(meta.label!==registry.label||meta.kind!==registry.kind))Object.assign(meta,{kind:registry.kind,label:registry.label});}
   const previousEntry=(monitor.decision_log||[]).at(-1)||null,previousRow=(monitor.daily||[]).at(-1)||null;
+  // ОПОРА — решение прежнего набора v1 на этом же прогоне. Пока боевой набор и есть v1 (вызов без
+  // опоры), опора — само решение. От опоры считаются тени v0 и v2, счётчики гистерезиса v1 и линия
+  // прежних правил policy_v1_frozen; боевая линия policy_v1 исполняет боевое решение.
+  const ref=referenceDecision||decision;
   // Цель исполняется, только если решение проходит гейт витрины: иначе все линии, выведенные из
   // решения, держат прежнюю долю (см. decisionGateV1). Простых ориентиров гейт не касается.
   const gate=decisionGateV1(decision,now),gateOpen=gate.actionable,shown=target=>gateOpen?target:null;
+  const refGateOpen=referenceDecision?decisionGateV1(referenceDecision,now).actionable:gateOpen,shownRef=target=>refGateOpen?target:null;
   // ТЕНЕВОЙ КАНДИДАТ v2 (см. docs/policy-v2-candidate.mjs): вычисляется параллельно, живое
   // решение НЕ трогает. Градуировка пола считается по дневным закрытиям UTC из переносимого
   // состояния. static_theta — прежний нуль R2: до 90-го дня скользящее среднее целей политики (то
@@ -550,8 +567,8 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // Линия остаётся как история; R2 с ревизии 2 сравнивает политику с честным нулём на своём окне
   // (monitoring.timing_null). Цель округляется до 0.1пп: микрообороты от дрожащего среднего —
   // фиктивные издержки и лишние байты в каждой daily-строке.
-  monitor.v2_shadow_state=updateV2ShadowState(monitor.v2_shadow_state,now,decision.inputs?.recovery_state==="good");
-  const v2Decision=allocationDecisionV2Candidate({strategic:decision.strategic,recoveryState:decision.inputs?.recovery_state,macroShockState:decision.inputs?.macro_shock_state,mvrvPercentile:decision.inputs?.mvrv_percentile,mvrvPercentileDeep:v2Inputs?.mvrv_percentile_deep??null,recoveryCloses:monitor.v2_shadow_state.closes}),v2Target=v2Decision.target_pct;
+  monitor.v2_shadow_state=updateV2ShadowState(monitor.v2_shadow_state,now,ref.inputs?.recovery_state==="good");
+  const v2Decision=allocationDecisionV2Candidate({strategic:ref.strategic,recoveryState:ref.inputs?.recovery_state,macroShockState:ref.inputs?.macro_shock_state,mvrvPercentile:ref.inputs?.mvrv_percentile,mvrvPercentileDeep:v2Inputs?.mvrv_percentile_deep??null,recoveryCloses:monitor.v2_shadow_state.closes}),v2Target=v2Decision.target_pct;
   const daysElapsedNow=Math.max(0,Math.floor((now-Date.parse(monitor.started_at))/DAY));
   const trailingTheta=()=>{const rows=(monitor.daily||[]).slice(-370).map(x=>Number(x.targets?.policy_v1)).filter(finite);return rows.length?Math.round(mean(rows)*10)/10:(finite(decision.target_pct)?Number(decision.target_pct):0);};
   const thetaState=monitor.v2_theta&&typeof monitor.v2_theta==="object"?monitor.v2_theta:{pct:null,fixed_at_day:null};
@@ -563,7 +580,9 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // запись в variant_errors, линии держат прежнюю цель, решение и его качество не затронуты.
   // Непринятая цель одной линии (не число, вне 0…100, поле не читается) — такая же запись с именем
   // линии; остальные линии этого прогона исполняются.
-  const variantRun=runShadowVariantsV1({...(variantEngine?{engine:variantEngine}:{}),now,inputs:variantInputs,state:monitor.variants_state});
+  // Когда боевое решение принимает движок вариантов, сборщик вызывает его сам и передаёт готовый
+  // прогон: второй вызов здесь шагнул бы состояние линий дважды за прогон.
+  const variantRun=precomputedVariantRun&&typeof precomputedVariantRun==="object"?precomputedVariantRun:runShadowVariantsV1({...(variantEngine?{engine:variantEngine}:{}),now,inputs:variantInputs,state:monitor.variants_state});
   if(variantRun.ran){
     monitor.variants_state=variantRun.state;
     const failures=[...(variantRun.error?[{t:at,error:variantRun.error}]:[]),...Object.entries(variantRun.rejected||{}).map(([line,error])=>({t:at,line,error}))];
@@ -583,14 +602,16 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   });
   const desired={
     policy_v1:shown(decision.target_pct),
-    previous_policy_shadow:shown(previousPolicyTargetV1({strategic:decision.strategic,recoveryState:decision.inputs.recovery_state,macroShockState:decision.inputs.macro_shock_state,mvrvPercentile:decision.inputs.mvrv_percentile})),
+    previous_policy_shadow:shownRef(previousPolicyTargetV1({strategic:ref.strategic,recoveryState:ref.inputs.recovery_state,macroShockState:ref.inputs.macro_shock_state,mvrvPercentile:ref.inputs.mvrv_percentile})),
     buy_and_hold:simple.buy_and_hold,fixed_50:simple.fixed_50,cash:simple.cash,trend_vol_25:simple.trend_vol_25,
-    policy_v2_shadow:shown(v2Target),
+    policy_v2_shadow:shownRef(v2Target),
     static_theta:finite(thetaState.pct)?thetaState.pct:trailingTheta(),
   };
   // Линия рождается, когда у неё появляется собственная цель: с NAV = 1 и записью старта.
   for(const name of VARIANT_LINES_V1){const target=shown(variantRun.targets[name]);if(finite(target)||monitor.strategies[name])desired[name]=target;}
   if(finite(tranchedTarget)||tranchedLine)desired[TRANCHED_LINE_V1]=tranchedTarget;
+  // Прежние правила после смены боевого набора: линия рождается на первом прогоне с опорой.
+  if(referenceDecision){const target=shownRef(referenceDecision.target_pct);if(finite(target)||monitor.strategies[FROZEN_V1_LINE])desired[FROZEN_V1_LINE]=target;}
   for(const name of TREND_LINE_NAMES_V1){const target=trendRun?.targets?.[name]??null;if(finite(target)||monitor.strategies[name])desired[name]=target;}
   const priorPrice=Number(monitor.last_price),dt=Math.max(0,now-Date.parse(monitor.last_at||at)),btcReturn=priorPrice>0?Number(price)/priorPrice-1:0;
   const legacyCashQuote=finite(monitor.last_cash_annual_pct)?Number(monitor.last_cash_annual_pct):null;
@@ -638,7 +659,8 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     const log=Array.isArray(monitor.target_change_log)?monitor.target_change_log:[];
     const lastKnown=log.length?log.at(-1).to_pct:[...(monitor.decision_log||[])].reverse().find(x=>finite(x.target_pct))?.target_pct??null;
     const diff=tickDiff??(inputSummary?tickDiffFromInputSummariesV1(previousRow?.input_summary,ledgerInputs(inputSummary)):null);
-    const change=targetChangeRecordV1({at,price,previous:{target_pct:lastKnown,strategic:previousEntry?.strategic??null,binding_overlays:previousEntry?.binding_overlays??[]},decision,regimeBirth,tickDiff:diff,candidateSince:regimeMeta?.strategic?.since??null,gateOpen});
+    const policySwitch=previousEntry?.policy_hash&&decision.policy_hash&&previousEntry.policy_hash!==decision.policy_hash?{from:suiteIdOfHash(previousEntry.policy_hash),to:decision.policy_id??suiteIdOfHash(decision.policy_hash)}:null;
+    const change=targetChangeRecordV1({at,price,previous:{target_pct:lastKnown,strategic:previousEntry?.strategic??null,binding_overlays:previousEntry?.binding_overlays??[]},decision,regimeBirth,tickDiff:diff,candidateSince:regimeMeta?.strategic?.since??null,gateOpen,policySwitch});
     monitor.target_change_log=(change?[...log,change]:log).slice(-TARGET_CHANGE_LOG_LIMIT);
   });
   monitor.decision_log=monitor.decision_log||[];
@@ -657,7 +679,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // леджера, а не из ничем не покрытого бокового поля. Все значения ??null (см. класс input_hash).
   // Кандидат v3 и его линии — отдельным блоком `v3`, только когда движок вариантов вызывался.
   const v2Ledger={target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state?.closes??null,mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,theta_pct:finite(monitor.v2_theta?.pct)?Number(monitor.v2_theta.pct):null};
-  const logEntry={t:at,previous_log_hash:priorLogHash,policy_hash:decision.policy_hash,decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,status:decision.status,strategic:decision.strategic,tactical:decision.tactical,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,quality:decision.quality.status,source_vintages_sha256:sourceVintages?.contract_sha256||null,hysteresis,v2:v2Ledger,...(variantRun.ran?{v3:optional("v3_ledger",()=>variantLedgerV1(variantRun,sha256),null)}:{})};
+  const logEntry={t:at,previous_log_hash:priorLogHash,policy_hash:decision.policy_hash,decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,status:decision.status,strategic:decision.strategic,tactical:decision.tactical,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,quality:decision.quality.status,source_vintages_sha256:sourceVintages?.contract_sha256||null,hysteresis,v2:v2Ledger,...(variantRun.ran?{v3:optional("v3_ledger",()=>variantLedgerV1(variantRun,sha256),null)}:{}),...(referenceDecision?{v1:{strategic:ref.strategic??null,target_pct:ref.target_pct??null}}:{})};
   logEntry.log_hash=sha256(logEntry);
   monitor.decision_log.push(logEntry);
   monitor.decision_log=monitor.decision_log.slice(-cfg.observation_log_limit);
@@ -674,7 +696,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // запасной вызов пишет сам: tactical — из решения, path — из учёта линий, v2_floor держится сутки.
   const sameDay=monitor.daily.findIndex(x=>x.date===date);
   const floorToday=v2Decision.binding_overlays.includes("recovery_floor")||(sameDay>=0&&monitor.daily[sameDay].v2_floor===true),shadowRow=optional("shadow_values",()=>shadowRowValuesV1(shadowValues),null)??(sameDay>=0?monitor.daily[sameDay].shadow??null:null),rowPath=rowPathV1(monitor.strategies);
-  const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,v2_diverged:finite(v2Target)&&finite(decision.target_pct)&&Number(v2Target)!==Number(decision.target_pct),tactical:decision.tactical??null,...(floorToday?{v2_floor:true}:{}),...(rowPath?{path:rowPath}:{}),...(shadowRow?{shadow:shadowRow}:{}),input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
+  const dailyRow={t:at,date,price:Number(price),decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,policy_target_pct:decision.target_pct,targets:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.current_target_pct])),nav:Object.fromEntries(Object.entries(monitor.strategies).map(([k,v])=>[k,v.nav])),quality:decision.quality.status,v2_diverged:finite(v2Target)&&finite(ref.target_pct)&&Number(v2Target)!==Number(ref.target_pct),tactical:decision.tactical??null,...(floorToday?{v2_floor:true}:{}),...(rowPath?{path:rowPath}:{}),...(shadowRow?{shadow:shadowRow}:{}),input_summary:ledgerInputs(inputSummary),source_vintages_sha256:sourceVintages?.contract_sha256||null};
   if(sameDay>=0)monitor.daily[sameDay]=dailyRow;else monitor.daily.push(dailyRow);
   monitor.daily=monitor.daily.filter(x=>now-Date.parse(x.t)<=cfg.daily_history_days*DAY).sort((a,b)=>Date.parse(a.t)-Date.parse(b.t));
   // Детальные входы держим только за свежее окно: NAV-серия обязана покрывать 365 дней, а
@@ -698,16 +720,17 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // кандидат хуже удерживаемого режима; снимок без данных серию не прерывает (v1 сохраняет счётчик),
   // кандидат не хуже режима — прерывает. Аварийный режим и «недостаточно данных» подтверждений не
   // требуют и в счёт не идут. Без regimeMeta (прежний вызов) принимается флаг сборщика.
-  if(shadowHysteresis||regimeMeta?.strategic)optional("shadow_hysteresis",()=>{
+  const hystMeta=referenceRegimeMeta??regimeMeta,hystPrevious=previousEntry?.v1?.strategic??previousEntry?.strategic;
+  if(shadowHysteresis||hystMeta?.strategic)optional("shadow_hysteresis",()=>{
     const prior=monitor.shadow_hysteresis||{};
     const resets=(Number(prior.upgrade_hold_resets_by_degraded)||0)+(Number(shadowHysteresis?.upgrade_hold_reset_by_degraded)||0);
     // Ключ переименован из risk_off_confirmed_under_30m (порог перестал быть зашитым числом);
     // накопленное значение переносится, чтобы форвардная статистика не начиналась заново.
     const priorFast=Number(prior.risk_off_confirmed_under_min_interval??prior.risk_off_confirmed_under_30m)||0;
     let fast=0,reference=prior.risk_off_ref??null,firstCounterAt=prior.risk_off_first_counter_at??null;
-    if(regimeMeta?.strategic){
-      const candidate=regimeMeta.strategic.candidate,published=decision.strategic;
-      if(!realRegime(reference))reference=realRegime(previousEntry?.strategic)?previousEntry.strategic:null;
+    if(hystMeta?.strategic){
+      const candidate=hystMeta.strategic.candidate,published=ref.strategic;
+      if(!realRegime(reference))reference=realRegime(hystPrevious)?hystPrevious:null;
       if(reference&&realRegime(candidate))firstCounterAt=strategicRank(candidate)<strategicRank(reference)?(firstCounterAt??at):null;
       if(reference&&realRegime(published)&&strategicRank(published)<strategicRank(reference)&&riskOffConfirmationDeferredV2({firstCounterSnapshotAt:firstCounterAt??at,now}))fast=1;
       if(realRegime(published)&&published!==reference){reference=published;firstCounterAt=null;}
@@ -744,7 +767,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   const divergedDays=v2Rows.filter(x=>x.v2_diverged===true).length;
   const episodesObserved=(()=>{let n=0,inEpisode=false;for(const x of v2Rows){const on=x.v2_floor===true;if(on&&!inEpisode)n++;inEpisode=on;}return n;})();
   const v2Born=Date.parse(monitor.strategy_meta.policy_v2_shadow?.started_at),v2ShadowDays=finite(v2Born)?Math.max(0,Math.floor((now-v2Born)/DAY)):monitor.days_elapsed;
-  monitor.v2_candidate={...policyV2CandidateMetadata(),target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state.closes,inputs:{mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,deep_window_used:finite(v2Inputs?.mvrv_percentile_deep),theta_pct:finite(monitor.v2_theta?.pct)?monitor.v2_theta.pct:null,theta_fixed_at_day:monitor.v2_theta?.fixed_at_day??null},diverges_now:finite(v2Target)&&v2Target!==decision.target_pct,days_diverged:divergedDays,acceptance:POLICY_V2_CANDIDATE.decision_record.acceptance_criteria,acceptance_status:evaluateAcceptanceV2({performance:monitor.performance,sharpeGap:v2Cmp?.sharpe_gap??null,shadowDays:v2ShadowDays,recoveryEpisodesObserved:episodesObserved,window:v2Cmp?{basis:v2Cmp.basis,from:v2Cmp.from,days:v2Cmp.days}:null})};
+  monitor.v2_candidate={...policyV2CandidateMetadata(),target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state.closes,inputs:{mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,deep_window_used:finite(v2Inputs?.mvrv_percentile_deep),theta_pct:finite(monitor.v2_theta?.pct)?monitor.v2_theta.pct:null,theta_fixed_at_day:monitor.v2_theta?.fixed_at_day??null},diverges_now:finite(v2Target)&&v2Target!==ref.target_pct,days_diverged:divergedDays,acceptance:POLICY_V2_CANDIDATE.decision_record.acceptance_criteria,acceptance_status:evaluateAcceptanceV2({performance:monitor.performance,sharpeGap:v2Cmp?.sharpe_gap??null,shadowDays:v2ShadowDays,recoveryEpisodesObserved:episodesObserved,window:v2Cmp?{basis:v2Cmp.basis,from:v2Cmp.from,days:v2Cmp.days}:null})};
   // Публичные блоки кандидата v3 и линий «v1 с одной правкой» — когда движок вариантов вызывался.
   // Поля движка публикуются как он их отдал и ТОЛЬКО из свежего ответа: слияние с прежним блоком
   // оставляло в нём ключи прошлых прогонов — после разового отказа линии `error` (или `truncated`)
@@ -764,7 +787,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
       const base=acceptanceCriteriaV3()?.divergence_base,divergence=cmp&&typeof base==="string"&&monitor.strategies[base]?divergenceEpisodesV3(rows,"policy_v3_shadow",undefined,base):null;
       return{shadowDays:Math.max(0,Math.floor((now-v3Born)/DAY)),window:cmp?{basis:cmp.basis,from:cmp.from,days:cmp.days}:null,divergence,timingGapPp:cmp?.vs_null_gap_pp??null,drawdownWorsePp:finite(lineDd)&&finite(policyDd)?Math.abs(lineDd)-Math.abs(policyDd):null,netReturnGapPp:cmp?.net_return_gap_pp??null};
     })():{};
-    monitor.v3_candidate={target_pct:null,evaluated_at:null,...(fresh.policy_v3_shadow?{...fresh.policy_v3_shadow,evaluated_at:at}:monitor.v3_candidate||{}),...policyV3CandidateMetadata(),acceptance:acceptanceCriteriaV3(),acceptance_status:evaluateAcceptanceV3(numbers)};
+    monitor.v3_candidate={target_pct:null,evaluated_at:null,...(fresh.policy_v3_shadow?{...fresh.policy_v3_shadow,evaluated_at:at}:monitor.v3_candidate||{}),...policyV3CandidateMetadata(),acceptance:acceptanceCriteriaV3(),acceptance_status:evaluateAcceptanceV3(numbers),...(decision.policy_id===POLICY_SUITE_V3.id?{live_suite:POLICY_SUITE_V3.id}:{})};
     monitor.variants={...(monitor.variants||{}),...Object.fromEntries(VARIANT_LINES_V1.filter(name=>name!=="policy_v3_shadow"&&fresh[name]).map(name=>[name,{...fresh[name],evaluated_at:at}]))};
   });
   // Публичный блок трендовых линий: объявление и последнее решение. Без состояния блока нет.
