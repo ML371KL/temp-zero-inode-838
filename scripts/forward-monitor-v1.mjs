@@ -10,6 +10,7 @@ import { TARGET_CHANGE_LOG_LIMIT, targetChangeRecordV1, tickDiffFromInputSummari
 import { shadowEvidenceV1, shadowRowValuesV1, tacticalForwardV1 } from "./monitor-evidence-v1.mjs";
 import { TRANCHE_CONVENTION_V1, TRANCHED_LINE_V1, VARIANTS_STATE_MAX_BYTES, VARIANT_LINES_V1, VARIANT_PUBLIC_MAX_BYTES, acceptanceCriteriaV3, divergenceEpisodesV3, evaluateAcceptanceV3, policyV3CandidateMetadata, runShadowVariantsV1, updateTrancheStateV1, variantLedgerV1 } from "./monitor-lines-v1.mjs";
 import { closeDrawdownPctV1, closedRowsV1, comparisonsV1, rowPathV1, rowsFromV1, sharpeOfRowsV1, timingNullBlockV1 } from "./monitor-timing-v1.mjs";
+import { TREND_LINE_NAMES_V1, evaluateTrendLinesV1, trendLinesPublicV1 } from "./monitor-trend-lines-v1.mjs";
 
 const DAY=86_400_000,YEAR_DAYS=365.25;
 // ПРЕДЕЛЫ ХРАНЕНИЯ списков монитора — в одном месте: ими пользуется сам монитор и по ним считается
@@ -527,7 +528,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // политики отбрасывается (засев пересчитает его из событий), а новые линии рождаются заново с
   // записью о перезапуске: короткая честная история лучше длинной с дырой.
   if(previousMonitor?.schema===1&&monitor.accounting_at!==undefined&&monitor.accounting_at!==monitor.last_at)optional("accounting_gap",()=>{
-    const restarted=[...VARIANT_LINES_V1,TRANCHED_LINE_V1].filter(name=>monitor.strategies[name]);
+    const restarted=[...VARIANT_LINES_V1,TRANCHED_LINE_V1,...TREND_LINE_NAMES_V1].filter(name=>monitor.strategies[name]);
     for(const name of restarted){delete monitor.strategies[name];delete monitor.strategy_meta?.[name];for(const row of monitor.daily||[]){delete row.targets?.[name];delete row.nav?.[name];delete row.path?.[name];}}
     delete monitor.tranche_state;
     if(monitor.strategies.policy_v1){delete monitor.strategies.policy_v1.gross_nav;delete monitor.strategies.policy_v1.exposure_pct_days;}
@@ -568,6 +569,12 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     const failures=[...(variantRun.error?[{t:at,error:variantRun.error}]:[]),...Object.entries(variantRun.rejected||{}).map(([line,error])=>({t:at,line,error}))];
     if(failures.length)monitor.variant_errors=[...(monitor.variant_errors||[]),...failures].slice(-VARIANT_ERROR_LIMIT);
   }
+  // ТЕНЕВЫЕ ТРЕНДОВЫЕ ЛИНИИ (scripts/monitor-trend-lines-v1.mjs): ориентир «три средние» и кандидат
+  // «тренд × тормоз спроса». Суточный фикс по закрытым свечам; баллы семей — готовые, из входов
+  // вариантов. Гейт витрины их не касается, как и остальных ориентиров: правило читает цену и баллы,
+  // а не решение. Отказ расчёта — запись в optional_errors, линии держат прежнюю цель.
+  const trendRun=optional("trend_lines",()=>evaluateTrendLinesV1({now,inputs:variantInputs,state:monitor.trend_lines_state}),null);
+  if(trendRun?.state)monitor.trend_lines_state=trendRun.state;
   // Исполнение по правилу панели: понижения сразу, повышения траншами (соглашение — в assumptions).
   const tranchedLine=monitor.strategies[TRANCHED_LINE_V1];let tranchedTarget=null;
   if(gateOpen&&finite(decision.target_pct))optional("tranched_execution",()=>{
@@ -584,6 +591,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // Линия рождается, когда у неё появляется собственная цель: с NAV = 1 и записью старта.
   for(const name of VARIANT_LINES_V1){const target=shown(variantRun.targets[name]);if(finite(target)||monitor.strategies[name])desired[name]=target;}
   if(finite(tranchedTarget)||tranchedLine)desired[TRANCHED_LINE_V1]=tranchedTarget;
+  for(const name of TREND_LINE_NAMES_V1){const target=trendRun?.targets?.[name]??null;if(finite(target)||monitor.strategies[name])desired[name]=target;}
   const priorPrice=Number(monitor.last_price),dt=Math.max(0,now-Date.parse(monitor.last_at||at)),btcReturn=priorPrice>0?Number(price)/priorPrice-1:0;
   const legacyCashQuote=finite(monitor.last_cash_annual_pct)?Number(monitor.last_cash_annual_pct):null;
   const priorCashQuote=finite(monitor.last_cash_quote_pct)?Number(monitor.last_cash_quote_pct):legacyCashQuote;
@@ -759,6 +767,8 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
     monitor.v3_candidate={target_pct:null,evaluated_at:null,...(fresh.policy_v3_shadow?{...fresh.policy_v3_shadow,evaluated_at:at}:monitor.v3_candidate||{}),...policyV3CandidateMetadata(),acceptance:acceptanceCriteriaV3(),acceptance_status:evaluateAcceptanceV3(numbers)};
     monitor.variants={...(monitor.variants||{}),...Object.fromEntries(VARIANT_LINES_V1.filter(name=>name!=="policy_v3_shadow"&&fresh[name]).map(name=>[name,{...fresh[name],evaluated_at:at}]))};
   });
+  // Публичный блок трендовых линий: объявление и последнее решение. Без состояния блока нет.
+  if(monitor.trend_lines_state)monitor.trend_lines=optional("trend_lines_public",()=>trendLinesPublicV1(monitor.trend_lines_state,at),monitor.trend_lines??null);
   // Форвард-счёт краткосрочного вердикта и теневого слоя (scripts/monitor-evidence-v1.mjs).
   monitor.tactical_forward=optional("tactical_forward",()=>tacticalForwardV1(monitor.daily,{date}),monitor.tactical_forward??null);
   if(shadowRow||monitor.shadow_evidence)monitor.shadow_evidence=optional("shadow_evidence",()=>shadowEvidenceV1(monitor.daily,{date}),monitor.shadow_evidence??null);
