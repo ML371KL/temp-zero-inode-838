@@ -3,7 +3,7 @@ import { allocationDecisionV1, policyMetadataV1 } from "../docs/policy-v1.mjs";
 import { policySuiteMetadataV1, POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { POLICY_SUITE_V3, policySuiteMetadataV3 } from "../docs/policy-suite-v3.mjs";
 import { monitorRetentionLimitsV1, policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
-import { liveAllocationMetadataV3, policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
+import { acceptsSupersededSuiteV3, liveAllocationMetadataV3, policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
 import { PUBLIC_SNAPSHOT_MAX_BYTES, optionalSnapshotProblemsV1, optionalSnapshotBytesV1, publicSnapshotAtLimitsV1, publicSnapshotAtLimitsWarningV1 } from "./public-snapshot-contract.mjs";
 
 const path=process.env.OUT||"docs/snapshot.json";
@@ -39,7 +39,7 @@ const allowedSourceStates=new Set(["ok","partial","stale","fail","mock"]);
 // это снимок, с которого выпуск стартует, — он лежит в репозитории до первого сбора новым кодом, а
 // эта проверка идёт ПЕРЕД сбором. Отвергни она его, сбор не начался бы вовсе, и снимок набора v3
 // не появился бы никогда. Кандидат на публикацию (REQUIRE_LIVE=1) обязан нести решение набора v3.
-const supersededSuite=s.decision?.policy_id===POLICY_SUITE_V1.id&&process.env.REQUIRE_LIVE!=="1";
+const supersededSuite=acceptsSupersededSuiteV3(s.decision,{strict:process.env.REQUIRE_LIVE==="1"});
 const liveSuite=supersededSuite?POLICY_SUITE_V1:POLICY_SUITE_V3;
 const expectedPolicy=supersededSuite?policyMetadataV1():liveAllocationMetadataV3();
 const expectedSuite=supersededSuite?policySuiteMetadataV1():policySuiteMetadataV3();

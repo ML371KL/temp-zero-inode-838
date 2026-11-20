@@ -11,7 +11,7 @@ import { POLICY_SUITE_V3, POLICY_SUITE_V3_DECISION_RECORD, policySuiteContractV3
 import { POLICY_V3_CANDIDATE, allocationDecisionV3, evaluateShadowVariantsV1, evaluateV3Inputs } from "../docs/policy-v3-candidate.mjs";
 import { buildDecisionRecordV1, policySuiteDigestV1, sha256 } from "./forward-monitor-v1.mjs";
 import { runShadowVariantsV1 } from "./monitor-lines-v1.mjs";
-import { KNOWN_SUITE_HASHES, LIVE_REGIMES_V3, LIVE_SUITE_ID_V3, buildLiveDecisionV3, fixDiffV3, fixSnapshotV3, liveInputsV3, liveRegimeBirthV3, liveRegimeMetaV3, policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
+import { acceptsSupersededSuiteV3, KNOWN_SUITE_HASHES, LIVE_REGIMES_V3, LIVE_SUITE_ID_V3, buildLiveDecisionV3, fixDiffV3, fixSnapshotV3, liveInputsV3, liveRegimeBirthV3, liveRegimeMetaV3, policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
 
 const DAY=86_400_000,HOUR=3_600_000,MIN=60_000;
 const T0=Date.parse("2026-11-02T00:00:00.000Z")+(Number(process.env.MONITOR_TEST_DAY_SHIFT)||0)*DAY;
@@ -162,7 +162,7 @@ const verify=d=>{const copy={...d};delete copy.decision_hash;assert.equal(d.deci
   assert.deepEqual([uncovered.status,uncovered.target_pct,uncovered.quality.status,uncovered.quality.critical_coverage_ok],["actionable",45,"paused",false]);
   assert.deepEqual([stale.quality.status,stale.quality.stale_or_partial_sources],["degraded",1]);verify(uncovered);verify(stale);
   // Мусор вместо вида линии цели не даёт.
-  for(const view of ["строка",[],{state:"transition",target_pct:"45"},{state:"transition",target_pct:140},{state:"странный",target_pct:45},{target_pct:45}])assert.equal(buildLiveDecisionV3({generatedAt:iso(now),v1Decision:v1,view}).status,"paused",JSON.stringify(view));
+  for(const view of ["строка",[],{state:"transition",target_pct:"45"},{state:"transition",target_pct:140},{state:"странный",target_pct:45},{target_pct:45}]){const d=buildLiveDecisionV3({generatedAt:iso(now),v1Decision:v1,view});assert.deepEqual([d.status,d.target_pct,d.base_target_pct,d.binding_overlays],["paused",null,null,[]],`на паузе цели нет: ${JSON.stringify(view)}`);}
 }
 
 // ================= 5. Проверка записи: что она ловит =================
@@ -203,6 +203,8 @@ const verify=d=>{const copy={...d};delete copy.decision_hash;assert.equal(d.deci
   const noFix={...first,fix:null},next=liveRegimeMetaV3({decision:{strategic:"defensive"},view:{...view,candidate:"deteriorating",fix_at:iso(at(1,6)),next_fix_at:iso(at(2,6)),pending:{candidate:"deteriorating",fixes:1,need:2}},previousMeta:noFix,now:at(1,6),calc:calc(familiesOf("deteriorating"))});
   const blank=liveRegimeBirthV3({previousBirth:priorBirth,previousMeta:noFix,meta:next,metrics:METRICS,now:at(1,6),price:70_000});
   assert.deepEqual([blank.candidate,blank.from_candidate,blank.note,blank.families,blank.price],["deteriorating","defensive","no_previous_fix",[],70_000]);
+  // Кандидат сменился без нового фикса (авария между фиксами): новой записи нет, прежняя — о другом кандидате — не переносится.
+  assert.equal(liveRegimeBirthV3({previousBirth:{t:"2026-10-12T11:39:36.337Z",candidate:"defensive"},previousMeta:first,meta:{...first,candidate:"emergency",state:"emergency"},metrics:METRICS,now:at(0,9),price:1}),null);
   // Запись о другом кандидате и запись из будущего не переносятся.
   assert.equal(liveRegimeBirthV3({previousBirth:{t:"2026-10-12T11:39:36.337Z",candidate:"transition"},previousMeta:v1Meta,meta:first,metrics:METRICS,now:at(0,6,15),price:1}),null);
   assert.equal(liveRegimeBirthV3({previousBirth:{t:iso(at(5)),candidate:"defensive"},previousMeta:v1Meta,meta:first,metrics:METRICS,now:at(0,6,15),price:1}),null);
@@ -214,6 +216,19 @@ const verify=d=>{const copy={...d};delete copy.decision_hash;assert.equal(d.deci
   // Без вида движка состояние остаётся читаемым.
   const bare=liveRegimeMetaV3({decision:{strategic:"insufficient"},view:null,previousMeta:first,now:at(1,7)});
   assert.deepEqual([bare.state,bare.candidate,bare.fix_at,bare.count,bare.fix],["insufficient","insufficient",null,1,first.fix]);
+}
+
+// ================= 7. Когда допустимо решение прежнего набора =================
+{
+  const old={policy_id:POLICY_SUITE_V1.id},now={policy_id:POLICY_SUITE_V3.id};
+  assert.deepEqual([acceptsSupersededSuiteV3(old),acceptsSupersededSuiteV3(old,{strict:false}),acceptsSupersededSuiteV3(old,{strict:true}),acceptsSupersededSuiteV3(now),acceptsSupersededSuiteV3(now,{strict:true}),acceptsSupersededSuiteV3(null),acceptsSupersededSuiteV3({}),acceptsSupersededSuiteV3("btc-decision-suite-v1")],[true,true,false,false,false,false,false,false]);
+  // Проводка: гейт публикации строг под REQUIRE_LIVE, сторож — за пределами окна выпуска.
+  const selfTest=readFileSync(new URL("./self-test.mjs",import.meta.url),"utf8"),watcher=readFileSync(new URL("./monitor-live.mjs",import.meta.url),"utf8");
+  // Сверяются целые строки исходника: закомментированная или переписанная проводка проверку не пройдёт.
+  const lines=text=>text.replace(/\r\n/g,"\n").split("\n");
+  assert.ok(lines(selfTest).includes('const supersededSuite=acceptsSupersededSuiteV3(s.decision,{strict:process.env.REQUIRE_LIVE==="1"});'),"кандидат на публикацию обязан нести решение боевого набора");
+  assert.ok(lines(selfTest).includes("const liveSuite=supersededSuite?POLICY_SUITE_V1:POLICY_SUITE_V3;"));
+  assert.ok(lines(watcher).includes("  const supersededInWindow=acceptsSupersededSuiteV3(d,{strict:!(ageHours<=1.5)}),suite=supersededInWindow?POLICY_SUITE_V1:POLICY_SUITE_V3;"),"сторож принимает прежний набор только в окне выпуска");
 }
 
 console.log(`Live decision v3 OK: ${POLICY_SUITE_V3.id} ${POLICY_SUITE_V3.contract_sha256.slice(0,12)} — suite lock, decision record from the engine view, reproduction, daily-fix regime state, cause of regime change`);

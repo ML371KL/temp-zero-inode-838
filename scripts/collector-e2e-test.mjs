@@ -215,6 +215,25 @@ try{
     assert.match(trimmed.pub.diagnostics.find(x=>x.scope==="regime_birth")?.error||"",/не прошло контракт снимка/);
   }
 
+  // ---- C5. Опора v1: гистерезис прежних правил идёт от СВОЕГО прежнего состояния, а не от боевого режима ----
+  {
+    // Прежнее состояние — не синтетика (иначе гистерезис принимает кандидата сразу). У опоры —
+    // «конструктивный», опубликованный боевой режим — как на холодном старте. Кандидат v1 на этом
+    // прогоне хуже конструктивного: понижение требует двух снимков подряд, поэтому опора обязана
+    // остаться «конструктивной» со счётом встречных снимков 1. Читай сборщик состояние v1 из
+    // опубликованного режима — он увидел бы там тот же режим, что и кандидат, и счёта не было бы.
+    const since=new Date(Date.parse(cold.pub.generated_at)-H).toISOString();
+    const crafted={...structuredClone(cold.state),mock:false,reference_v1:{regime:{strategic:"constructive"},regime_meta:{strategic:{state:"constructive",candidate:"constructive",count:5,since,downStreak:0,anchor:"constructive"}},decision:cold.state.reference_v1.decision}};
+    const next=tick({previous:crafted}),ref=next.pub.reference_v1,candidate=ref.regime_meta.strategic.candidate;
+    assert.ok(["transition","deteriorating","defensive","unconfirmed_positive"].includes(candidate),`фикстура: кандидат v1 в синтетике хуже конструктивного: ${candidate}`);
+    assert.deepEqual([ref.regime.strategic,ref.regime_meta.strategic.state,ref.regime_meta.strategic.downStreak,ref.decision.strategic],["constructive","constructive",1,"constructive"],"опора держит свой режим до второго встречного снимка");
+    assert.equal(next.pub.regime.strategic,next.pub.decision.strategic,"опубликованный режим — режим боевого решения");
+    assert.notEqual(next.pub.regime.strategic,"constructive","боевой режим от состояния опоры не зависит");
+    // Второй встречный снимок подряд — понижение опоры принято.
+    const confirmed=tick({previous:{...next.state,mock:false}}).pub.reference_v1;
+    assert.deepEqual([confirmed.regime.strategic,confirmed.regime_meta.strategic.downStreak],[candidate,2]);
+  }
+
   // ---- C6. Что compute() передаёт монитору: входы вариантов, значения теневых карточек, рождение, разница ----
   {
     const driver=join(dir,"extras.mjs"),statePath=join(dir,"extras.prev.json");

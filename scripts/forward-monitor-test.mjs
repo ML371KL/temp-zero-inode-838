@@ -309,5 +309,7 @@ assert.equal(graftForwardMonitorV1(null,graftPack).started_at,archiveMonitor.sta
 await import("./monitor-audit-test.mjs");
 // Теневые трендовые линии (аудит 2026-11-20) — тоже отдельным модулем.
 await import("./monitor-trend-lines-test.mjs");
+// Смена боевого набора правил v1 → v3 (выпуск 2.15.0).
+await import("./monitor-suite-switch-test.mjs");
 
 console.log("Forward monitor scenarios OK: server decision, costs, shadows, vintages, hash chain, graft, reset alarm, live alarm");

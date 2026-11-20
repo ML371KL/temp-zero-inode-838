@@ -41,6 +41,15 @@ const EMERGENCY="emergency",CHEAP_SCORE=1;
 export const LIVE_SUITE_ID_V3=POLICY_SUITE_V3.id;
 export const KNOWN_SUITE_HASHES=Object.freeze({[POLICY_SUITE_V1.id]:POLICY_SUITE_V1.contract_sha256,[POLICY_SUITE_V3.id]:POLICY_SUITE_V3.contract_sha256});
 
+// Когда решение ПРЕЖНЕГО набора допустимо в проверяемом снимке. Боевой набор один — v3; снимок с
+// решением набора v1 законен только как стартовый: он лежит в репозитории и на витрине до первого
+// сбора новым кодом. strict — проверка, которая стартового снимка видеть не может: кандидат на
+// публикацию (REQUIRE_LIVE=1) и снимок, переживший окно выпуска. Общее правило для гейта публикации
+// и сторожа: разойдись они, сбор либо не стартовал бы после выпуска, либо пропускал бы откат.
+export function acceptsSupersededSuiteV3(decision,{strict=false}={}){
+  return strict!==true&&isObject(decision)&&decision.policy_id===POLICY_SUITE_V1.id;
+}
+
 // «Дёшево» движок решает сам (согласие двух окон MVRV) и записывает баллом оценки: +1 ставится
 // только при cheap. Перцентили в записи округлены, поэтому признак берётся из балла, а не из них.
 const cheapOf=record=>isObject(record)?record.families?.valuation?.v3===CHEAP_SCORE:null;

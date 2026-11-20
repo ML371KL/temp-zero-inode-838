@@ -6,7 +6,7 @@ import { POLICY_SUITE_V1 } from "../docs/policy-suite-v1.mjs";
 import { evaluateActionGateV1 } from "../docs/action-gate-v1.mjs";
 import { POLICY_SUITE_V3 } from "../docs/policy-suite-v3.mjs";
 import { policySuiteDigestV1, sha256, verifyDecisionLogChainV1 } from "./forward-monitor-v1.mjs";
-import { policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
+import { acceptsSupersededSuiteV3, policySuiteDigestV3, reproduceDecisionV3 } from "./live-decision-v3.mjs";
 
 const DEFAULT_URL="https://tzi-838.pages.dev/snapshot.json";
 const ISSUE_TITLE="[monitor] BTC dashboard stale or invalid";
@@ -61,7 +61,7 @@ export function validateSnapshotV1(snapshot,now=Date.now()){
   // Боевой набор — v3. Окно выпуска: правка в main опережает первый сбор новым кодом на один цикл,
   // и свежий снимок с решением прежнего набора — штатная гонка, как и рассинхрон версии выше.
   // Протухший снимок прежнего набора — уже отказ: новый код не собирает.
-  const supersededInWindow=d?.policy_id===POLICY_SUITE_V1.id&&ageHours<=1.5,suite=supersededInWindow?POLICY_SUITE_V1:POLICY_SUITE_V3;
+  const supersededInWindow=acceptsSupersededSuiteV3(d,{strict:!(ageHours<=1.5)}),suite=supersededInWindow?POLICY_SUITE_V1:POLICY_SUITE_V3;
   const expectedPolicyHash=suite.contract_sha256;
   if(POLICY_SUITE_V1.contract_sha256!==policySuiteDigestV1()||POLICY_SUITE_V3.contract_sha256!==policySuiteDigestV3())issues.push("local_policy_contract_mismatch");
   if(snapshot?.policy_suite?.contract_sha256!==expectedPolicyHash)issues.push("snapshot_policy_contract_mismatch");
