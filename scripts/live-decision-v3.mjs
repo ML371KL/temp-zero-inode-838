@@ -141,6 +141,21 @@ export function fixSnapshotV3(calc,view){
   };
 }
 
+// Снимок фикса из записи движка (вид линии, поле inputs) — неполный: без баллов семей, которые
+// движок берёт готовыми. Отмечен partial.
+export function fixFromRecordV3(view){
+  const r=isObject(view?.inputs)?view.inputs:null;
+  if(!r||!isObject(r.blocks))return null;
+  const own=key=>num(r.families?.[key]?.v3),pick=o=>Object.fromEntries(Object.entries(o).filter(([,x])=>x!==null));
+  return{
+    families:{demand:pick({exchange_supply:own("exchange_supply")}),cycle:pick({valuation:own("valuation"),network:own("network"),trend:own("trend")})},
+    blocks:Object.fromEntries(Object.entries(r.blocks).map(([k,x])=>[k,num(x)])),
+    recovery_state:str(r.recovery?.state),macro_shock_state:str(r.macro_shock_state),
+    mvrv_percentile:num(r.mvrv_percentile),mvrv_percentile_deep:num(r.mvrv_percentile_deep),
+    floor_closes:Number.isInteger(view?.floor?.closes)?view.floor.closes:0,cheap:cheapOf(r)===true,partial:true,
+  };
+}
+
 /*
  * Состояние боевого среднесрочного режима в прежней форме regime_meta.strategic.
  *   count — сколько фиксов подряд движок видит этого кандидата; since — фикс, на котором он появился;
@@ -154,7 +169,11 @@ export function liveRegimeMetaV3({decision,view=null,previousMeta=null,now,calc=
   const newFix=fixAt!==null&&fixAt!==(prev?.fix_at??null),same=prev!==null&&prev.candidate===candidate;
   const count=same?(Number(prev.count)||1)+(newFix?1:0):1,since=same&&str(prev.since)?prev.since:fixAt??iso(now);
   const pending=isObject(v?.pending)?{candidate:str(v.pending.candidate),fixes:num(v.pending.fixes),need:num(v.pending.need)}:null;
-  const fix=newFix&&calc?fixSnapshotV3(calc,v)??prev?.fix??null:prev?.fix??null;
+  // Снимка прошлого фикса может не быть: первый прогон после выпуска (фикс делал прежний код) или
+  // отказ расчёта на фиксе. Тогда берётся то, что движок сам записал о своём последнем фиксе, —
+  // блоки, детекторы, оценка и четыре семьи, которые он считает сам; остальные семьи появятся на
+  // следующем фиксе.
+  const fix=newFix&&calc?fixSnapshotV3(calc,v)??prev?.fix??fixFromRecordV3(v):prev?.fix??fixFromRecordV3(v);
   return{
     state,candidate,count,since,downStreak:0,anchor:state,
     ...(pending&&str(v?.next_fix_at)?{hold_until:v.next_fix_at}:{}),

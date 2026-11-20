@@ -679,7 +679,7 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // леджера, а не из ничем не покрытого бокового поля. Все значения ??null (см. класс input_hash).
   // Кандидат v3 и его линии — отдельным блоком `v3`, только когда движок вариантов вызывался.
   const v2Ledger={target_pct:finite(v2Target)?Number(v2Target):null,recovery_closes:monitor.v2_shadow_state?.closes??null,mvrv_percentile_deep:v2Inputs?.mvrv_percentile_deep??null,theta_pct:finite(monitor.v2_theta?.pct)?Number(monitor.v2_theta.pct):null};
-  const logEntry={t:at,previous_log_hash:priorLogHash,policy_hash:decision.policy_hash,decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,status:decision.status,strategic:decision.strategic,tactical:decision.tactical,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,quality:decision.quality.status,source_vintages_sha256:sourceVintages?.contract_sha256||null,hysteresis,v2:v2Ledger,...(variantRun.ran?{v3:optional("v3_ledger",()=>variantLedgerV1(variantRun,sha256),null)}:{}),...(referenceDecision?{v1:{strategic:ref.strategic??null,target_pct:ref.target_pct??null}}:{})};
+  const logEntry={t:at,previous_log_hash:priorLogHash,policy_hash:decision.policy_hash,decision_hash:decision.decision_hash,state_hash:decision.state_hash,input_hash:decision.input_hash,status:decision.status,strategic:decision.strategic,tactical:decision.tactical,base_target_pct:decision.base_target_pct,target_pct:decision.target_pct,binding_overlays:decision.binding_overlays,quality:decision.quality.status,source_vintages_sha256:sourceVintages?.contract_sha256||null,hysteresis,v2:v2Ledger,...(variantRun.ran?{v3:optional("v3_ledger",()=>variantLedgerV1(variantRun,sha256),null)}:{})};
   logEntry.log_hash=sha256(logEntry);
   monitor.decision_log.push(logEntry);
   monitor.decision_log=monitor.decision_log.slice(-cfg.observation_log_limit);
@@ -720,7 +720,11 @@ export function updateForwardMonitorV1({previousMonitor,now,price,decision,input
   // кандидат хуже удерживаемого режима; снимок без данных серию не прерывает (v1 сохраняет счётчик),
   // кандидат не хуже режима — прерывает. Аварийный режим и «недостаточно данных» подтверждений не
   // требуют и в счёт не идут. Без regimeMeta (прежний вызов) принимается флаг сборщика.
-  const hystMeta=referenceRegimeMeta??regimeMeta,hystPrevious=previousEntry?.v1?.strategic??previousEntry?.strategic;
+  // Прежний режим v1 для счётчиков его гистерезиса: после смены боевого набора в журнале решений лежит
+  // режим боевой политики, поэтому последний режим опоры монитор помнит сам (одно поле, а не блок в
+  // каждой из 400 записей журнала).
+  const hystMeta=referenceRegimeMeta??regimeMeta,hystPrevious=monitor.reference_last?.strategic??previousEntry?.strategic;
+  if(referenceDecision)monitor.reference_last={strategic:ref.strategic??null,target_pct:ref.target_pct??null};
   if(shadowHysteresis||hystMeta?.strategic)optional("shadow_hysteresis",()=>{
     const prior=monitor.shadow_hysteresis||{};
     const resets=(Number(prior.upgrade_hold_resets_by_degraded)||0)+(Number(shadowHysteresis?.upgrade_hold_reset_by_degraded)||0);
