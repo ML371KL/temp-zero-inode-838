@@ -328,6 +328,57 @@ override should bypass the quality gate is a rule of the frozen v1 action gate, 
 lines introduced with v2.14.0; on return they are restarted from that moment
 (`monitoring.line_restarts`), and the candidate's 180 shadow days are counted anew.
 
+## Trend lines (shadow, 2026-11-20)
+
+Two observation-only lines run in the forward monitor since the 2026-11-20 audit
+([`scripts/monitor-trend-lines-v1.mjs`](scripts/monitor-trend-lines-v1.mjs), published under
+`monitoring.trend_lines`). They read nothing from the live decision and write nothing to the
+decision log; a failure of their calculation leaves a record in `monitoring.optional_errors` and the
+lines hold their previous share.
+
+- `trend_ma3` — a benchmark: the BTC share equals the fraction of the 50-, 100- and 200-day moving
+  averages that the last daily close is at or above (0, ⅓, ⅔ or 1).
+- `trend_demand_b1` — a candidate: the same share times a demand brake (the block score of the ETF,
+  stablecoin and exchange-supply families: 1 at a score of 0 or higher, 0.5 at −20 or lower, linear in
+  between; the CFTC family is not part of it), and times 0.25 while both the macro and the demand block
+  are at or below −20.
+
+Both decide once per UTC day, on the first snapshot at or after 06:00 UTC, from closed daily candles;
+the family scores are the ones the frozen v1 scoring produced on that snapshot. The display gate does
+not apply to them, as it does not apply to the other benchmarks.
+
+**Why they exist.** On the 2013–2026 reconstruction (decision on the daily close, trade on the next
+close, 10 bps per full turnover) policy v1 is statistically indistinguishable from `trend_ma3` by
+excess Sharpe since 2018-06 (1.12 against 1.01; in a 60-day block bootstrap v1 is not better in 25–36%
+of resamples), while v1 was calibrated on that history and the benchmark was not. A benchmark the
+policy cannot be told apart from belongs next to it in the forward record. The demand brake is the
+one addition that improved the benchmark in every check: excess Sharpe higher and drawdown shallower
+in 18 of 18 comparisons (six sets of averages × three windows, including 2013–2018-05), and BTC's
+return on up-trend days lower with adverse demand in each of four eras since 2013.
+
+Annual return / excess Sharpe / max drawdown:
+
+| Window | `trend_ma3` | `trend_demand_b1` | policy v1 | buy & hold |
+|---|---|---|---|---|
+| 2018-06 … 2026-11 | 43.1 / 1.01 / −46.4 | 46.7 / 1.22 / −42.5 | 32.2 / 1.12 / −40.8 | 28.3 / 0.67 / −76.7 |
+| 2013 … 2018-05 | 229.3 / 1.95 / −70.6 | 174.3 / 2.20 / −47.8 | 58.2 / 1.70 / −39.9 | 220.7 / 1.72 / −84.9 |
+| ETF era, 2024-03 … | 7.6 / 0.25 / −32.8 | 13.4 / 0.44 / −22.0 | 15.8 / 0.68 / −15.5 | 0.4 / 0.15 / −53.1 |
+
+**What this is not.** It is not evidence: the candidate was found on the same history it is scored
+on, in a second pass, as the best of about a dozen variants; exchange flows before 2018 use today's
+address labelling. A three-axis rule (trend, macro and valuation as fixed shares of the allocation)
+was tested first and rejected — it does not beat `trend_ma3`; an "early entry on cheap valuation"
+rule was tested and added nothing. Do not resurrect either without new evidence. Against v1 the
+candidate is a different risk profile rather than an improvement: it captured 71% of BTC's gain in
+rising years against 33%, lost 11% on average in falling years against 4%, and is behind v1 in the
+ETF era. Its known weaknesses are execution delay (a second day costs about 9pp a year) and turnover
+(about 1,660% a year).
+
+**Declared statement** (no machine status is attached to it): on a common window of at least 365
+days `trend_demand_b1` has excess Sharpe not lower and drawdown not deeper than `trend_ma3`. The
+lines carry no acceptance criteria and install nothing; replacing the live policy remains a separate
+release with the owner's approval.
+
 ## Shadow layer: declared statements
 
 Each of the eight non-voting cards has one statement declared in advance

@@ -306,5 +306,7 @@ assert.equal(graftForwardMonitorV1(null,graftPack).started_at,archiveMonitor.sta
 
 // Правки аудита 2026-10-10 (M1–M9) — отдельным модулем, чтобы этот файл остался сценарным.
 await import("./monitor-audit-test.mjs");
+// Теневые трендовые линии (аудит 2026-11-20) — тоже отдельным модулем.
+await import("./monitor-trend-lines-test.mjs");
 
 console.log("Forward monitor scenarios OK: server decision, costs, shadows, vintages, hash chain, graft, reset alarm, live alarm");

@@ -38,6 +38,9 @@ export const STRATEGY_REGISTRY_V1=deepFreeze({
   v1_floor_handoff:{kind:"attribution",label:"v1, пол до провала подтверждений"},
   v1_no_cftc:{kind:"attribution",label:"v1 без CFTC"},
   policy_v1_tranched:{kind:"execution",label:"v1, исполнение траншами"},
+  // Трендовые линии (scripts/monitor-trend-lines-v1.mjs, объявлены 2026-11-20).
+  trend_ma3:{kind:"benchmark",label:"три средние 50/100/200"},
+  trend_demand_b1:{kind:"candidate",label:"кандидат Б1: тренд × спрос"},
 });
 export const strategyKindV1=name=>STRATEGY_REGISTRY_V1[name]?.kind||"benchmark";
 
