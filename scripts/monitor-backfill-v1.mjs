@@ -25,7 +25,8 @@ const deepFreeze=value=>{if(value&&typeof value==="object"&&!Object.isFrozen(val
 // Род и подпись каждой линии монитора. kind: live — живая политика; benchmark — ориентир;
 // candidate — теневой кандидат; attribution — «v1 с одной правкой»; execution — исполнение по правилу панели.
 export const STRATEGY_REGISTRY_V1=deepFreeze({
-  policy_v1:{kind:"live",label:"политика v1"},
+  // С выпуска 2.15.0 боевой набор — v3; ключ линии остаётся прежним: её NAV — то, что панель говорила делать.
+  policy_v1:{kind:"live",label:"боевая политика (v1 до выпуска 2.15.0, затем v3)"},
   previous_policy_shadow:{kind:"benchmark",label:"прежняя политика v0"},
   buy_and_hold:{kind:"benchmark",label:"BTC купить и держать"},
   fixed_50:{kind:"benchmark",label:"постоянные 50 %"},
@@ -33,11 +34,12 @@ export const STRATEGY_REGISTRY_V1=deepFreeze({
   trend_vol_25:{kind:"benchmark",label:"тренд и волатильность 25 %"},
   policy_v2_shadow:{kind:"candidate",label:"кандидат v2"},
   static_theta:{kind:"benchmark",label:"static Θ, прежний ноль"},
-  policy_v3_shadow:{kind:"candidate",label:"кандидат v3"},
+  policy_v3_shadow:{kind:"attribution",label:"правила v3, след с 13.10 (после 2.15.0 — как боевая)"},
   v1_daily_close:{kind:"attribution",label:"v1 по суточному фиксу"},
   v1_floor_handoff:{kind:"attribution",label:"v1, пол до провала подтверждений"},
   v1_no_cftc:{kind:"attribution",label:"v1 без CFTC"},
-  policy_v1_tranched:{kind:"execution",label:"v1, исполнение траншами"},
+  policy_v1_tranched:{kind:"execution",label:"боевая политика, исполнение траншами"},
+  policy_v1_frozen:{kind:"attribution",label:"прежние правила v1 (после 2.15.0)"},
   // Трендовые линии (scripts/monitor-trend-lines-v1.mjs, объявлены 2026-11-20).
   trend_ma3:{kind:"benchmark",label:"три средние 50/100/200"},
   trend_demand_b1:{kind:"candidate",label:"кандидат Б1: тренд × спрос"},

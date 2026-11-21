@@ -180,6 +180,7 @@ const remoteAssets={
   "https://example.test/dashboard/action-gate-v1.mjs":readFileSync(new URL("../docs/action-gate-v1.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/policy-v2-candidate.mjs":readFileSync(new URL("../docs/policy-v2-candidate.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/policy-v3-candidate.mjs":readFileSync(new URL("../docs/policy-v3-candidate.mjs",import.meta.url),"utf8"),
+  "https://example.test/dashboard/policy-suite-v3.mjs":readFileSync(new URL("../docs/policy-suite-v3.mjs",import.meta.url),"utf8"),
   "https://example.test/dashboard/shadow-hypotheses-v1.mjs":readFileSync(new URL("../docs/shadow-hypotheses-v1.mjs",import.meta.url),"utf8"),
 };
 const fetchAssets=async url=>new Response(remoteAssets[String(url)]??"",{status:String(url) in remoteAssets?200:404});
@@ -191,7 +192,7 @@ assert.ok((await validatePublishedAssetsV1("https://example.test/dashboard/snaps
   const missingNew=async url=>/policy-v3-candidate|shadow-hypotheses-v1/.test(String(url))?new Response("",{status:404}):fetchAssets(url);
   const checked=await validatePublishedAssetsV1("https://example.test/dashboard/snapshot.json",missingNew);
   assert.deepEqual(checked.issues,["asset_http:policy-v3-candidate.mjs:404","asset_http:shadow-hypotheses-v1.mjs:404"],"an unpublished shadow module must trip the external monitor");
-  assert.equal(checked.checked_assets,9);
+  assert.equal(checked.checked_assets,10);
 }
 
 // Shadow v0: оверлеи не применяются в emergency (замороженная семантика v0, backtest/patch6.py).
@@ -308,5 +309,7 @@ assert.equal(graftForwardMonitorV1(null,graftPack).started_at,archiveMonitor.sta
 await import("./monitor-audit-test.mjs");
 // Теневые трендовые линии (аудит 2026-11-20) — тоже отдельным модулем.
 await import("./monitor-trend-lines-test.mjs");
+// Смена боевого набора правил v1 → v3 (выпуск 2.15.0).
+await import("./monitor-suite-switch-test.mjs");
 
 console.log("Forward monitor scenarios OK: server decision, costs, shadows, vintages, hash chain, graft, reset alarm, live alarm");

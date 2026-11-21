@@ -2,7 +2,86 @@
 
 ## Live policy
 
-`btc-decision-suite-v1` is **frozen as of 2026-07-19**. It contains three versioned contracts:
+`btc-decision-suite-v3` is the **live suite since release 2.15.0** (owner decision of 2026-11-20). It
+names what makes the live decision and commits to it by hash
+([`docs/policy-suite-v3.mjs`](docs/policy-suite-v3.mjs)):
+
+- family and block scores — the locked sections of `btc-model-policy-v1`, unchanged;
+- regime, floors and allocation — the engine [`docs/policy-v3-candidate.mjs`](docs/policy-v3-candidate.mjs),
+  revision 2, without a single edit (the suite pins the SHA-256 of the module text);
+- execution — `btc-execution-policy-v1`.
+
+The rules the engine applies:
+
+- Base ladder: `0 / 5 / 20 / 45 / 95 / 100` percent of the user-defined BTC limit `B`.
+- **One decision per UTC day**, on the first snapshot at or after 06:00 UTC (the fix), from the closed
+  day: a worse regime is adopted on that fix, a better one on the second consecutive fix with the same
+  candidate; a missed day resets the count; between fixes the regime and the target do not change.
+- Recovery floor: `40 / 60 / 80%` by one, two and three consecutive fixes with the recovery detector
+  confirmed; blocked by a fired macro-shock detector; removed on the fix where the detector is not
+  confirmed.
+- "Cheap" valuation — the recovery anchor (MVRV percentile below 25) and the capitulation floor `40%`
+  (percentile at or below 10) — only when the rolling 4-year window **and** the full history since 2010
+  agree; if the deep series is short or stale the rule honestly falls back to one window and says so
+  (`decision.inputs.deep_window_used`).
+- Its own scores for four families: network (30-day hashrate means), exchange supply, valuation and
+  trend (last closed day). The other eight families are read as the locked v1 scoring produced them.
+- No euphoria cap and no verdict power for the distribution detector: neither could fire by
+  construction.
+- Emergency overrides everything immediately, on any snapshot; a fix without sufficient data produces
+  no target and the decision is paused.
+
+The collector makes the final server-side decision: it runs the engine once per snapshot and turns its
+view into the decision record ([`scripts/live-decision-v3.mjs`](scripts/live-decision-v3.mjs)). The
+browser never recalculates allocation. The record is verified by the rule of the suite it names —
+`allocationDecisionV3` from the regime, the floor rung and the "cheap" flag — in the publication gate
+(`scripts/self-test.mjs`) and in the external monitor (`scripts/monitor-live.mjs`);
+`scripts/live-decision-v3-test.mjs` pins the suite contract, the engine module hash and the record
+assembly. The published `regime`, `regime_meta.strategic` and `decision` describe the live suite;
+`live_inputs` is what the live rule reads on the current snapshot, `regime_meta.strategic.fix` is the
+same at the last fix. Metric cards, blocks and detectors keep showing the scores of the v1 method.
+
+### Decision record, 2026-11-20
+
+- **Objective.** Remove measurement artifacts of v1 from the live decision: hysteresis counted in
+  snapshots while the data are daily, floors switched by a single snapshot, "cheap" thresholds taken
+  from one rolling window.
+- **Basis.** The audit of 2026-11-20. The v1 capitulation threshold (10th percentile of 4-year MVRV)
+  rose from 0.95 in January 2026 to 1.20 in November because the 2022 bottom left the window; every
+  earlier firing of the floor happened at MVRV 0.77–0.98, and on 2026-11-19 it fired at 1.18. Over 124
+  forward days 9 of 20 target changes were floors switching on and off.
+- **What is installed.** Candidate v3 revision 2 exactly as declared on 2026-10-10 and revised on
+  2026-11-09. Nothing on top of it.
+- **Waived criterion.** "At least 180 shadow days" — waived by the owner on shadow day 37. The defects
+  of v1 are logical and visible without statistics; on the reconstruction the spread of "policy minus
+  its own constant share" over 124 days is −14.7 to +16.0pp (5th and 95th percentiles), so a forward
+  window of that length cannot tell the versions apart.
+- **Not installed.** A hysteresis band on the capitulation floor (enter at the 10th percentile, leave
+  at the 15–20th): the candidate does not have it and it never ran in shadow. Keeping the recovery floor
+  after the valuation anchor is lost: tested on 2026-10-10 with no gain; it runs as `v1_floor_handoff`.
+- **Expectation.** On history the candidate does not beat the rules of v1: on the same clock it gives
+  up about 2pp a year and takes a drawdown shallower by 5–6pp. The expected effect is fewer target
+  changes without an economic cause, not a higher return.
+- **Review.** The previous suite keeps running as the line `policy_v1_frozen`; the live line is compared
+  with it, with the three-moving-averages benchmark and with a constant share.
+
+The switch itself is recorded: the first decision of the new suite carries the new `policy_hash`, and
+the target-change entry of that snapshot is marked `policy_switch` with the cause "change of the live
+rules", not a market reason. The line key `policy_v1` remains the key of the live policy — its NAV is
+what the panel told the reader to do: v1 rules before release 2.15.0, v3 rules after.
+
+The publication gate accepts a committed snapshot that still carries a decision of the previous suite
+only as the starting snapshot of the release — the check runs *before* the first collection by the new
+code; a candidate for publication (`REQUIRE_LIVE=1`) and the external monitor outside the release
+window of 1.5 hours require a decision of suite v3.
+
+## Suite v1 — frozen, kept as the reference
+
+`btc-decision-suite-v1` is **frozen as of 2026-07-19** and was the live suite until release 2.15.0. It
+is not edited and keeps being computed on every snapshot: its locked scoring produces the family
+scores the live engine reads, its own decision is published under `reference_v1`, and the monitor
+tracks it as `policy_v1_frozen` and derives the v0 and v2 shadows from it. It contains three versioned
+contracts:
 
 - `btc-model-policy-v1`: block weights, critical coverage, regime bands, detector thresholds and hysteresis;
 - `btc-allocation-policy-v1`: the ladder and allocation overlays below;
@@ -14,11 +93,9 @@
 - Euphoria cap: `60%` at MVRV percentile `≥95`.
 - Emergency overrides every floor; insufficient data produces no target.
 
-The executable sources of truth are [`docs/model-policy-v1.mjs`](docs/model-policy-v1.mjs),
+The executable sources of truth of suite v1 are [`docs/model-policy-v1.mjs`](docs/model-policy-v1.mjs),
 [`docs/policy-v1.mjs`](docs/policy-v1.mjs), and
-[`docs/execution-policy-v1.mjs`](docs/execution-policy-v1.mjs). The collector makes the final
-server-side decision. The browser never recalculates allocation; it displays the decision, its
-quality status and a short decision hash. `scripts/policy-suite-lock-test.mjs` pins the full suite,
+[`docs/execution-policy-v1.mjs`](docs/execution-policy-v1.mjs). `scripts/policy-suite-lock-test.mjs` pins the full suite,
 including the exact executable text of the allocation and detector functions plus SHA-256 digests
 of the economically material scoring, regime and hysteresis code.
 
@@ -32,7 +109,7 @@ Files under `backtest/` are a frozen research archive. Their outputs may validat
 policy, but they are not configuration and are never read by the live engine or frontend. Re-running
 a backtest must not change live thresholds, weights, overlays, or allocation targets.
 
-Do not edit `policy-v1` in response to new historical results. A future policy change requires:
+Do not edit `policy-v1`, the v3 engine or the suite contracts in response to new historical results. A future policy change requires:
 
 1. a new immutable `policy-vN` contract, leaving every earlier contract reproducible;
 2. a written decision record with the objective, risk budget and pre-declared acceptance metrics;
@@ -82,7 +159,7 @@ Public hashes prove that recorded inputs did not change and reproduce the final 
 provider payloads remain in the rolling internal cache and cannot be reconstructed from the public
 snapshot alone.
 
-Policy v1 is monitored prospectively against the previous policy in shadow mode plus buy & hold,
+The live policy is monitored prospectively against the frozen v1 rules, the earlier policy in shadow mode plus buy & hold,
 fixed 50% BTC, cash and a simple trend/25%-volatility benchmark. Results include FRED DTB3 converted
 from Treasury-bill discount basis to an effective annual yield using a 91-day convention, 10 bps per
 full turnover, turnover, net return, drawdown, volatility and excess Sharpe.
@@ -127,10 +204,13 @@ independent two-hour monitor.
 Personal position sizing remains outside this contract; percentages retain their existing meaning as
 a share of the user-defined BTC risk limit `B`.
 
-## Policy v2 candidate (shadow, 2026-07-22)
+## Policy v2 candidate (shadow, 2026-07-22; not installed)
+
+Release 2.15.0 installed v3, which contains the v2 floor graduation; v2 and v3 were alternatives, so v2
+is closed as a candidate. The section is kept as the record of its declaration; its line keeps running.
 
 `btc-decision-suite-v2-candidate` ([`docs/policy-v2-candidate.mjs`](docs/policy-v2-candidate.mjs))
-runs **in shadow only**: the live target is still produced by frozen v1; the candidate's target,
+runs **in shadow only**, on top of the regime of the frozen v1 rules; the candidate's target,
 its graduation state, the R1/R2/R3 review triad and the divergence record are published under
 `monitoring.v2_candidate` / `monitoring.v2_review`, and its NAV is tracked as the
 `policy_v2_shadow` strategy next to `static_theta`, a trailing mean of the policy's daily targets
@@ -215,10 +295,16 @@ before acting on it: 61% of the shadow's advantage over v1 was earned in the 22�
 candidate was designed after, only two episodes began after its creation, and the noise of a Sharpe
 gap over 90 days is 0.19 — at a true difference of zero the −0.10 threshold fails in 30% of cases.
 
-## Policy v3 candidate (shadow, 2026-10-10)
+## Policy v3 candidate (declared 2026-10-10; installed as the live suite by release 2.15.0)
+
+This section is the candidate's declaration as it was written while it ran in shadow; it is kept
+unchanged below as the record of what was installed and on what evidence. The pre-declared acceptance
+at its end was **not** met in full — the 180-day criterion was waived by the owner (see "Decision
+record, 2026-11-20" above). The line `policy_v3_shadow` keeps its own record since 2026-10-13 and
+coincides with the live line after the release.
 
 `btc-decision-suite-v3-candidate` ([`docs/policy-v3-candidate.mjs`](docs/policy-v3-candidate.mjs))
-runs **in shadow only**, next to v2: the live target is still produced by frozen v1. It collects
+ran **in shadow only**, next to v2, while the live target was produced by frozen v1. It collects
 what the 2026-10-10 audit showed to be measurement artifacts in the decision rule. The ladder
 `0 / 5 / 20 / 45 / 95 / 100`, the ±20 block bands, the set of voting families, the gate tree with
 the downgrade anchored on demand, the valuation gate, the macro-shock cap and the 40% capitulation
@@ -330,7 +416,7 @@ lines introduced with v2.14.0; on return they are restarted from that moment
 
 ## Trend lines (shadow, 2026-11-20)
 
-Two observation-only lines run in the forward monitor since the 2026-11-20 audit
+Two observation-only lines run in the forward monitor since the 2026-11-20 audit (the comparisons below with "policy v1" are with the rules of suite v1)
 ([`scripts/monitor-trend-lines-v1.mjs`](scripts/monitor-trend-lines-v1.mjs), published under
 `monitoring.trend_lines`). They read nothing from the live decision and write nothing to the
 decision log; a failure of their calculation leaves a record in `monitoring.optional_errors` and the

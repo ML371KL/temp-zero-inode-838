@@ -5,6 +5,8 @@
 // режима берётся из `regime_birth.strategic`, причина оверлея — из `tick_diff` этого же снимка.
 // Модуль ничего не решает: он только записывает, что уже решила замороженная политика.
 
+import { POLICY_V3_CANDIDATE } from "../docs/policy-v3-candidate.mjs";
+
 const finite=x=>x!==null&&x!==""&&Number.isFinite(Number(x));
 export const TARGET_CHANGE_LOG_LIMIT=60;
 
@@ -86,22 +88,50 @@ export function targetChangeCauseV1({kind,strategicFrom,strategicTo,overlaysFrom
 
 // Запись о смене цели либо null, если цель не менялась. `previous` — состояние до этого прогона:
 // последняя известная конечная цель, режим и оверлеи предыдущей записи журнала решений.
-export function targetChangeRecordV1({at,price,previous,decision,regimeBirth=null,tickDiff=null,candidateSince=null,gateOpen=true}={}){
+// Короткое имя набора правил для текста: «btc-decision-suite-v3» → «v3».
+const suiteLabel=id=>String(id??"").match(/suite-(v\d+)/)?.[1]||"?";
+// Причина смены цели на прогоне, где сменился набор правил. Разница соседних снимков здесь причиной
+// не называется: цель изменило правило, а не рынок.
+function policySwitchCause(policySwitch,{strategicFrom,strategicTo,overlaysFrom,overlaysTo}){
+  const added=overlaysTo.filter(o=>!overlaysFrom.includes(o)),removed=overlaysFrom.filter(o=>!overlaysTo.includes(o));
+  const parts=[`смена боевых правил ${suiteLabel(policySwitch.from)} → ${suiteLabel(policySwitch.to)}`,...added.map(o=>`${OVERLAY[o]||o} включён`),...removed.map(o=>`${OVERLAY[o]||o} снят`)];
+  if(strategicFrom!==strategicTo)parts.push(`режим «${REGIME[strategicFrom]||strategicFrom}» → «${REGIME[strategicTo]||strategicTo}»`);
+  return{text:parts.join("; "),families:[],detectors:[],candidate_since:null};
+}
+// Шаг цели без смены режима и без смены набора оверлеев. У набора v3 это ступень пола восстановления:
+// 40 → 60 → 80 % по фиксам подряд с подтверждённым детектором; после пропущенных суток счёт фиксов
+// начинается заново, и пол опускается на первую ступень. Причина давней смены режима (regime_birth
+// текущего кандидата) на таком шаге была бы ложной — названа ступень.
+const ORDINAL=["первом","втором","третьем","четвёртом","пятом"];
+function floorStepCause(decision,from,to){
+  const total=POLICY_V3_CANDIDATE.floor_ladder_pct.length,closes=decision?.inputs?.floor_closes;
+  const rung=Number.isInteger(closes)&&closes>=1&&closes<=total?closes:null,head=`пол восстановления: ${rung?`ступень ${rung} из ${total}`:`ступень изменилась`}`;
+  const reset=Array.isArray(decision?.reason_codes)&&decision.reason_codes.includes("missed_fix_reset");
+  const why=Number(to)>Number(from)?(rung&&ORDINAL[rung-1]?`детектор подтверждён на ${ORDINAL[rung-1]} фиксе подряд`:"детектор подтверждён ещё на одном фиксе подряд")
+    :reset?"счёт фиксов начат заново после пропущенных суток":null;
+  return{text:why?`${head} — ${why}`:head,families:[],detectors:[],candidate_since:null};
+}
+export function targetChangeRecordV1({at,price,previous,decision,regimeBirth=null,tickDiff=null,candidateSince=null,gateOpen=true,policySwitch=null}={}){
   const to=decision?.target_pct,from=previous?.target_pct;
   if(!finite(to)||(finite(from)&&Number(from)===Number(to)))return null;
   const overlaysFrom=Array.isArray(previous?.binding_overlays)?previous.binding_overlays:[],overlaysTo=Array.isArray(decision.binding_overlays)?decision.binding_overlays:[];
   const strategicFrom=previous?.strategic??null,strategicTo=decision.strategic??null;
   const start=!finite(from);
   const regimeChanged=strategicFrom!==strategicTo,overlayChanged=JSON.stringify(overlaysFrom)!==JSON.stringify(overlaysTo);
-  const kind=start?"start":regimeChanged&&overlayChanged?"both":overlayChanged?"overlay":"regime";
+  const floorStep=!start&&!regimeChanged&&!overlayChanged&&overlaysTo.includes("recovery_floor");
+  const kind=start?"start":regimeChanged&&overlayChanged?"both":overlayChanged||floorStep?"overlay":"regime";
   const cause=start
     ?{text:`старт наблюдения: режим «${REGIME[strategicTo]||strategicTo}»`,families:[],detectors:[],candidate_since:null}
+    :policySwitch?policySwitchCause(policySwitch,{strategicFrom,strategicTo,overlaysFrom,overlaysTo})
+    :floorStep?floorStepCause(decision,from,to)
     :targetChangeCauseV1({kind,strategicFrom,strategicTo,overlaysFrom,overlaysTo,regimeBirth,tickDiff,candidateSince});
   return{
     t:at,from_pct:start?null:Number(from),to_pct:Number(to),direction:start?"start":Number(to)>Number(from)?"up":"down",price:finite(price)?Number(price):null,
     strategic_from:strategicFrom,strategic_to:strategicTo,overlays_from:overlaysFrom,overlays_to:overlaysTo,kind,cause,
     // Смена при закрытом гейте витрины записывается, но помечается: панель цель не показывала, монитор её не исполнял.
     ...(gateOpen?{}:{gate:"closed"}),
+    // Запись, на которой сменился набор правил, помечена: уведомления и витрина не объясняют её рынком.
+    ...(policySwitch&&!start?{policy_switch:{from:policySwitch.from??null,to:policySwitch.to??null}}:{}),
   };
 }
 

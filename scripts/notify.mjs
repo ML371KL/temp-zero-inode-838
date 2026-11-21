@@ -373,26 +373,48 @@ function changeLogSteps(log) {
         kind: ["regime", "overlay", "both"].includes(e.kind) ? e.kind : "",
         price: finite(e.price) ? e.price : null,
         cause: text && !BARE_CAUSE.test(text) ? { text, families: asList(cause.families).filter(asObject) } : null,
-        // момент рождения принятого кандидата нужен и без причины: по нему видно, выдержан ли срок
+        // момент рождения принятого кандидата нужен и без причины: по нему видно, на каком фиксе он появился
         born: asText(cause.candidate_since),
+        // запись, на которой сменился набор боевых правил: цель изменило правило, а не рынок
+        policy_switch: asObject(e.policy_switch) ? { from: asText(e.policy_switch.from), to: asText(e.policy_switch.to) } : null,
       };
     })
     .filter((s) => finite(s.t) && finite(s.to))
     .sort((a, b) => a.t - b.t);
 }
 
-// Запись сборщика о рождении кандидата (regime_birth.strategic) и разница такта (tick_diff) —
-// в форму, которой дальше можно верить: списки — списки объектов, момент — строка.
+// Запись сборщика о рождении кандидата (regime_birth.strategic) — в форму, которой дальше можно
+// верить: списки — списки объектов, момент — строка. Разницу соседних снимков (tick_diff) бот
+// больше не читает: набор v3 решает на фиксе, и причиной служит разница двух фиксов.
 const rowsOf = (x) => asList(x).filter(asObject);
 function birthOf(raw) {
   const b = asObject(raw);
   if (!b || !asText(b.candidate)) return null;
   return { t: asText(b.t), candidate: b.candidate, blocks: asObject(b.blocks) || {}, families: rowsOf(b.families), detectors: rowsOf(b.detectors), note: asText(b.note) };
 }
-function tickOf(raw) {
-  const d = asObject(raw);
-  if (!d) return null;
-  return { families: rowsOf(d.families), detectors: rowsOf(d.detectors), mvrv_percentile: asObject(d.mvrv_percentile) };
+// То, что боевое правило набора v3 читает на ЭТОМ прогоне (live_inputs сборщика): оценки трёх
+// направлений как их видит движок, полосы, кандидат до гистерезиса, детектор разворота и оба
+// перцентиля MVRV. Карточки, блоки и детекторы снимка публикуются по методике v1, а для четырёх
+// семей (сеть, биржи, оценка, тренд) движок считает свои баллы — поэтому пороги и «строка правила»
+// читаются отсюда, а не из карточек. Решает правило на фиксе; между фиксами это «что видно сейчас».
+function liveInputsOf(raw) {
+  const li = asObject(raw);
+  if (!li) return null;
+  const num = (x) => (finite(x) ? x : null);
+  const rec = asObject(li.recovery) || {};
+  const blocks = {}, bands = {};
+  for (const k of ["macro", "demand", "cycle"]) {
+    if (finite(asObject(li.blocks)?.[k])) blocks[k] = li.blocks[k];
+    if (asText(asObject(li.bands)?.[k])) bands[k] = li.bands[k];
+  }
+  return {
+    blocks, bands, candidate: asText(li.candidate),
+    valuation: num(asObject(asObject(li.families)?.cycle)?.valuation),
+    recovery: asText(rec.state), anchor: typeof rec.anchor === "boolean" ? rec.anchor : null, supports: num(rec.supports),
+    macro_shock: asText(li.macro_shock_state),
+    mvrv_pct: num(li.mvrv_percentile), mvrv_deep: num(li.mvrv_percentile_deep),
+    cheap: typeof li.cheap === "boolean" ? li.cheap : null,
+  };
 }
 
 // Шаг ряда в сутках (медиана промежутков последних точек) — по нему видно, календарный ли ряд.
@@ -501,12 +523,22 @@ function fromSnapshotJSON(snap) {
       ].filter(Boolean).join(" · "),
   }));
   // Доля и всё, что о ней посчитал движок. Сообщение о смене доли собирается ИЗ ЗАПИСИ РЕШЕНИЯ
-  // (режим, базовая ступень, оверлей, кандидат и граница удержания, цена), а не из разницы двух
-  // соседних снимков: движок меняет опубликованный режим не в тот такт, когда сдвинулись
-  // показатели (понижение — вторым снимком, повышение — через 48 часов), и к моменту смены цели
-  // соседние снимки одинаковы. На этом разница снимков дала пустую причину в 8 сменах из 9.
+  // (режим, базовая ступень, оверлей, кандидат, фикс и ступень пола, цена), а не из разницы двух
+  // соседних снимков: движок решает раз в сутки, на фиксе, и повышение принимает только на втором
+  // фиксе подряд — к моменту смены цели соседние снимки одинаковы. На этом разница снимков дала
+  // пустую причину в 8 сменах из 9 ещё при правилах v1.
   const dec = snap.decision || {};
   const meta = snap.regime_meta?.strategic || null;
+  const inp = asObject(dec.inputs) || {};
+  // Набор боевых правил называет само решение. По нему видно и смену набора между двумя снимками:
+  // на таком шаге цель изменило правило, а не рынок.
+  const suite = asText(dec.policy_id);
+  const live = liveInputsOf(snap.live_inputs);
+  const pendingOf = (raw) => {
+    const p = asObject(raw);
+    return p && asText(p.candidate) ? { candidate: p.candidate, fixes: finite(p.fixes) ? p.fixes : null, need: finite(p.need) ? p.need : null } : null;
+  };
+  const floorMeta = asObject(asObject(meta)?.floor);
   const blocks = {};
   for (const [k, b] of Object.entries(snap.blocks || {})) {
     const fams = Object.keys(b?.strategic?.families || {}).length;
@@ -519,8 +551,6 @@ function fromSnapshotJSON(snap) {
   const overlays = dec.binding_overlays || [];
   const state = snap.regime?.strategic || dec.strategic || "";
   const ids = snap.policy_components || {};
-  const histT = (snap.history || []).slice(-7).map((r) => Date.parse(r?.t || "")).filter(finite);
-  const histGaps = histT.slice(1).map((t, k) => (t - histT[k]) / 60000).sort((a, b) => a - b);
   // Гейт действия витрины (docs/action-gate-v1.mjs): цель показывается, только когда решение
   // actionable, его качество good или degraded и монитор не приостановил действие. Иначе витрина
   // печатает паузу вместо цели — и для бота это та же пауза, даже если target_pct в снимке число.
@@ -539,20 +569,36 @@ function fromSnapshotJSON(snap) {
     price: finite(snap.price) ? snap.price : null,
     status: dec.status || "",
     state,
+    suite,
+    // какой набор сменён этим (публикует сам набор) — на случай шага выпуска без записи в журнале
+    supersedes: asText(asObject(snap.policy_suite)?.supersedes),
+    // кандидат последнего фикса; count — сколько фиксов подряд движок видит его, since — фикс, на
+    // котором он появился; hold_until — следующий фикс, пока повышение ждёт подтверждения
     candidate: meta?.candidate || "",
     since: meta?.since || "",
     hold_until: meta?.hold_until || "",
     count: finite(meta?.count) ? meta.count : null,
+    // суточный фикс: когда принято действующее решение и когда следующее; pending — повышение,
+    // ждущее второго фикса ({candidate, fixes, need}); ступень пола — число фиксов подряд с
+    // подтверждённым детектором разворота (0 — пола нет)
+    fix_at: asText(meta?.fix_at) || asText(inp.fix_at),
+    next_fix_at: asText(meta?.next_fix_at) || asText(inp.next_fix_at),
+    pending: pendingOf(meta?.pending) || pendingOf(inp.pending),
+    floor_closes: finite(floorMeta?.closes) ? floorMeta.closes : finite(inp.floor_closes) ? inp.floor_closes : null,
     base: finite(dec.base_target_pct) ? dec.base_target_pct : null,
     overlays,
     ladder: dec.regime_targets_pct || null,
-    blocks: Object.fromEntries(Object.entries(blocks).map(([k, b]) => [k, b.score])),
-    mvrv_pct: finite(dec.inputs?.mvrv_percentile) ? dec.inputs.mvrv_percentile : finite(mvrv.value_num) ? mvrv.value_num : null,
-    mvrv_score: finite(mvrv.score) ? mvrv.score : null,
-    recovery: detState("recovery").state || dec.inputs?.recovery_state || "",
-    recovery_inputs: detState("recovery").inputs || "",
-    macro_shock: detState("macro_shock").state || dec.inputs?.macro_shock_state || "",
-    distribution: detState("distribution").state || "",
+    // Оценки направлений: у набора v3 — те, что читает боевое правило (live_inputs), а не баллы
+    // карточек: карточки считаются по методике v1 и на четырёх семьях с решением расходятся.
+    blocks: suite === V3.suite ? { ...(live?.blocks || {}) } : Object.fromEntries(Object.entries(blocks).map(([k, b]) => [k, b.score])),
+    // Входы решения — как их записал фикс: перцентиль MVRV за 4 года и по всей истории («дёшево» —
+    // только при согласии обоих окон), состояние детектора разворота и макрошока.
+    mvrv_pct: finite(inp.mvrv_percentile) ? inp.mvrv_percentile : finite(mvrv.value_num) ? mvrv.value_num : null,
+    mvrv_deep: finite(inp.mvrv_percentile_deep) ? inp.mvrv_percentile_deep : null,
+    cheap: typeof inp.cheap === "boolean" ? inp.cheap : null,
+    recovery: suite === V3.suite ? asText(inp.recovery_state) : detState("recovery").state || asText(inp.recovery_state),
+    macro_shock: suite === V3.suite ? asText(inp.macro_shock_state) : detState("macro_shock").state || asText(inp.macro_shock_state),
+    live,
     integrity_inputs: detState("integrity").inputs || "",
     emergency: !!snap.override || overlays.includes("emergency_override") || state === "emergency",
     override: typeof snap.override === "string" ? snap.override : "",
@@ -564,14 +610,16 @@ function fromSnapshotJSON(snap) {
     bad_sources: Object.entries(snap.sources || {})
       .filter(([, v]) => v && v.state && v.state !== "ok" && v.decision_relevant !== false)
       .map(([k, v]) => ({ key: k, state: v.state, name: humanRelease(v.source || k) })),
-    // Правила, по которым пишется «что отменит», — замороженный контракт v1. Он повторён в этом
-    // файле (V1), и текст опирается на него, только пока панель объявляет те же идентификаторы.
+    // Правила, по которым пишется «что делать» и «что отменит», — боевой набор v3. Его числа
+    // повторены в этом файле (V3), и текст опирается на них, только пока решение называет этот
+    // набор, а панель объявляет те же идентификаторы. Снимок прежней формы (набор v1, до выпуска)
+    // читается без ошибок, но правил ему бот не приписывает: ни v1, ни v3.
     contract:
-      (!ids.allocation?.id || ids.allocation.id === V1.ids.allocation) &&
-      (!ids.model?.id || ids.model.id === V1.ids.model) &&
-      (!ids.execution?.id || ids.execution.id === V1.ids.execution) &&
-      (!finite(dec.base_target_pct) || !(state in V1.ladder) || V1.ladder[state] === dec.base_target_pct),
-    cadence_min: histGaps.length ? Math.round(histGaps[Math.floor(histGaps.length / 2)]) : null,
+      suite === V3.suite &&
+      (!ids.allocation?.id || ids.allocation.id === V3.ids.allocation) &&
+      (!ids.model?.id || ids.model.id === V3.ids.model) &&
+      (!ids.execution?.id || ids.execution.id === V3.ids.execution) &&
+      (!finite(dec.base_target_pct) || !(state in V3.ladder) || V3.ladder[state] === dec.base_target_pct),
     levels,
   };
   const hasDecision = !gate;
@@ -594,10 +642,7 @@ function fromSnapshotJSON(snap) {
     feed: {
       log: changeLogSteps(snap.monitoring?.target_change_log),
       history: decisionChanges(snap.history),
-      // последняя запись истории ДО текущего снимка: по ней видно, соседний ли снимок лежит в базе
-      prev_t: histT.length > 1 ? histT[histT.length - 2] : null,
       birth: birthOf(asObject(snap.regime_birth)?.strategic),
-      tick: tickOf(snap.tick_diff),
     },
   };
 
@@ -798,7 +843,7 @@ async function readPanel() {
 const KIND = {
   allocation: { emoji: "🔔", label: "изменение доли капитала" },
   pause: { emoji: "🔔", label: "пауза решения о доле" },
-  hold: { emoji: "⚠️", label: "удержание повышения" },
+  hold: { emoji: "⚠️", label: "ожидание повышения" },
   risk: { emoji: "⚠️", label: "сигнал риска" },
   quality: { emoji: "ℹ️", label: "предупреждение о данных" },
   service: { emoji: "ℹ️", label: "служебное сообщение" },
@@ -1140,45 +1185,66 @@ function stabilityLines(prevAlloc, curAlloc, prevState) {
 }
 
 /* ====================== ДОЛЯ BTC-ПАНЕЛИ: ФАКТЫ ДВИЖКА ======================
-   Правила движка, на которые опирается текст о доле. Это ЗАМОРОЖЕННЫЙ контракт policy v1 панели
-   (docs/policy-v1.mjs, docs/model-policy-v1.mjs, docs/execution-policy-v1.mjs). Он не импортируется:
-   файл начинался общим с макро-панелью, где этих модулей нет, и бот не зависит от модулей сайта.
-   Числа повторены здесь, а таблица режимов на КАЖДОМ снимке сверяется с кандидатом, которого
-   посчитал сам движок (engineAgrees): разошлись — строки «что отменит» честно сокращаются до
-   общих слов, и чужое правило движку не приписывается.                                        */
-const V1 = {
-  ids: { allocation: "btc-allocation-policy-v1", model: "btc-model-policy-v1", execution: "btc-execution-policy-v1" },
+   Правила, на которые опирается текст о доле, — боевой набор btc-decision-suite-v3 (выпуск 2.15.0:
+   docs/policy-suite-v3.mjs, движок docs/policy-v3-candidate.mjs; модель и исполнение — замки v1).
+   Они не импортируются: файл начинался общим с макро-панелью, где этих модулей нет, и бот не
+   зависит от модулей сайта. Числа повторены здесь, а таблица режимов на КАЖДОМ снимке сверяется с
+   кандидатом, которого на этом же прогоне посчитал сам движок (live_inputs.candidate, см.
+   engineAgrees): разошлись — строки «что отменит» честно сокращаются до общих слов, и чужое
+   правило движку не приписывается.
+
+   Что сообщения обязаны говорить о наборе v3 (и чем он отличается от прежнего v1):
+   · решение о среднесрочном режиме принимается раз в сутки, на ФИКСЕ — первом прогоне не раньше
+     06:00 UTC (09:00 МСК). Понижение — на этом же фиксе, повышение — на втором фиксе подряд с тем
+     же кандидатом; пропущенные сутки обнуляют счёт. Аварийный режим — сразу, на любом прогоне;
+   · пол восстановления растёт ступенями 40 / 60 / 80 % по одному, двум и трём фиксам подряд с
+     подтверждённым детектором разворота и снимается на фиксе;
+   · «дёшево» (якорь детектора разворота — перцентиль MVRV ниже 25; пол капитуляции — не выше 10)
+     считается только при согласии двух окон MVRV: четырёх лет и всей истории. Окна всей истории
+     может не быть (ряд короток или устарел) — тогда решает одно окно, как у v1;
+   · потолка эйфории нет, детектор «Дистрибуция» на режим и цель не влияет.
+   Снимку прежней формы (набор v1, до выпуска) правил не приписывается вовсе: ни v1, ни v3.     */
+const V3 = {
+  suite: "btc-decision-suite-v3",
+  ids: { allocation: "btc-decision-suite-v3-candidate", model: "btc-model-policy-v1", execution: "btc-execution-policy-v1" },
   bands: { adverse: -20, supportive: 20 },
-  // Базовая лестница. Снимок публикует цели режимов уже С УЧЁТОМ действующих оверлеев
-  // (regime_targets_pct: при включённом поле «переходный» там 80, а не 45), поэтому ступень
-  // режима без оверлея берётся отсюда — и сверяется с base_target_pct снимка.
+  // Базовая лестница (та же, что у v1). Снимок публикует цели режимов уже С УЧЁТОМ действующих
+  // полов (regime_targets_pct: при второй ступени пола «переходный» там 60, а не 45), поэтому
+  // ступень режима без оверлея берётся отсюда — и сверяется с base_target_pct снимка.
   ladder: { emergency: 0, defensive: 5, deteriorating: 20, transition: 45, unconfirmed_positive: 95, constructive: 100 },
-  holdHours: 48,         // повышение режима принимается после стольких часов непрерывного кандидата
-  recoveryAnchorPct: 25, // пол восстановления держится, пока MVRV-перцентиль ниже
-  recoveryNeed: 2,       // …и подтверждений не меньше двух из трёх
-  capitulationPct: 10,   // пол капитуляции: MVRV-перцентиль не выше
-  euphoriaPct: 95,       // потолок эйфории: MVRV-перцентиль не ниже
+  confirmUp: 2,              // повышение режима принимается на стольких фиксах подряд с тем же кандидатом
+  floorLadder: [40, 60, 80], // пол восстановления по числу фиксов подряд с подтверждённым детектором
+  recoveryAnchorPct: 25,     // якорь детектора разворота: MVRV-перцентиль ниже — в обоих окнах
+  recoveryNeed: 2,           // …и подтверждений не меньше двух
+  recoveryLegs: 3,           // …из трёх: тренд, потоки ETF, запас на биржах
+  capitulationPct: 10,       // пол капитуляции: MVRV-перцентиль не выше — в обоих окнах
+  capitulationFloorPct: 40,  // …и сам пол
+  valuationGatePct: 82,      // режим выше «переходного» закрыт, когда MVRV-перцентиль за 4 года не ниже
 };
+// Короткое имя набора правил для текста: «btc-decision-suite-v3» → «v3».
+const suiteWord = (id) => String(id || "").match(/suite-(v\d+)/)?.[1] || "";
 const REGIME_WORD = {
   emergency: "аварийный", defensive: "защитный", deteriorating: "ухудшается", transition: "переходный",
   unconfirmed_positive: "положительный, спрос не подтвердил", constructive: "конструктивный", insufficient: "недостаточно данных",
 };
 const REGIME_SEVERITY = { constructive: 2, unconfirmed_positive: 1, transition: 0, deteriorating: -1, defensive: -2, emergency: -3, insufficient: 0 };
+// Потолка эйфории у набора v3 нет; слово оставлено, чтобы запись журнала времён v1 называлась своим именем.
 const OVERLAY_WORD = { recovery_floor: "пол восстановления", capitulation_floor: "пол капитуляции", euphoria_safety_cap: "потолок эйфории" };
 const BLOCK_NOM = { macro: "мировые условия", demand: "спрос", cycle: "цикл и сеть" };
 const BLOCK_GEN = { macro: "мировых условий", demand: "спроса", cycle: "цикла и сети" };
 const SOURCE_STATE_WORD = { partial: "частично", stale: "устарели", fail: "недоступны" };
+const ORDINAL_ACC = ["", "первый", "второй", "третий"];
+const ORDINAL_PREP = ["", "первом", "втором", "третьем"];
 const regimeWord = (r) => REGIME_WORD[r] || r || "—";
 const severity = (r) => REGIME_SEVERITY[r] ?? 0;
 const capFirst = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
-// Сброс удержания сообщается, только если сорванное удержание успело набрать четверть срока.
-// На истории 19.07–10.10.2026 сбросов 18, и по длительности сорванного удержания они распадаются
-// на две группы без середины: 12 коротких (0–10 часов — кандидат мигнул и пропал) и 6 длинных
-// (19,5–41,5 часа — потеряны сутки и больше до принятого повышения). Порог стоит между ними.
-// Пять сбросов 20–21.09 дают при нём ОДНО сообщение — о первом, на 41-м часу из 48; четыре
-// следующих удержания прожили меньше 11 часов каждое.
-const HOLD_RESET_MIN_H = 12;
+// Сорванное ожидание повышения сообщается один раз на эпизод. Эпизод — время, пока опубликованный
+// режим не менялся: кандидат, который мигает через день (источник отдаёт то свежий, то вчерашний
+// набор), срывает ожидание раз за разом, и каждое такое сообщение повторяло бы первое. Следующие
+// срывы только считаются — их число и момент первого кандидата назовёт сообщение о принятом
+// повышении. Если режим не менялся дольше этого срока, о новом срыве сообщается снова.
+const HOLD_RESET_REPEAT_MS = 7 * 24 * 3600 * 1000;
 // Пауза решения, повторившаяся раньше этого срока после предыдущего сообщения о паузе, идёт только
 // в лог: мигающий критический источник не должен превращаться в пару сообщений на каждый такт.
 // Сама новая доля после паузы приходит ВСЕГДА — глушится только слово «пауза».
@@ -1209,16 +1275,45 @@ function engineOf(alloc) {
   };
 }
 
-const bandOf = (score) => (!finite(score) ? "unknown" : score >= V1.bands.supportive ? "supportive" : score <= V1.bands.adverse ? "adverse" : "neutral");
+// Сменился ли набор боевых правил между базой сравнения и текущим снимком. Состояние, записанное
+// до выпуска 2.15.0, набора не называет вовсе — это и есть прежний набор. На таком шаге цель
+// изменило правило, а не рынок: причина — смена правил, а механика прежнего набора (удержание,
+// полы одним снимком) текущему снимку не приписывается.
+function suiteSwitch(prevEng, eng) {
+  if (!prevEng || !eng?.suite || (prevEng.suite || "") === eng.suite) return null;
+  return { from: prevEng.suite || eng.supersedes || "", to: eng.suite };
+}
+
+/* ---- суточный фикс ---- */
+const DAY_MS = 864e5;
+// Сутки фикса: два фикса не бывают в одни сутки UTC, поэтому «на другом фиксе» = «в другие сутки».
+const fixDay = (t) => Math.floor(t / DAY_MS);
+const fixWhen = (iso) => { const t = Date.parse(iso || ""); return finite(t) ? ruMoment(t) : ""; };
+// «на суточном фиксе (ближайший — 21.11, 09:00 МСК)»: правило действует на любом фиксе, срок назван у ближайшего.
+const fixRef = (eng) => `на суточном фиксе${fixWhen(eng?.next_fix_at) ? ` (ближайший — ${fixWhen(eng.next_fix_at)})` : ""}`;
+// Ступень пола восстановления по его уровню: 40 → 1, 60 → 2, 80 → 3 (шаг цели знает только проценты).
+const floorRung = (pct) => { const k = V3.floorLadder.indexOf(pct); return k < 0 ? null : k + 1; };
+const rungWord = (pct) => (floorRung(pct) ? `ступень ${floorRung(pct)} из ${V3.floorLadder.length}` : "");
+// Первая ступень пола, которая поднимет цель над ступенью режима: у «защитного» (5 %) — первая,
+// 40 %; у «переходного» (45 %) — вторая, 60 %. null — пол цель этого режима не поднимает.
+function floorEntry(eng) {
+  if (!finite(eng?.base)) return null;
+  const k = V3.floorLadder.findIndex((level) => level > eng.base);
+  return k < 0 ? null : { rung: k + 1, pct: V3.floorLadder[k] };
+}
+
+const bandOf = (score) => (!finite(score) ? "unknown" : score >= V3.bands.supportive ? "supportive" : score <= V3.bands.adverse ? "adverse" : "neutral");
 // Ступень режима без оверлеев — и цель, которую режим получил бы СЕЙЧАС, с действующими оверлеями.
-const rungOf = (eng, r) => (eng?.contract && finite(V1.ladder[r]) ? V1.ladder[r] : null);
+const rungOf = (eng, r) => (eng?.contract && finite(V3.ladder[r]) ? V3.ladder[r] : null);
 const rungNote = (eng, r) => (finite(rungOf(eng, r)) ? ` (ступень ${rungOf(eng, r)}%)` : "");
 const targetOf = (eng, r) => (finite(eng?.ladder?.[r]) ? eng.ladder[r] : rungOf(eng, r));
 
 // Таблица режимов движка по полосам трёх направлений (макро, спрос, цикл) с гейтом оценки и
-// правами детекторов — повтор замороженной секции scoring_and_regimes_v1 сборщика.
-function regimeFromBands(M, D, C, eng) {
-  const adverse = [M, D, C].filter((x) => x === "adverse").length;
+// правами детекторов — повтор strategicCandidateV1Port из движка набора v3. x — то, что движок
+// читает кроме полос: его балл оценки (−1 и ниже — дорого, режим выше «переходного» закрыт),
+// макрошок и детектор разворота. Права «Дистрибуции» у набора v3 нет.
+function regimeFromBands(M, D, C, x) {
+  const adverse = [M, D, C].filter((b) => b === "adverse").length;
   let s = "transition";
   if (adverse >= 2) s = "defensive";
   else if (D === "adverse") s = "deteriorating";
@@ -1226,21 +1321,27 @@ function regimeFromBands(M, D, C, eng) {
   else if (D === "supportive" && C === "supportive") s = "constructive";
   else if (D === "supportive" && M === "supportive") s = "constructive";
   else if (M === "supportive" && C === "supportive" && D === "neutral") s = "unconfirmed_positive";
-  if ((eng.mvrv_score == null || eng.mvrv_score <= -1) && ["constructive", "unconfirmed_positive"].includes(s)) s = "transition";
+  if ((x.valuation == null || x.valuation <= -1) && ["constructive", "unconfirmed_positive"].includes(s)) s = "transition";
   const optimistic = ["constructive", "unconfirmed_positive", "transition"];
-  if (eng.macro_shock === "fired" && optimistic.includes(s)) s = "deteriorating";
-  if (eng.distribution === "fired" && optimistic.includes(s)) s = "deteriorating";
-  if (eng.recovery === "good" && eng.macro_shock !== "fired" && ["defensive", "deteriorating"].includes(s)) s = "transition";
+  if (x.macro_shock === "fired" && optimistic.includes(s)) s = "deteriorating";
+  if (x.recovery === "good" && x.macro_shock !== "fired" && ["defensive", "deteriorating"].includes(s)) s = "transition";
   return s;
 }
-const bandsOf = (eng) => ({ macro: bandOf(eng.blocks?.macro), demand: bandOf(eng.blocks?.demand), cycle: bandOf(eng.blocks?.cycle) });
+// Полосы и входы таблицы — как их видит движок на ЭТОМ прогоне (live_inputs). Карточки и блоки
+// снимка считаются по методике v1 и на четырёх семьях с движком расходятся — отсюда их не берём.
+const bandsOf = (eng) => {
+  const out = {};
+  for (const k of ["macro", "demand", "cycle"]) out[k] = eng?.live?.bands?.[k] || bandOf(eng?.blocks?.[k]);
+  return out;
+};
+const tableOf = (eng) => ({ valuation: eng?.live?.valuation ?? null, macro_shock: eng?.live?.macro_shock || "", recovery: eng?.live?.recovery || "" });
 
-// Сходится ли повторённая здесь таблица с тем, что посчитал движок на ЭТОМ снимке.
+// Сходится ли повторённая здесь таблица с кандидатом, которого движок посчитал на ЭТОМ прогоне.
 function engineAgrees(eng) {
-  if (!eng || eng.legacy || !eng.contract) return false;
+  if (!eng || eng.legacy || !eng.contract || !eng.live?.candidate) return false;
   const b = bandsOf(eng);
-  if (Object.values(b).includes("unknown")) return false;
-  return regimeFromBands(b.macro, b.demand, b.cycle, eng) === eng.candidate;
+  if (Object.values(b).includes("unknown") || ["macro", "demand", "cycle"].some((k) => !finite(eng.blocks?.[k]))) return false;
+  return regimeFromBands(b.macro, b.demand, b.cycle, tableOf(eng)) === eng.live.candidate;
 }
 
 // Что сдвинет режим: по одному направлению за раз переводим оценку через ближайшую границу полосы
@@ -1251,13 +1352,13 @@ function regimeShifts(eng, dir) {
   const out = [];
   for (const k of ["demand", "macro", "cycle"]) {
     let to = null, threshold = null;
-    if (dir < 0 && cur[k] === "supportive") { to = "neutral"; threshold = V1.bands.supportive; }
-    else if (dir < 0 && cur[k] === "neutral") { to = "adverse"; threshold = V1.bands.adverse; }
-    else if (dir > 0 && cur[k] === "adverse") { to = "neutral"; threshold = V1.bands.adverse; }
-    else if (dir > 0 && cur[k] === "neutral") { to = "supportive"; threshold = V1.bands.supportive; }
+    if (dir < 0 && cur[k] === "supportive") { to = "neutral"; threshold = V3.bands.supportive; }
+    else if (dir < 0 && cur[k] === "neutral") { to = "adverse"; threshold = V3.bands.adverse; }
+    else if (dir > 0 && cur[k] === "adverse") { to = "neutral"; threshold = V3.bands.adverse; }
+    else if (dir > 0 && cur[k] === "neutral") { to = "supportive"; threshold = V3.bands.supportive; }
     if (!to) continue;
     const next = { ...cur, [k]: to };
-    const regime = regimeFromBands(next.macro, next.demand, next.cycle, eng);
+    const regime = regimeFromBands(next.macro, next.demand, next.cycle, tableOf(eng));
     if (dir < 0 ? severity(regime) >= severity(eng.state) : severity(regime) <= severity(eng.state)) continue;
     const pct = targetOf(eng, regime);
     if (!finite(pct)) continue;
@@ -1267,38 +1368,65 @@ function regimeShifts(eng, dir) {
   return out.sort((a, b) => a.margin - b.margin || (dir < 0 ? a.pct - b.pct : b.pct - a.pct));
 }
 
+// Подтверждения детектора разворота, как их считает движок: сколько из трёх ног (тренд, потоки
+// ETF, запас на биржах) не отрицательны. Строка детектора на витрине считается по методике v1 и
+// здесь не читается.
 function recoveryConfirmations(eng) {
-  const m = String(eng?.recovery_inputs || "").match(/подтверждений\s+(\d+)\s*\/\s*(\d+)/);
-  return m ? { n: Number(m[1]), of: Number(m[2]) } : null;
+  return finite(eng?.live?.supports) ? { n: eng.live.supports, of: V3.recoveryLegs } : null;
+}
+// Оба перцентиля MVRV: за 4 года и по всей истории. fix — как их записало решение на фиксе
+// (в причину смены); иначе — что движок видит на этом прогоне (в строки «сейчас»). На прогоне
+// фикса это одни и те же числа.
+function mvrvOf(eng, fix = false) {
+  const live = !fix && finite(eng?.live?.mvrv_pct) ? eng.live : null;
+  const p = live ? live.mvrv_pct : eng?.mvrv_pct, d = live ? live.mvrv_deep : eng?.mvrv_deep;
+  return { p: finite(p) ? p : null, d: finite(d) ? d : null };
+}
+function mvrvPair(eng, fix = false) {
+  const m = mvrvOf(eng, fix);
+  return m.d === null ? fmtPlain(m.p) : `${fmtPlain(m.p)} за 4 года и ${fmtPlain(m.d)} по всей истории`;
+}
+// То же с путём от прошлого фикса: «11,7 → 7,8 за 4 года и 19 → 9,1 по всей истории». Решение
+// хранит входы фикса, поэтому «было» — входы прошлого фикса из базы сравнения, каким бы ни был
+// ритм запусков бота.
+function mvrvPath(eng, prevEng) {
+  const m = mvrvOf(eng, true);
+  const leg = (was, now) => (finite(was) && !sameNum(was, now) ? `${fmtPlain(was)} → ${fmtPlain(now)}` : fmtPlain(now));
+  return m.d === null ? leg(prevEng?.mvrv_pct, m.p) : `${leg(prevEng?.mvrv_pct, m.p)} за 4 года и ${leg(prevEng?.mvrv_deep, m.d)} по всей истории`;
 }
 // Уровень цены, на котором MVRV-перцентиль проходит порог правила (публикует сборщик; поле
-// необязательное — без него строка остаётся без цены).
+// необязательное — без него строка остаётся без цены). Сборщик считает уровень только по окну
+// четырёх лет: при двух окнах это порог одного из них, и так он и назван.
 function levelNote(eng, key) {
   const p = eng?.levels?.[key]?.price;
-  return finite(p) ? `; это цена ≈ $${fmtPlain(p / 1000, 1)}${NBSP}тыс.` : "";
+  if (!finite(p)) return "";
+  const price = `цена ≈ $${fmtPlain(p / 1000, 1)}${NBSP}тыс.`;
+  return mvrvOf(eng).d === null ? `; это ${price}` : `; порог окна 4 лет — ${price}`;
 }
-const cadenceNote = (eng) => (finite(eng?.cadence_min) && eng.cadence_min >= 5 && eng.cadence_min <= 120 ? ` (≈ ${eng.cadence_min} мин)` : "");
 
 // Почему кандидат движка именно такой — правило, которое сработало, в числах самого движка.
-// Читается с ТЕКУЩЕГО снимка, без сравнения с соседним, поэтому верно и там, где причина смены
-// осталась в прошлом.
+// Читается с ТЕКУЩЕГО прогона (live_inputs), без сравнения с соседним, поэтому верно и там, где
+// причина смены осталась в прошлом. Между фиксами входы уходят от тех, на которых решал фикс: если
+// кандидат этого прогона уже не тот, что принят на фиксе, строка не печатается — она объясняла бы
+// не тот режим.
 function ruleLine(eng) {
-  if (!engineAgrees(eng)) return "";
-  const b = bandsOf(eng), sc = eng.blocks;
+  if (!engineAgrees(eng) || eng.live.candidate !== eng.candidate) return "";
+  const b = bandsOf(eng), sc = eng.blocks, x = tableOf(eng), c = eng.live.candidate;
   const show = (k) => `${BLOCK_NOM[k]} ${fmtSigned(sc[k])}`;
   const adverse = ["demand", "macro", "cycle"].filter((k) => b[k] === "adverse");
   const all = ["demand", "macro", "cycle"].map(show).join(", ");
-  const quiet = { macro_shock: "", distribution: "", recovery: "" };
-  const gated = regimeFromBands(b.macro, b.demand, b.cycle, { ...eng, ...quiet });
-  const ungated = regimeFromBands(b.macro, b.demand, b.cycle, { ...eng, ...quiet, mvrv_score: 0 });
-  if (gated !== eng.candidate) {
-    if (eng.recovery === "good" && eng.candidate === "transition") return "режим поднят до переходного детектором разворота";
-    return "режим ограничен сработавшим детектором риска";
+  const quiet = { ...x, macro_shock: "", recovery: "" };
+  const gated = regimeFromBands(b.macro, b.demand, b.cycle, quiet);
+  const ungated = regimeFromBands(b.macro, b.demand, b.cycle, { ...quiet, valuation: 0 });
+  if (gated !== c) {
+    if (x.recovery === "good" && c === "transition") return "режим поднят до переходного детектором разворота";
+    return "режим ограничен сработавшим макрошоком";
   }
-  if (gated !== ungated) return `режим выше закрыт дорогой оценкой — MVRV-перцентиль ${fmtPlain(eng.mvrv_pct)}`;
-  if (eng.candidate === "defensive") return `неблагоприятны ${adverse.length === 3 ? "все три направления" : "два направления из трёх"} — ${adverse.map(show).join(", ")} (порог −20)`;
-  if (eng.candidate === "deteriorating") return `спрос неблагоприятен (${fmtSigned(sc.demand)} при пороге −20)`;
-  if (eng.candidate === "transition") {
+  if (gated !== ungated && x.valuation == null) return "режим выше закрыт: оценки по MVRV нет";
+  if (gated !== ungated) return `режим выше закрыт дорогой оценкой — MVRV-перцентиль за 4 года ${fmtPlain(mvrvOf(eng).p)} при пороге ${V3.valuationGatePct}`;
+  if (c === "defensive") return `неблагоприятны ${adverse.length === 3 ? "все три направления" : "два направления из трёх"} — ${adverse.map(show).join(", ")} (порог −20)`;
+  if (c === "deteriorating") return `спрос неблагоприятен (${fmtSigned(sc.demand)} при пороге −20)`;
+  if (c === "transition") {
     if (adverse.length === 1) return `неблагоприятно одно направление — ${show(adverse[0])}; спрос ${fmtSigned(sc.demand)} выше порога −20`;
     return `неблагоприятных направлений нет, но для режима выше нужна поддержка двух из трёх (порог +20) — ${all}`;
   }
@@ -1306,19 +1434,41 @@ function ruleLine(eng) {
   return supportive.length ? `поддерживают ${supportive.map(show).join(", ")} (порог +20)` : "";
 }
 
-// Кандидат, который лучше опубликованного режима и ждёт своего срока.
-function candidateOnHoldLine(eng) {
-  if (!eng.candidate || eng.candidate === eng.state || eng.emergency || !(eng.candidate in REGIME_SEVERITY)) return "";
-  if (["insufficient", "emergency"].includes(eng.candidate) || severity(eng.candidate) <= severity(eng.state)) return "";
-  const until = Date.parse(eng.hold_until || "");
-  return `Кандидат «${regimeWord(eng.candidate)}»${rungNote(eng, eng.candidate)} на удержании${finite(until) ? `: не раньше ${ruMoment(until)}` : ""}`;
+// Повышение, которое ждёт второго фикса подряд: кандидат лучше опубликованного режима, счёт
+// «1 из 2» ведёт сам движок (pending). null — ожидания нет.
+function pendingOf(eng) {
+  const p = eng?.pending;
+  if (!p || eng.emergency || !(p.candidate in REGIME_SEVERITY) || ["insufficient", "emergency"].includes(p.candidate)) return null;
+  return severity(p.candidate) > severity(eng.state) ? p : null;
 }
-// Кандидат хуже опубликованного режима: понижение уже идёт и ждёт второго снимка.
+const pendingCount = (p) => `${finite(p.fixes) ? p.fixes : 1} из ${finite(p.need) ? p.need : V3.confirmUp}`;
+function candidateOnHoldLine(eng) {
+  const p = pendingOf(eng);
+  if (!p) return "";
+  const when = fixWhen(eng.next_fix_at || eng.hold_until);
+  return `Кандидат «${regimeWord(p.candidate)}»${rungNote(eng, p.candidate)} ждёт второго фикса подряд: ${pendingCount(p)}${when ? `, решение — на фиксе ${when}` : ""}`;
+}
+// Сорвалось ли ожидание повышения между базой сравнения и текущим снимком: режим прежний, фикс
+// новый, а прежнего кандидата со следующим счётом нет. missed — кандидат тот же, но счёт не вырос:
+// сутки прошли без фикса, и движок начал счёт заново.
+function pendingBroken(prevEng, eng) {
+  const was = pendingOf(prevEng);
+  if (!was || !eng?.contract || suiteSwitch(prevEng, eng) || eng.state !== prevEng.state) return null;
+  if (!eng.fix_at || eng.fix_at === prevEng.fix_at) return null; // между фиксами счёт не меняется
+  const now = pendingOf(eng);
+  const same = !!now && now.candidate === was.candidate;
+  if (same && finite(now.fixes) && finite(was.fixes) && now.fixes > was.fixes) return null;
+  return { was, now, missed: same };
+}
+// По данным ЭТОГО прогона кандидат хуже опубликованного режима: понижение решит ближайший фикс.
+// На прогоне фикса так не бывает (понижение принимается сразу); бывает между фиксами — после
+// снятия аварийного режима, паузы или на шаге выпуска.
 function pendingDowngrade(eng, pct) {
-  if (!eng.candidate || eng.emergency || !(eng.candidate in REGIME_SEVERITY) || ["insufficient", "emergency"].includes(eng.candidate)) return null;
-  if (severity(eng.candidate) >= severity(eng.state)) return null;
-  const next = targetOf(eng, eng.candidate);
-  return finite(next) && next < pct ? { regime: eng.candidate, pct: next } : null;
+  const c = eng.contract ? eng.live?.candidate : "";
+  if (!c || eng.emergency || !(c in REGIME_SEVERITY) || ["insufficient", "emergency"].includes(c)) return null;
+  if (severity(c) >= severity(eng.state)) return null;
+  const next = targetOf(eng, c);
+  return finite(next) && next < pct ? { regime: c, pct: next } : null;
 }
 
 // Какое входное звено неполно и задевает ли это показатели, сдвинувшие долю. Факт вместо
@@ -1338,65 +1488,97 @@ function qualityLine(eng, causeIds, staleIds) {
 
 function floorExitLine(eng) {
   const conf = recoveryConfirmations(eng);
-  const anchor = `MVRV-перцентиль дойдёт до ${V1.recoveryAnchorPct} (сейчас ${fmtPlain(eng.mvrv_pct)}${levelNote(eng, "recovery_anchor")})`;
-  const need = `подтверждений станет меньше ${V1.recoveryNeed}${conf ? ` из ${conf.of} (сейчас ${conf.n})` : ""}`;
-  return `Пол снимается одним снимком, если ${anchor} или ${need}.${finite(eng.base) ? ` Цель вернётся к ступени режима — ${eng.base}%` : ""}`;
+  const two = mvrvOf(eng).d !== null;
+  const anchor = `MVRV-перцентиль дойдёт до ${V3.recoveryAnchorPct}${two ? " в любом из двух окон" : ""} (сейчас ${mvrvPair(eng)}${levelNote(eng, "recovery_anchor")})`;
+  const need = `подтверждений станет меньше ${V3.recoveryNeed}${conf ? ` из ${conf.of} (сейчас ${conf.n})` : ""}`;
+  // под полом восстановления может лежать пол капитуляции: тогда без подтверждений цель держит он
+  const cap = (eng.live?.cheap ?? eng.cheap) === true && finite(eng.base) && eng.base < V3.capitulationFloorPct;
+  const back = !finite(eng.base) ? "" : cap ? ` Цель вернётся к полу капитуляции — ${V3.capitulationFloorPct}%, а без него — к ступени режима, ${eng.base}%` : ` Цель вернётся к ступени режима — ${eng.base}%`;
+  return `Пол снимается на суточном фиксе, если ${anchor} или ${need}.${back}`;
 }
-function floorReturnLine(eng, lead = "Пол вернётся одним снимком") {
+// Что нужно, чтобы пол восстановления включился (снова): якорь — оба окна MVRV ниже 25, два
+// подтверждения из трёх, нет макрошока. Пол приходит ступенью, которая выше ступени режима.
+function floorReturnLine(eng, lead = "") {
+  const entry = floorEntry(eng);
+  if (!entry) return "";
+  const head = lead || (entry.rung === 1
+    ? `Пол вернётся на суточном фиксе первой ступенью, ${entry.pct}%`
+    : `Пол поднимет цель до ${entry.pct}% не раньше чем на ${ORDINAL_PREP[entry.rung]} фиксе подряд с подтверждённым детектором разворота`);
   const conf = recoveryConfirmations(eng);
+  const m = mvrvOf(eng);
+  const below = (v) => finite(v) && v < V3.recoveryAnchorPct;
+  const anchored = typeof eng.live?.anchor === "boolean" ? eng.live.anchor : below(m.p) && (m.d === null || below(m.d));
   const miss = [];
-  if (!(finite(eng.mvrv_pct) && eng.mvrv_pct < V1.recoveryAnchorPct)) miss.push(`MVRV-перцентиль ниже ${V1.recoveryAnchorPct} (сейчас ${fmtPlain(eng.mvrv_pct)}${levelNote(eng, "recovery_anchor")})`);
-  if (!conf || conf.n < V1.recoveryNeed) miss.push(`подтверждений не меньше ${V1.recoveryNeed}${conf ? ` из ${conf.of} (сейчас ${conf.n})` : ""}`);
+  if (!anchored) miss.push(`MVRV-перцентиль ниже ${V3.recoveryAnchorPct}${m.d !== null ? " в обоих окнах" : ""} (сейчас ${mvrvPair(eng)}${levelNote(eng, "recovery_anchor")})`);
+  if (!conf || conf.n < V3.recoveryNeed) miss.push(`подтверждений не меньше ${V3.recoveryNeed}${conf ? ` из ${conf.of} (сейчас ${conf.n})` : ""}`);
   if (eng.macro_shock === "fired") miss.push("снятие макрошока");
-  return miss.length ? `${lead} — нужно: ${miss.join(" и ")}` : `${lead}, как только детектор разворота подтвердится снова`;
+  if (miss.length) return `${head} — нужно: ${miss.join(" и ")}`;
+  return eng.live?.recovery === "good" ? head : `${head}, как только детектор разворота подтвердится снова`;
+}
+function capExitLine(eng) {
+  const two = mvrvOf(eng).d !== null;
+  return `Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше ${V3.capitulationPct}${two ? " в любом из двух окон" : ""} (сейчас ${mvrvPair(eng)}${levelNote(eng, "capitulation_floor")}).`;
+}
+// Пол капитуляции требует «дёшево» в ОБОИХ окнах: называется то окно, которому до порога не хватает.
+function capReturnLine(eng) {
+  const m = mvrvOf(eng), lim = V3.capitulationPct;
+  const head = "Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль";
+  const level = levelNote(eng, "capitulation_floor");
+  if (m.d === null) return `${head} будет ${lim} или ниже (сейчас ${fmtPlain(m.p)}${level})`;
+  const a = m.p <= lim, b = m.d <= lim;
+  if (a && !b) return `${head} по всей истории тоже будет ${lim} или ниже (сейчас ${fmtPlain(m.d)}; за 4 года — ${fmtPlain(m.p)})`;
+  if (!a && b) return `${head} за 4 года тоже будет ${lim} или ниже (сейчас ${fmtPlain(m.p)}${level}; по всей истории — ${fmtPlain(m.d)})`;
+  return `${head} будет ${lim} или ниже в обоих окнах (сейчас ${mvrvPair(eng)}${level})`;
 }
 
 // «Что отменит» — условие В СТОРОНУ, ПРОТИВОПОЛОЖНУЮ смене: для повышения — что вернёт долю вниз,
 // для понижения — что и когда вернёт её вверх. Прежний текст при любой смене говорил «показатель
 // должен улучшиться», то есть для повышения описывал не откат, а дальнейший рост.
+// Сроки — в фиксах: понижение режима и снятие пола — на ближайшем фиксе, повышение — на втором
+// фиксе подряд. Аварийный режим — единственное, что включается и снимается на любом прогоне.
 function undoLines(eng, prevEng, dir, step) {
   const k = changeKind(step);
-  const pct = fmtPlain(eng.mvrv_pct);
-  if (eng.emergency) return ["Аварийный режим снимается первым снимком без нарушения; цель вернётся к ступени режима, который был до него, или ниже"];
+  if (eng.emergency) return ["Аварийный режим снимается первым снимком без нарушения; цель вернётся к решению суточного фикса"];
   if (dir === 0) return [];
   const back = finite(eng.base) ? ` Цель вернётся к ступени режима — ${eng.base}%` : "";
   if (dir > 0) {
     if (prevEng?.emergency) return ["Аварийный режим вернётся первым же снимком с нарушением целостности рынка"];
     if (eng.overlays.includes("recovery_floor")) return [floorExitLine(eng)];
-    if (eng.overlays.includes("capitulation_floor")) return [`Пол капитуляции снимается одним снимком, если MVRV-перцентиль поднимется выше ${V1.capitulationPct} (сейчас ${pct}${levelNote(eng, "capitulation_floor")}).${back}`];
-    if (k.off.includes("euphoria_safety_cap")) return [`Потолок вернётся одним снимком, если MVRV-перцентиль дойдёт до ${V1.euphoriaPct} (сейчас ${pct}${levelNote(eng, "euphoria")})`];
-    if (pendingDowngrade(eng, step.to)) return []; // понижение уже идёт — о нём сказано в «что делать»
+    if (eng.overlays.includes("capitulation_floor")) return [`${capExitLine(eng)}${back}`];
+    if (pendingDowngrade(eng, step.to)) return []; // понижение уже видно — о нём сказано в «что делать»
     const agrees = engineAgrees(eng);
     const o = agrees ? regimeShifts(eng, -1)[0] : null;
-    // Одного сдвига не хватает (режим держится удержанием, или вниз ведут только два направления
-    // сразу) — тогда честнее общее правило, чем условие, которое таблица не подтверждает.
-    if (!o) return [agrees && eng.state === "defensive" ? "Ниже этой ступени — только аварийный режим" : `Понижение принимается вторым снимком подряд${cadenceNote(eng)}`];
+    // Одного сдвига не хватает (вниз ведут только два направления сразу, или таблица с движком
+    // разошлась) — тогда честнее общее правило, чем условие, которое таблица не подтверждает.
+    if (!o) return [agrees && eng.state === "defensive" ? "Ниже этой ступени — только аварийный режим" : `Понижение принимается ${fixRef(eng)}`];
     const cross = o.threshold < 0 ? `опустится до ${fmtSigned(o.threshold, 0)}` : `опустится ниже ${fmtSigned(o.threshold, 0)}`;
-    return [`Понижение до ${o.pct}% — вторым снимком подряд${cadenceNote(eng)}, если оценка ${BLOCK_GEN[o.block]} ${cross} (сейчас ${fmtSigned(o.score)})`];
+    return [`Понижение до ${o.pct}% — ${fixRef(eng)}, если оценка ${BLOCK_GEN[o.block]} ${cross} (сейчас ${fmtSigned(o.score)})`];
   }
-  if (eng.overlays.includes("euphoria_safety_cap")) return [`Потолок снимается одним снимком, если MVRV-перцентиль опустится ниже ${V1.euphoriaPct} (сейчас ${pct}${levelNote(eng, "euphoria")}).${back}`];
   const regimeFell = step.regime_from && step.regime_to && severity(step.regime_to) < severity(step.regime_from);
-  if (!regimeFell && k.off.includes("recovery_floor")) return [floorReturnLine(eng)];
-  if (!regimeFell && k.off.includes("capitulation_floor")) return [`Пол капитуляции вернётся одним снимком, если MVRV-перцентиль опустится до ${V1.capitulationPct} (сейчас ${pct}${levelNote(eng, "capitulation_floor")})`];
-  // Понижение по режиму: обратный ход возможен не раньше чем через 48 часов непрерывного кандидата.
+  if (!regimeFell && k.off.includes("recovery_floor")) return [floorReturnLine(eng)].filter(Boolean);
+  if (!regimeFell && k.off.includes("capitulation_floor")) return [capReturnLine(eng)];
+  // Пол восстановления откатился на нижнюю ступень (сутки без фикса обнулили счёт): дальше он
+  // растёт как обычно, по ступени на фикс.
+  if (!regimeFell && floorStepOf(step)) return [`Следующая ступень пола — ${fixRef(eng)}, если детектор разворота останется подтверждённым`];
+  // Понижение по режиму: обратный ход — повышение, а оно принимается только на втором фиксе
+  // подряд с тем же кандидатом. Ближайший фикс может лишь начать счёт.
   const out = [];
-  const earliest = ruMoment(eng.t + V1.holdHours * 3600e3);
-  const until = Date.parse(eng.hold_until || "");
+  const nextFix = Date.parse(eng.next_fix_at || "");
+  const earliest = finite(nextFix) ? `, не раньше ${ruMoment(nextFix + DAY_MS)}` : "";
+  const waiting = pendingOf(eng);
   const up = engineAgrees(eng) && eng.candidate === eng.state ? regimeShifts(eng, +1)[0] : null;
-  if (severity(eng.candidate) > severity(eng.state) && finite(until) && eng.candidate in REGIME_SEVERITY) {
-    out.push(`Возврат уже на удержании: кандидат «${regimeWord(eng.candidate)}»${rungNote(eng, eng.candidate)}, не раньше ${ruMoment(until)}`);
+  if (waiting) {
+    out.push(`Возврат уже ждёт второго фикса: кандидат «${regimeWord(waiting.candidate)}»${rungNote(eng, waiting.candidate)}, ${pendingCount(waiting)}${fixWhen(eng.next_fix_at) ? `, решение — на фиксе ${fixWhen(eng.next_fix_at)}` : ""}`);
   } else if (up) {
     const cross = up.threshold < 0 ? `выше ${fmtSigned(up.threshold, 0)}` : `не ниже ${fmtSigned(up.threshold, 0)}`;
-    out.push(`Возврат к ${up.pct}% — после ${V1.holdHours} часов удержания, не раньше ${earliest}: нужна оценка ${BLOCK_GEN[up.block]} ${cross} (сейчас ${fmtSigned(up.score)})`);
+    out.push(`Возврат к ${up.pct}% — на втором фиксе подряд${earliest}: нужна оценка ${BLOCK_GEN[up.block]} ${cross} (сейчас ${fmtSigned(up.score)})`);
   } else {
-    out.push(`Возврат вверх — после ${V1.holdHours} часов удержания, не раньше ${earliest}`);
+    out.push(`Возврат вверх — на втором фиксе подряд с кандидатом лучше режима${earliest}`);
   }
-  // Пол восстановления — единственный путь вверх быстрее двух суток: он включается одним снимком.
-  // 08.08 он поднял цель с 5 до 80 % через 25 часов после понижения 20 → 5, о котором прежнее
-  // сообщение не говорило ничего, кроме «шаткое».
-  const floorOpen = eng.contract && !eng.overlays.includes("recovery_floor") && eng.macro_shock !== "fired" &&
-    finite(eng.mvrv_pct) && eng.mvrv_pct < V1.recoveryAnchorPct && ["defensive", "deteriorating", "transition"].includes(eng.state);
-  if (floorOpen) out.push(floorReturnLine(eng, "Быстрее — только пол восстановления: включается одним снимком").replace(" — нужно: ", ", нужно: "));
+  // Пол восстановления — единственный путь вверх быстрее двух фиксов: первая ступень включается на
+  // ближайшем. Называется, когда якорь уже есть (оба окна MVRV ниже 25) и не хватает подтверждений.
+  const floorOpen = eng.contract && floorEntry(eng)?.rung === 1 && !eng.overlays.includes("recovery_floor") && eng.macro_shock !== "fired" && eng.live?.anchor === true;
+  if (floorOpen) out.push(floorReturnLine(eng, `Быстрее — только пол восстановления: первая ступень, ${V3.floorLadder[0]}%, включается на суточном фиксе`).replace(" — нужно: ", ", нужно: "));
   return out;
 }
 
@@ -1549,88 +1731,115 @@ function allocationSteps(prevT, curT, from, to, feed) {
   return { source: "diff", steps: [] };
 }
 
-// Что изменилось в устройстве цели: оверлей, режим или и то и другое.
-function structureLine(s) {
+// Шаг цели при действующем поле восстановления без смены набора оверлеев: пол перешёл на другую
+// ступень (40 → 60 → 80 по фиксам подряд; вниз — когда сутки без фикса обнулили счёт). Сравнение
+// оверлеев такого шага не видит — «до» и «после» пол один и тот же. Цель и до, и после шага
+// задавал пол, поэтому смена цели — это смена его ступени, даже если на том же фиксе сменился режим.
+function floorStepOf(s) {
+  const k = changeKind(s);
+  if (!k.known || k.overlay || !s.overlays_to.includes("recovery_floor")) return null;
+  const rung = floorRung(s.to);
+  return rung && finite(s.from) && !sameNum(s.from, s.to) ? { rung, up: s.to > s.from } : null;
+}
+
+// Что изменилось в устройстве цели: оверлей, ступень пола, режим или и то и другое. v3 — шаг
+// сделан по правилам набора v3: только тогда уровень пола читается как его ступень.
+function structureLine(s, v3 = false) {
   const k = changeKind(s);
   const regimeMoved = !!s.regime_from && !!s.regime_to && s.regime_from !== s.regime_to;
   const step = finite(s.base_to) ? ` (ступень ${s.base_to}%)` : "";
   const ladderDat = s.regime_to ? `ступени режима «${regimeWord(s.regime_to)}»${finite(s.base_to) ? ` (${s.base_to}%)` : ""}` : "ступени режима";
-  if (k.off.includes("emergency_override") || s.regime_from === "emergency") return `Аварийный режим снят: цель вернулась к ${ladderDat}`;
+  const over = s.regime_to ? ` поверх режима «${regimeWord(s.regime_to)}»${step}` : "";
+  if (k.off.includes("emergency_override") || s.regime_from === "emergency") {
+    // после аварии цель задаёт решение фикса: ступень режима либо пол, если он действует
+    const floor = (Array.isArray(s.overlays_to) ? s.overlays_to : []).find((o) => OVERLAY_WORD[o]);
+    return floor ? `Аварийный режим снят: действует ${OVERLAY_WORD[floor]} ${s.to}%${over}` : `Аварийный режим снят: цель вернулась к ${ladderDat}`;
+  }
+  const fs = v3 ? floorStepOf(s) : null;
+  if (fs) return `Пол восстановления: ступень ${fs.rung} из ${V3.floorLadder.length}, цель ${s.to}%${over}` + (regimeMoved ? `; режим при этом сменился с «${regimeWord(s.regime_from)}»` : "");
   const on = k.on.find((o) => OVERLAY_WORD[o]), off = k.off.find((o) => OVERLAY_WORD[o]);
   const moved = regimeMoved ? `режим «${regimeWord(s.regime_from)}» → «${regimeWord(s.regime_to)}»${step}` : "";
   if (on) {
-    const over = on === "euphoria_safety_cap" ? "при режиме" : "поверх режима";
-    return `Включён ${OVERLAY_WORD[on]} ${s.to}% ${s.regime_to ? `${over} «${regimeWord(s.regime_to)}»${step}` : ""}`.trim() + (regimeMoved ? `; режим при этом сменился с «${regimeWord(s.regime_from)}»` : "");
+    const rung = v3 && on === "recovery_floor" && rungWord(s.to) ? ` (${rungWord(s.to)})` : "";
+    const where = on === "euphoria_safety_cap" ? over.replace(" поверх режима", " при режиме") : over;
+    return `Включён ${OVERLAY_WORD[on]} ${s.to}%${rung}${where}` + (regimeMoved ? `; режим при этом сменился с «${regimeWord(s.regime_from)}»` : "");
   }
   if (off) return regimeMoved ? `Снят ${OVERLAY_WORD[off]}, ${moved}` : `Снят ${OVERLAY_WORD[off]}: цель вернулась к ${ladderDat}`;
   return capFirst(moved);
 }
 
-// Какие входы сдвинулись в этом такте: из tick_diff сборщика; если его нет — из записи журнала
-// монитора о шаге этого же такта (монитор считает ту же разницу сам); а на снимке прежней формы —
-// из сравнения с базой, но только если в базе лежит СОСЕДНИЙ снимок (иначе в разницу попадает всё,
-// что случилось за пропущенные такты, и причина снова зависит от ритма запусков бота).
-// ids — входы конкретного детектора; null — все карточки, голосующие в среднесрочном режиме.
+// Какие входы детектора сдвинулись. Набор v3 решает на фиксе, и сдвиг входов для него — разница
+// двух ФИКСОВ: её несёт запись журнала монитора об этом шаге (сборщик передаёт монитору разницу
+// фиксов по баллам, которые читает движок). Разница соседних снимков (tick_diff, сравнение
+// карточек с базой) для такого решения не годится: это другой промежуток и баллы методики v1.
+// Нет записи журнала — сдвинувшийся вход не называется вовсе.
+// ids — входы детектора: посторонняя семья из той же записи его причиной не называется.
 function movedInputs(ctx, ids) {
-  // без списка входов — только карточки среднесрочного контура: разница такта несёт и краткосрочные
-  const want = (id) => (ids ? ids.includes(id) : !ctx.strategicIds || ctx.strategicIds.has(id));
   const staleNote = (id) => (ctx.staleIds?.has(id) ? ", источник отдал устаревшие данные" : "");
-  const rows = ctx.feed?.tick ? ctx.feed.tick.families : ctx.logFamilies;
-  if (rows) {
-    const fams = rows.filter((f) => asText(f?.id) && want(f.id));
-    return { ids: fams.map((f) => f.id), text: fams.map((f) => `«${humanTitle(f.id, f.name)}» (${fmtSigned(f.from)} → ${fmtSigned(f.to)}${staleNote(f.id)})`).join(", ") };
-  }
-  if (!ctx.consecutive) return { ids: [], text: "" };
-  const own = [
-    ...(ctx.why || []).filter((w) => want(w.id) && (ids || w.strategic)).map((w) => ({ id: w.id, text: w.sameValue ? `«${w.name}» (${w.worse ? "ухудшился" : "улучшился"})` : `«${w.name}»: ${w.from} → ${w.to}` })),
-    ...(ctx.staleMoves || []).filter((w) => want(w.id) && (ids || w.strategic)).map((w) => ({ id: w.id, text: `«${w.name}» (${w.worse ? "ухудшился" : "улучшился"}, источник отдал устаревшие данные)` })),
-  ];
-  return { ids: own.map((x) => x.id), text: own.map((x) => x.text).join(", ") };
+  const fams = (ctx.logFamilies || []).filter((f) => asText(f?.id) && ids.includes(f.id));
+  return { ids: fams.map((f) => f.id), text: fams.map((f) => `«${humanTitle(f.id, f.name)}» (${fmtSigned(f.from)} → ${fmtSigned(f.to)}${staleNote(f.id)})`).join(", ") };
 }
 
-const strategicIdsOf = (panel) => new Set((panel.indicators || []).filter((i) => i.strategic).map((i) => i.id));
-
-// Причина смены оверлея. Оверлей включается и снимается ОДНИМ снимком, без гистерезиса, поэтому
-// здесь — и только здесь — причина действительно лежит в том же такте, что и смена цели.
-// Якорь называется числом: 20.08 пол сняли из-за MVRV-перцентиля 19,5 → 27,2 на растущем рынке,
-// а в сообщении стояло «обстановка хуже прежней».
+// Причина смены оверлея или ступени пола — в числах, которые записал фикс: оба перцентиля MVRV
+// против порога, счёт подтверждений, число фиксов подряд. У полов гистерезиса нет: они включаются,
+// растут и снимаются на том же фиксе, где сдвинулись входы, — поэтому причина лежит в записи
+// решения текущего снимка. Якорь называется числом: 20.08 пол сняли из-за MVRV-перцентиля
+// 19,5 → 27,2 на растущем рынке, а в сообщении стояло «обстановка хуже прежней».
+// Снимку прежней формы правил не приписываем — причину такого шага даёт журнал монитора.
 function overlayCause(step, eng, ctx) {
+  if (!eng.contract) return { text: "", ids: [] };
   const k = changeKind(step);
-  const pct = fmtPlain(eng.mvrv_pct);
-  const tickFrom = ctx.feed?.tick?.mvrv_percentile?.from;
-  const was = finite(tickFrom) ? tickFrom
-    : ctx.consecutive && finite(ctx.prevEng?.mvrv_pct) ? ctx.prevEng.mvrv_pct
-    : ctx.consecutive && finite(ctx.prevState?.indicators?.mvrv_cycle?.value_num) ? ctx.prevState.indicators.mvrv_cycle.value_num : null;
-  const path = finite(was) && !sameNum(was, eng.mvrv_pct) ? `${fmtPlain(was)} → ${pct}` : pct;
+  const m = mvrvOf(eng, true), two = m.d !== null;
+  const path = mvrvPath(eng, ctx.prevEng);
   const conf = recoveryConfirmations(eng);
+  const confNote = conf ? `, подтверждений ${conf.n} из ${conf.of}` : "";
   const moved = movedInputs(ctx, ["trend_regime", "etf_regime", "exchange_supply"]);
   const tail = moved.text ? `; сдвинулся показатель ${moved.text}` : "";
+  const cheap = `MVRV-перцентиль ${mvrvPair(eng, true)} (${two ? "оба ниже" : "ниже"} ${V3.recoveryAnchorPct})`;
+  const fs = floorStepOf(step);
+  if (fs) {
+    if (!fs.up) return { text: ctx.missedFix ? "Причина: сутки прошли без фикса — счёт фиксов подряд начат заново" : "", ids: [] };
+    return { text: `Причина: детектор разворота подтверждён ${ORDINAL_ACC[fs.rung]} фикс подряд — ${cheap}${confNote}`, ids: [] };
+  }
   const floorOff = k.off.find((o) => o === "recovery_floor" || o === "capitulation_floor");
   if (floorOff && step.to > step.from) return { text: "Причина: ступень режима поднялась выше пола", ids: [] };
-  if (k.on.includes("recovery_floor"))
-    return { text: `Причина: детектор разворота подтверждён — MVRV-перцентиль ${pct} (ниже ${V1.recoveryAnchorPct})${conf ? `, подтверждений ${conf.n} из ${conf.of}` : ""}${tail}`, ids: moved.ids };
+  if (k.on.includes("recovery_floor")) {
+    const rung = floorRung(step.to);
+    return { text: `Причина: детектор разворота подтверждён ${rung > 1 ? `${ORDINAL_ACC[rung]} фикс подряд` : "на фиксе"} — ${cheap}${confNote}${tail}`, ids: moved.ids };
+  }
   if (k.off.includes("recovery_floor")) {
     if (eng.macro_shock === "fired") return { text: "Причина: сработал макрошок — он блокирует пол", ids: [] };
-    if (finite(eng.mvrv_pct) && eng.mvrv_pct >= V1.recoveryAnchorPct)
-      return { text: `Причина: оценка перестала быть дешёвой — MVRV-перцентиль ${path} при пороге ${V1.recoveryAnchorPct}`, ids: ["mvrv_cycle"] };
-    if (conf && conf.n < V1.recoveryNeed) return { text: `Причина: подтверждений осталось ${conf.n} из ${conf.of}, нужно ${V1.recoveryNeed}${tail}`, ids: moved.ids };
+    // детектор подтверждён, но счёт фиксов обнулён: первая ступень пола ниже ступени режима
+    if (ctx.missedFix && eng.recovery === "good") return { text: "Причина: сутки прошли без фикса — счёт фиксов подряд начат заново, а первая ступень пола ниже ступени режима", ids: [] };
+    if ((m.p !== null && m.p >= V3.recoveryAnchorPct) || (two && m.d >= V3.recoveryAnchorPct))
+      return { text: `Причина: оценка перестала быть дешёвой — MVRV-перцентиль ${path} при пороге ${V3.recoveryAnchorPct}${two ? " в обоих окнах" : ""}`, ids: ["mvrv_cycle"] };
+    if (conf && conf.n < V3.recoveryNeed) return { text: `Причина: подтверждений осталось ${conf.n} из ${conf.of}, нужно ${V3.recoveryNeed}${tail}`, ids: moved.ids };
     return { text: "Причина: детектор разворота больше не подтверждён", ids: [] };
   }
-  if (k.on.includes("capitulation_floor")) return { text: `Причина: MVRV-перцентиль ${path} — не выше ${V1.capitulationPct}`, ids: ["mvrv_cycle"] };
-  if (k.off.includes("capitulation_floor")) return { text: `Причина: MVRV-перцентиль ${path} — выше ${V1.capitulationPct}`, ids: ["mvrv_cycle"] };
-  if (k.on.includes("euphoria_safety_cap")) return { text: `Причина: MVRV-перцентиль ${path} — не ниже ${V1.euphoriaPct}`, ids: ["mvrv_cycle"] };
-  if (k.off.includes("euphoria_safety_cap")) return { text: `Причина: MVRV-перцентиль ${path} — ниже ${V1.euphoriaPct}`, ids: ["mvrv_cycle"] };
+  const lim = V3.capitulationPct;
+  if (k.on.includes("capitulation_floor")) return { text: `Причина: MVRV-перцентиль ${path} — ${lim} или ниже${two ? " в обоих окнах" : ""}`, ids: ["mvrv_cycle"] };
+  if (k.off.includes("capitulation_floor")) {
+    const a = m.p !== null && m.p > lim, b = two && m.d > lim;
+    const leg = (was, now) => (finite(was) && !sameNum(was, now) ? `${fmtPlain(was)} → ${fmtPlain(now)}` : fmtPlain(now));
+    if (!two && a) return { text: `Причина: MVRV-перцентиль ${path} — выше ${lim}`, ids: ["mvrv_cycle"] };
+    if (a && b) return { text: `Причина: MVRV-перцентиль ${path} — выше ${lim}`, ids: ["mvrv_cycle"] };
+    if (a) return { text: `Причина: MVRV-перцентиль за 4 года ${leg(ctx.prevEng?.mvrv_pct, m.p)} — выше ${lim} (по всей истории ${fmtPlain(m.d)})`, ids: ["mvrv_cycle"] };
+    if (b) return { text: `Причина: окна MVRV разошлись — по всей истории перцентиль ${leg(ctx.prevEng?.mvrv_deep, m.d)}, выше ${lim} (за 4 года ${fmtPlain(m.p)})`, ids: ["mvrv_cycle"] };
+  }
   return { text: "", ids: [] };
 }
 
-// Причина смены режима из записи о рождении кандидата (regime_birth сборщика): что сдвинулось в
-// тот снимок, где кандидат появился, — за 48 часов до повышения или за один снимок до понижения.
+// Причина смены режима из записи о рождении кандидата (regime_birth сборщика): что сдвинулось на
+// том фиксе, где кандидат появился, — разница с предыдущим фиксом. Для повышения это фикс накануне
+// принятия, для понижения — тот же фикс.
 const BAND_MOVE = {
   "adverse>neutral": "вышла из неблагоприятной полосы", "neutral>adverse": "ушла в неблагоприятную полосу",
   "neutral>supportive": "вошла в поддерживающую полосу", "supportive>neutral": "вышла из поддерживающей полосы",
   "adverse>supportive": "перешла из неблагоприятной полосы в поддерживающую", "supportive>adverse": "перешла из поддерживающей полосы в неблагоприятную",
 };
-function birthCause(birth, detName) {
+// Тело записи о рождении: оценки направлений, семьи, детекторы. Пусто — запись ничего не объясняет.
+// staleIds — карточки на отказавших входах: сдвиг такой семьи помечается.
+function birthBody(birth, detName, staleIds = null) {
   const ids = [];
   const blocks = [];
   for (const [k, b] of Object.entries(birth.blocks || {})) {
@@ -1638,25 +1847,55 @@ function birthCause(birth, detName) {
     const band = BAND_MOVE[`${b.band_from}>${b.band_to}`];
     blocks.push(`оценка ${BLOCK_GEN[k]} ${fmtSigned(b.from)} → ${fmtSigned(b.to)}${band ? ` (${band})` : ""}`);
   }
-  const fams = (birth.families || []).filter((f) => f?.id).map((f) => { ids.push(f.id); return `«${humanTitle(f.id, f.name)}» ${fmtSigned(f.from)} → ${fmtSigned(f.to)}`; });
+  const fams = (birth.families || []).filter((f) => f?.id).map((f) => { ids.push(f.id); return `«${humanTitle(f.id, f.name)}» ${fmtSigned(f.from)} → ${fmtSigned(f.to)}${staleIds?.has(f.id) ? " (источник отдал устаревшие данные)" : ""}`; });
   const dets = (birth.detectors || []).filter((d) => d?.id).map((d) => `${detName(d.id)}: ${DET_LABEL[d.from] || d.from} → ${DET_LABEL[d.to] || d.to}`);
+  return { text: [blocks.join("; "), fams.join(", "), dets.join(", ")].filter(Boolean).join(": "), ids };
+}
+function birthCause(birth, detName) {
+  const { text: body, ids } = birthBody(birth, detName);
   const t = Date.parse(birth.t || "");
   const when = finite(t) ? ` (кандидат с ${ruMoment(t)})` : "";
-  const body = [blocks.join("; "), fams.join(", "), dets.join(", ")].filter(Boolean).join(": ");
   // пустая запись без пометки о покрытии ничего не объясняет — пусть причину даёт запасная ветка
   if (!body && birth.note !== "coverage") return null;
   if (!body) return { text: `Причина: кандидат сменился из-за покрытия данных, оценки не менялись${when}`, ids };
   return { text: `Причина: ${body}${when}`, ids };
 }
 
+// Почему по новым правилам цель другая — одна строка к шагу, на котором сменился набор правил.
+function suiteSwitchNote(eng, step, sw) {
+  if (eng.suite !== V3.suite) return "";
+  const k = changeKind(step), name = suiteWord(sw.to) || "новым";
+  const m = mvrvOf(eng, true);
+  if (k.off.includes("capitulation_floor") && m.d !== null && eng.cheap === false)
+    return `По правилам ${name} пол капитуляции включается, только когда MVRV-перцентиль ${V3.capitulationPct} или ниже в обоих окнах; сейчас ${mvrvPair(eng, true)}`;
+  if (k.on.concat(k.off).includes("recovery_floor") || floorStepOf(step))
+    return `По правилам ${name} пол восстановления растёт ступенями ${V3.floorLadder.join(" / ")}% — по фиксам подряд с подтверждённым детектором разворота${finite(eng.floor_closes) ? `; сейчас таких фиксов ${eng.floor_closes}` : ""}`;
+  if (step.regime_from && step.regime_to && step.regime_from !== step.regime_to)
+    return `По правилам ${name} режим решается раз в сутки, на фиксе: понижение — сразу, повышение — на втором фиксе подряд`;
+  return "";
+}
+
+// Журнал смен после последней смены набора правил: частоты «как бывало раньше» считаются только
+// по сменам, сделанным теми же правилами. При v1 полы включались и снимались любым снимком, при
+// v3 — раз в сутки; «следующая смена наступала через 0,3 ч» о нынешних правилах была бы неправдой.
+function sinceSuiteSwitch(journal) {
+  const rows = Array.isArray(journal) ? journal : [];
+  let cut = -1;
+  rows.forEach((r, i) => { if (r?.policy_switch) cut = i; });
+  return rows.slice(cut + 1);
+}
+
 // Сообщение о смене доли BTC-панели: собирается из записи решения, а не из разницы снимков.
 // По нему должно быть можно действовать, не открывая панель: было → стало, цена и время, что
-// именно изменилось (режим или оверлей), причина, что делать по правилу исполнения и что отменит.
-function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed, why, staleMoves, staleIds, consecutive, base }) {
+// именно изменилось (режим, оверлей, ступень пола или набор правил), причина, что делать по
+// правилу исполнения и что отменит.
+function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed, staleIds, base }) {
   const curAlloc = panel.allocation, eng = curAlloc.engine, feed = curAlloc.feed || {};
   const asset = panel.assetWord || "рискового актива";
   const from = lastPct, to = curAlloc.pct;
   const dir = Math.sign(to - from);
+  // Правила набора v3 приписываются шагу, только пока снимок объявляет знакомый контракт.
+  const v3 = !!eng.contract;
   // После паузы «прежнего» режима и оверлея нет — шаг знает только, что стало.
   const before = resumed ? null : prevEng;
   const steps = found.steps.length
@@ -1671,10 +1910,11 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
     }
     // Шаг взят не из журнала (цепочка журнала не сошлась с тем, что видит бот), но запись о том же
     // переходе в журнале есть — причина берётся из неё. Тот же переход дважды за полчаса невозможен.
-    if (!s.cause || !s.born) {
+    if (!s.cause || !s.born || !s.policy_switch) {
       const e = (feed.log || []).find((x) => sameNum(x.from, s.from) && sameNum(x.to, s.to) && Math.abs(x.t - s.t) <= 30 * 60e3);
       if (e && !s.cause && e.cause) s.cause = e.cause;
       if (e && !s.born && e.born) s.born = e.born;
+      if (e && !s.policy_switch && e.policy_switch) s.policy_switch = e.policy_switch;
     }
   }
   const last = steps[steps.length - 1];
@@ -1687,23 +1927,37 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
   }
   // история без режима (снимки ранних версий): у единственного шага он известен из базы сравнения
   if (steps.length === 1 && !resumed && !last.regime_from && prevEng?.state) last.regime_from = prevEng.state;
+  // Шаг, на котором сменился набор боевых правил: его помечает журнал монитора. Если записи об
+  // этом шаге в журнале нет вовсе, смена видна по самим снимкам — база сравнения названа другим
+  // набором (или не названа: состояние записано до выпуска). Запись журнала БЕЗ пометки — обычный
+  // шаг: бот пропустил прогон выпуска, а цель сменилась позже, уже по новым правилам.
+  const logged = (feed.log || []).some((x) => sameNum(x.from, last.from) && sameNum(x.to, last.to) && Math.abs(x.t - last.t) <= 30 * 60e3);
+  const sw = last.policy_switch || (!logged && live && steps.length === 1 && !resumed ? suiteSwitch(prevEng, eng) : null);
+  if (sw && !last.policy_switch) last.policy_switch = sw;
   const k = changeKind(last);
   const emergencyOn = eng.emergency;
   const emergencyOff = !eng.emergency && !!prevEng?.emergency;
   const regimeMoved = !!last.regime_from && !!last.regime_to && last.regime_from !== last.regime_to;
   const regimeUp = regimeMoved && severity(last.regime_to) > severity(last.regime_from);
-  // Выдержал ли кандидат полный срок: момент его рождения — из журнала монитора, а без журнала —
-  // из самого снимка (на такте принятия кандидат и есть новый режим).
+  const fs = v3 ? floorStepOf(last) : null;
+  // Принято ли повышение по правилу «второй фикс подряд»: кандидат появился на фиксе прошлых суток
+  // (момент его рождения — из журнала монитора, а без журнала — из самого снимка) либо движок сам
+  // насчитал ему два фикса. На шаге смены правил и у снимка прежней формы этого не утверждаем.
   const bornAt = Date.parse(last.born || (live ? eng.since : "") || "");
-  const heldFull = finite(bornAt) && last.t - bornAt >= (V1.holdHours - 0.5) * 3600e3;
+  const heldFull = v3 && !sw && ((live && finite(eng.count) && eng.count >= V3.confirmUp) || (finite(bornAt) && fixDay(bornAt) < fixDay(last.t)));
   const detName = (id) => detectorHuman((panel.detectors || []).find((d) => d.id === id)?.name || id);
-  const ctx = { feed, prevState, prevEng, why, staleMoves, staleIds, strategicIds: strategicIdsOf(panel), consecutive: consecutive && live, logFamilies: live && last.cause?.families?.length ? last.cause.families : null };
+  const ctx = {
+    prevEng, staleIds,
+    logFamilies: live && last.cause?.families?.length ? last.cause.families : null,
+    missedFix: live && (curAlloc.reasons || []).includes("missed_fix_reset"),
+  };
 
   const verb = dir > 0 ? "увеличена" : "сокращена";
   const title = emergencyOn ? `Аварийный режим: доля ${asset} ${to === 0 ? "обнулена" : verb}`
     : emergencyOff ? `Аварийный режим снят: доля ${asset} ${verb}`
     : dir === 0 ? `Доля ${asset} менялась между запусками`
     : resumed ? `Решение возобновлено: доля ${asset} ${verb}`
+    : sw ? `Смена правил: доля ${asset} ${verb}`
     : `Доля ${asset} ${verb}`;
 
   const causes = [];
@@ -1722,19 +1976,23 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
     for (const s of steps.slice(0, -1)) {
       const kind = changeKind(s);
       const on = kind.on.find((o) => OVERLAY_WORD[o]), off = kind.off.find((o) => OVERLAY_WORD[o]);
-      const what = on ? `включён ${OVERLAY_WORD[on]}` : off ? `снят ${OVERLAY_WORD[off]}`
+      const rung = v3 && !s.policy_switch ? floorStepOf(s) : null;
+      const what = s.policy_switch ? "смена набора правил" : on ? `включён ${OVERLAY_WORD[on]}` : off ? `снят ${OVERLAY_WORD[off]}`
+        : rung ? `пол восстановления: ступень ${rung.rung} из ${V3.floorLadder.length}`
         : s.regime_from && s.regime_to && s.regime_from !== s.regime_to ? `режим «${regimeWord(s.regime_from)}» → «${regimeWord(s.regime_to)}»` : "смена цели";
-      causes.push(`${s.from}% → ${s.to}% — ${what}${s.cause?.text ? ` (${s.cause.text})` : ""}`);
+      // шагу ступени пола журнал монитора пишет ту же причину, что названа здесь («пол восстановления:
+      // ступень n из 3 — …»); журнал до выпуска 2.15.0 писал ему причину давней смены режима
+      causes.push(`${s.from}% → ${s.to}% — ${what}${s.cause?.text && !rung ? ` (${s.cause.text})` : ""}`);
     }
   }
   // что изменилось
   if (emergencyOn) {
     causes.push(`Сработал аварийный переключатель${eng.override ? `: ${typo(eng.override.toLowerCase())}` : ""}${eng.integrity_inputs ? ` (${detectorInputs(eng.integrity_inputs)})` : ""}. Цель обнулена независимо от режима`);
   } else if (!resumed) {
-    let what = structureLine(last);
-    if (what && regimeMoved && !emergencyOff && !["insufficient", "emergency"].includes(last.regime_from)) {
-      if (regimeUp && heldFull) what += `, принят после ${V1.holdHours} часов удержания`;
-      else if (!regimeUp) what += ", подтверждён вторым снимком подряд";
+    let what = structureLine(last, v3);
+    if (what && regimeMoved && !sw && v3 && !emergencyOff && !["insufficient", "emergency"].includes(last.regime_from)) {
+      if (regimeUp && heldFull) what += ", принят на втором фиксе подряд";
+      else if (!regimeUp) what += ", принят на суточном фиксе";
     }
     if (what) causes.push(what);
   }
@@ -1742,17 +2000,26 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
   const causeIds = [];
   const plainStep = !emergencyOn && !emergencyOff && !resumed && dir !== 0;
   // у оверлея входы известны по построению детектора — на них и проверяется качество данных
-  const floorIds = k.on.concat(k.off).includes("recovery_floor") ? ["mvrv_cycle", "trend_regime", "etf_regime", "exchange_supply"] : null;
-  // У оверлея гистерезиса нет: причина его смены лежит в ЭТОМ же снимке, и детектор называет её
-  // числами — перцентиль против порога, счёт подтверждений. Поэтому смена одного оверлея,
-  // случившаяся в текущем снимке, объясняется со снимка, одинаково при журнале монитора и без
-  // него. Журнал нужен там, где снимок причины не несёт: у смены режима (она родилась за 48 часов
-  // до смены цели) и у шага, пропущенного между запусками.
-  const oc = plainStep && k.overlay && live ? overlayCause(last, eng, ctx) : null;
-  if (oc?.text && !regimeMoved) {
+  const floorIds = k.on.concat(k.off).includes("recovery_floor") || fs ? ["mvrv_cycle", "trend_regime", "etf_regime", "exchange_supply"] : null;
+  // У оверлея и у ступени пола гистерезиса нет: причина лежит в записи решения ЭТОГО же снимка, и
+  // она называется числами — оба перцентиля против порога, счёт подтверждений, число фиксов
+  // подряд. Поэтому смена одного оверлея, случившаяся в текущем снимке, объясняется со снимка,
+  // одинаково при журнале монитора и без него. Журнал нужен там, где снимок причины не несёт: у
+  // смены режима (повышение родилось на фиксе накануне), у шага, пропущенного между запусками, и
+  // у шага смены правил.
+  const oc = plainStep && !sw && (k.overlay || fs) && live ? overlayCause(last, eng, ctx) : null;
+  if (sw && plainStep) {
+    // Цель изменило правило, а не рынок: причина — смена набора (текст монитора, если он её
+    // записал), механика прежнего набора и сдвиги соседнего снимка причиной не называются.
+    const names = suiteWord(sw.from) && suiteWord(sw.to) ? ` ${suiteWord(sw.from)} → ${suiteWord(sw.to)}` : "";
+    causes.push(`Причина: ${(logged && last.cause?.text) || `смена боевых правил${names}`}`);
+    const note = live ? suiteSwitchNote(eng, last, sw) : "";
+    if (note) causes.push(note);
+    if (k.overlay) causeIds.push(...(floorIds || ["mvrv_cycle"]));
+  } else if (oc?.text && !regimeMoved) {
     causes.push(oc.text);
     causeIds.push(...(floorIds || oc.ids));
-  } else if (last.cause?.text) {
+  } else if (last.cause?.text && !fs) {
     const since = Date.parse(last.born || "");
     causes.push(`Причина: ${last.cause.text}${regimeMoved && finite(since) && Math.abs(since - last.t) > 60000 ? ` (кандидат с ${ruMoment(since)})` : ""}`);
     for (const f of last.cause.families || []) if (asText(f.id)) causeIds.push(f.id);
@@ -1763,17 +2030,23 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
       if (oc.text) causes.push(oc.text);
       causeIds.push(...(floorIds || oc.ids));
     }
-    if (regimeMoved) {
+    if (regimeMoved && fs && last.cause?.text) {
+      // режим сменился на том же фиксе, где пол перешёл на другую ступень: причину режима несёт журнал
+      // (ступень объяснена строкой выше — со снимка)
+      const since = Date.parse(last.born || "");
+      causes.push(`Причина: ${last.cause.text}${finite(since) && Math.abs(since - last.t) > 60000 ? ` (кандидат с ${ruMoment(since)})` : ""}`);
+      for (const f of last.cause.families || []) if (asText(f.id)) causeIds.push(f.id);
+    } else if (regimeMoved) {
       // Без журнала монитора причину смены режима из соседнего снимка НЕ выдумываем: к моменту
       // смены цели соседние снимки одинаковы, а случайное совпадение уже раз назвали причиной
       // (23.09 — качок источника ETF). Есть запись о рождении кандидата — берём её; нет — говорим
-      // только то, что известно: режим сменился по правилу удержания, и каков он сейчас.
+      // только то, что известно: режим сменился на фиксе, и каков он сейчас.
       const bc = live && feed.birth && feed.birth.candidate === last.regime_to ? birthCause(feed.birth, detName) : null;
       if (bc) {
         causes.push(bc.text);
         causeIds.push(...bc.ids);
       } else {
-        causes.push(!regimeUp ? "Причина: смена режима, подтверждённая вторым снимком" : heldFull ? "Причина: смена режима, принятая после удержания" : "Причина: смена режима");
+        causes.push(!v3 ? "Причина: смена режима" : !regimeUp ? "Причина: смена режима на суточном фиксе" : heldFull ? "Причина: смена режима, подтверждённая на втором фиксе подряд" : "Причина: смена режима");
         // правило читается с кандидата — оно объясняет режим, только когда кандидат им и стал
         const rule = live && eng.candidate === eng.state ? ruleLine(eng) : "";
         if (rule) causes.push(`Сейчас: ${rule}`);
@@ -1782,20 +2055,24 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
   }
   const undo = undoLines(eng, prevEng, dir, last);
   if (!emergencyOn) {
-    // после понижения по режиму кандидат на удержании и есть «что отменит» — дважды не печатаем
+    // после понижения по режиму ждущий кандидат и есть «что отменит» — дважды не печатаем
     const hold = candidateOnHoldLine(eng);
-    if (hold && !undo.some((u) => u.startsWith("Возврат уже на удержании"))) causes.push(hold);
+    if (hold && !undo.some((u) => u.startsWith("Возврат уже ждёт"))) causes.push(hold);
+    // у растущего пола следующая ступень — тоже срок, и он известен
+    const nextRung = v3 && dir > 0 && eng.overlays.includes("recovery_floor") ? V3.floorLadder[floorRung(to)] : null;
+    if (finite(nextRung)) causes.push(`Следующая ступень пола — ${nextRung}% ${fixRef(eng)}, если детектор разворота останется подтверждённым`);
   }
   const track = prevState.hold_track;
-  if (regimeUp && track && track.state === last.regime_from && track.resets > 0) {
+  if (regimeUp && !sw && track && track.state === last.regime_from && track.resets > 0) {
     const first = Date.parse(track.first_since || "");
-    causes.push(`Удержание до этого срывалось ${track.resets} ${plural(track.resets, "раз", "раза", "раз")}${finite(first) ? `: первый кандидат на повышение появился ${ruMoment(first)}` : ""}`);
+    causes.push(`Ожидание второго фикса до этого срывалось ${track.resets} ${plural(track.resets, "раз", "раза", "раз")}${finite(first) ? `: первый кандидат на повышение появился ${ruMoment(first)}` : ""}`);
   }
   const quality = qualityLine(eng, causeIds, staleIds);
   if (quality) causes.push(quality);
   // База частот — по журналу монитора, а без него по собственному журналу бота; опубликованная
-  // история панели сюда не идёт: на прореженных строках она считала одну смену дважды.
-  const past = dir !== 0 ? alikeHistory(feed.log && feed.log.length ? feed.log : prevState.alloc_changes, last) : [];
+  // история панели сюда не идёт: на прореженных строках она считала одну смену дважды. Считаются
+  // только смены, сделанные нынешним набором правил, а у шага смены правил базы нет вовсе.
+  const past = dir !== 0 && !sw ? alikeHistory(sinceSuiteSwitch(feed.log && feed.log.length ? feed.log : prevState.alloc_changes), last) : [];
   if (past.length >= ALIKE_MIN) {
     const what = k.on.length && OVERLAY_WORD[k.on[0]] ? `${capFirst(OVERLAY_WORD[k.on[0]])} включался` : "Такая же смена была";
     causes.push(`${what} ${past.length} ${plural(past.length, "раз", "раза", "раз")}: следующая смена цели наступала через ${past.slice(-5).map((p) => fmtSpan(p.hours)).join(", ")}`);
@@ -1806,8 +2083,8 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
   const next = pendingDowngrade(eng, to);
   if (eng.contract) {
     if (emergencyOn) todo.push("Понижение — сразу: убрать риск и ждать нормализации");
-    else if (dir > 0) todo.push(next ? `Повышение — траншами со следующей сессии; к ней цель может снизиться: кандидат уже «${regimeWord(next.regime)}» (${next.pct}%)` : "Повышение — траншами со следующей сессии");
-    else if (dir < 0) todo.push(next ? `Понижение — сразу. Кандидат уже «${regimeWord(next.regime)}»: следующий шаг до ${next.pct}% подтвердится ближайшим снимком` : "Понижение — сразу");
+    else if (dir > 0) todo.push(next ? `Повышение — траншами со следующей сессии; к ней цель может снизиться: по данным этого прогона кандидат уже «${regimeWord(next.regime)}» (${next.pct}%), решение — ${fixRef(eng)}` : "Повышение — траншами со следующей сессии");
+    else if (dir < 0) todo.push(next ? `Понижение — сразу. По данным этого прогона кандидат уже «${regimeWord(next.regime)}»: следующий шаг до ${next.pct}% — ${fixRef(eng)}` : "Понижение — сразу");
     else todo.push(`Действий не требуется: цель снова ${to}%`);
   }
 
@@ -1830,8 +2107,9 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
     steps: steps.map(({ cause, born, ...s }) => s),
     facts: {
       dir, source: found.source, resumed: !!resumed,
-      what: emergencyOn ? "emergency" : emergencyOff ? "emergency_off" : k.overlay && regimeMoved ? "both" : k.overlay ? "overlay" : regimeMoved ? "regime" : "",
+      what: emergencyOn ? "emergency" : emergencyOff ? "emergency_off" : sw ? "suite" : (k.overlay || fs) && regimeMoved ? "both" : k.overlay ? "overlay" : regimeMoved ? "regime" : fs ? "floor_step" : "",
       on: k.on, off: k.off, regime_up: regimeUp, held: heldFull, explained: !!last.cause?.text,
+      suite_from: sw ? suiteWord(sw.from) : "", suite_to: sw ? suiteWord(sw.to) : "",
     },
     note: "",
   };
@@ -1859,40 +2137,44 @@ function pauseEvent(panel, base, lastPct) {
   };
 }
 
-// Удержание повышения сорвано: кандидат лучше опубликованного режима ждал своих 48 часов и
-// пропал. 20–21.09 пять таких сбросов из-за источника ETF сдвинули повышение 20 → 45 примерно
-// на 60 часов (цена 81,2 → 86,2 тыс.) — и ни одного сообщения об этом не было.
-function holdResetEvent({ panel, prevState, prevEng, why, staleMoves, staleIds, consecutive }) {
+// Ожидание повышения сорвано: кандидат лучше опубликованного режима ждал второго фикса подряд и
+// на нём не подтвердился (либо сутки прошли без фикса, и счёт начат заново). Цена срыва — не
+// меньше суток до повышения: 20–21.09, ещё при часовом удержании v1, пять срывов из-за источника
+// ETF сдвинули повышение 20 → 45 примерно на 60 часов (цена 81,2 → 86,2 тыс.) — и ни одного
+// сообщения об этом не было. Сообщение — одно на эпизод (см. HOLD_RESET_REPEAT_MS).
+function holdResetEvent({ panel, prevState, prevEng, staleIds }) {
   const eng = panel.allocation.engine, feed = panel.allocation.feed || {};
-  if (!prevEng || !prevEng.hold_until || eng.state !== prevEng.state || eng.candidate === prevEng.candidate) return null;
-  if (!(prevEng.candidate in REGIME_SEVERITY) || severity(prevEng.candidate) <= severity(prevEng.state)) return null;
-  const since = Date.parse(prevEng.since || "");
-  const prevT = Date.parse(prevState.generated_at || "");
-  if (!finite(since) || !finite(prevT)) return null;
-  const heldH = (prevT - since) / 3600e3;
-  if (heldH < HOLD_RESET_MIN_H) {
-    console.log(`удержание повышения сорвано на ${fmtPlain(heldH)} ч (короче ${HOLD_RESET_MIN_H} ч — в рассылку не идёт)`);
+  const broken = prevEng ? pendingBroken(prevEng, eng) : null;
+  if (!broken) return null;
+  const { was, now, missed } = broken;
+  const track = prevState.hold_track;
+  const toldAt = Date.parse(track?.told_at || "");
+  if (track && track.state === eng.state && finite(toldAt) && eng.t - toldAt < HOLD_RESET_REPEAT_MS) {
+    console.log(`ожидание повышения сорвано снова — кандидат «${regimeWord(was.candidate)}», фикс ${eng.fix_at}; о срыве в этом эпизоде уже сообщалось (в рассылку не идёт)`);
     return null;
   }
   const step = (r) => rungNote(eng, r);
+  const fixAt = fixWhen(eng.fix_at);
+  const detName = (id) => detectorHuman((panel.detectors || []).find((d) => d.id === id)?.name || id);
+  // что сдвинулось между двумя фиксами — из записи о рождении нынешнего кандидата на этом же фиксе
+  const born = feed.birth && feed.birth.candidate === eng.candidate && feed.birth.t === eng.fix_at ? birthBody(feed.birth, detName, staleIds).text : "";
   const rule = ruleLine(eng);
-  const moved = movedInputs({ feed, why, staleMoves, staleIds, consecutive, strategicIds: strategicIdsOf(panel) }, null);
-  const again = severity(eng.candidate) > severity(eng.state) && eng.hold_until && eng.candidate in REGIME_SEVERITY;
-  const down = pendingDowngrade(eng, panel.allocation.pct);
   const lines = [
-    `Причина: по свежим данным режим ${eng.candidate === eng.state ? "снова" : "уже"} «${regimeWord(eng.candidate)}»${rule ? `: ${rule}` : ""}${moved.text ? `; сдвинулся показатель ${moved.text}` : ""}`,
-    again ? `Отсчёт начат заново для кандидата «${regimeWord(eng.candidate)}»${step(eng.candidate)}: не раньше ${ruMoment(Date.parse(eng.hold_until))}`
-      : down ? `Кандидат хуже текущего режима: понижение до ${down.pct}% подтвердится ближайшим снимком`
-      : `Отсчёт ${V1.holdHours} часов начнётся заново, когда кандидат вернётся`,
+    missed ? "Причина: сутки прошли без фикса — счёт фиксов подряд начат заново"
+      : `Причина: на фиксе кандидат ${eng.candidate === eng.state ? "снова" : "уже"} «${regimeWord(eng.candidate)}»${rule ? `: ${rule}` : ""}${born ? `; между фиксами сдвинулось: ${born}` : ""}`,
+    now ? `Счёт идёт заново для кандидата «${regimeWord(now.candidate)}»${step(now.candidate)}: ${pendingCount(now)}${fixWhen(eng.next_fix_at) ? `, решение — на фиксе ${fixWhen(eng.next_fix_at)}` : ""}`
+      : "Счёт начнётся заново, когда кандидат лучше режима появится на фиксе; повышение — на втором фиксе подряд",
   ];
   return {
     kind: "hold",
-    // не чаще раза на удержание: ключ — момент рождения сорванного кандидата
-    key: `hold:reset@${prevEng.since}`,
+    // не чаще раза на срыв: ключ — фикс, на котором кандидат не подтвердился
+    key: `hold:reset@${eng.fix_at}`,
     title: `Повышение доли ${panel.assetWord || "рискового актива"} откладывается`,
     before: "",
     after: "",
-    detail: `Кандидат «${regimeWord(prevEng.candidate)}»${step(prevEng.candidate)} продержался ${fmtPlain(heldH)} ч из ${V1.holdHours} и сорван ${ruMoment(eng.t)}. Цель остаётся ${panel.allocation.pct}%`,
+    detail: missed
+      ? `Кандидат «${regimeWord(was.candidate)}»${step(was.candidate)} ждал второго фикса, но сутки прошли без фикса. Цель остаётся ${panel.allocation.pct}%`
+      : `Кандидат «${regimeWord(was.candidate)}»${step(was.candidate)} не подтвердился на втором фиксе${fixAt ? ` ${fixAt}` : ""}. Цель остаётся ${panel.allocation.pct}%`,
     lines,
     note: "",
   };
@@ -1924,16 +2206,15 @@ function riskEvents(detectorMoves, base, skipId = "") {
   return out;
 }
 
-// Все события о решении BTC-панели за один такт: пауза, смена доли, возобновление, сброс
-// удержания, сигналы риска.
-function btcDecisionEvents({ prevState, panel, why, staleMoves, staleIds, detectorMoves }) {
+// Все события о решении BTC-панели за один такт: пауза, смена доли, возобновление, срыв
+// ожидания повышения, сигналы риска.
+function btcDecisionEvents({ prevState, panel, staleIds, detectorMoves }) {
   const out = [];
   const curAlloc = panel.allocation, eng = curAlloc.engine, feed = curAlloc.feed || {};
   const prevAlloc = prevState.allocation || null;
   const prevEng = engineOf(prevAlloc);
   const prevT = Date.parse(prevState.generated_at || "");
   const base = prevState.generated_at || "";
-  const consecutive = finite(prevT) && finite(feed.prev_t) && Math.abs(feed.prev_t - prevT) < 1000;
   const hadTarget = !!prevAlloc && finite(prevAlloc.pct);
   // Состояние прежнего формата на паузе доли не хранило вовсе (allocation: null). Последняя
   // опубликованная цель в нём всё же есть — в ряду наблюдений; по ней выкладка, попавшая на
@@ -1957,7 +2238,7 @@ function btcDecisionEvents({ prevState, panel, why, staleMoves, staleIds, detect
 
   const resumed = !!prevAlloc?.paused || !hadTarget;
   const found = resumed ? { source: "diff", steps: [] } : allocationSteps(prevT, eng.t, lastPct, curAlloc.pct, feed);
-  const shared = { panel, prevState, prevEng, why, staleMoves, staleIds, consecutive };
+  const shared = { panel, prevState, prevEng, staleIds };
   if (!sameNum(lastPct, curAlloc.pct) || found.steps.length > 1) {
     out.push(btcAllocationEvent({ ...shared, lastPct, found, resumed, base }));
   } else {
@@ -2037,7 +2318,6 @@ function diff(prevState, panel) {
   const prevAlloc = prevState.allocation || null;
   const curAlloc = panel.allocation || null;
   const why = [];
-  const staleMoves = [];
   const staleIds = new Set((panel.indicators || []).filter((i) => i.stale).map((i) => i.id));
   const detectorMoves = [];
 
@@ -2061,12 +2341,7 @@ function diff(prevState, panel) {
     // BTC-панель: карточка посчитана на отказавших входах. В рассылку она не идёт и причиной
     // смены доли не называется; база сравнения при этом НЕ двигается (см. snapshotState), поэтому
     // после возврата источника свежее значение сравнится с последним свежим и ничего не потеряется.
-    if (i.stale) {
-      if (i.score != null && was.score != null && !sameNum(i.score, was.score)) {
-        staleMoves.push({ id: i.id, name: humanTitle(i.id, i.name), worse: i.score < was.score, strategic: !!i.strategic });
-      }
-      continue;
-    }
+    if (i.stale) continue;
     if (was.stale) continue; // свежей базы ещё не было: карточка впервые увидена уже на отказавших входах
 
     const zoneChanged =
@@ -2336,7 +2611,7 @@ function diff(prevState, panel) {
   // ---- Доля капитала: что стало, почему и что это отменит ----
   if (curAlloc?.engine) {
     // BTC-панель публикует запись решения — сообщение собирается из неё.
-    events.push(...btcDecisionEvents({ prevState, panel, why, staleMoves, staleIds, detectorMoves }));
+    events.push(...btcDecisionEvents({ prevState, panel, staleIds, detectorMoves }));
   } else if (prevAlloc && curAlloc && finite(prevAlloc.pct) && finite(curAlloc.pct) && !sameNum(prevAlloc.pct, curAlloc.pct)) {
     const dir = curAlloc.pct > prevAlloc.pct ? "увеличена" : "сокращена";
     // Пять строк подряд «— оценка ухудшилась» читаются как шум. Однотипное сжимается в одну
@@ -2455,13 +2730,18 @@ function templateComment(ev) {
     if (f.what === "emergency_off") return "Нарушение целостности рынка ушло — цель снова задаёт режим.";
     if (f.dir === 0) return "Смена и обратная смена уместились между двумя запусками бота; сейчас цель прежняя.";
     if (f.resumed) return "Пауза снята — панель снова показывает цель.";
-    if (f.what === "overlay" && f.on.length) return `Это ${overlay} поверх режима, а не смена режима: он включается и снимается одним снимком.`;
+    if (f.what === "suite") return `Цель изменили правила, а не рынок: решение принимается по набору ${f.suite_to || "новых правил"}${f.suite_from ? ` вместо ${f.suite_from}` : ""}.`;
+    if (f.what === "floor_step") return f.dir > 0
+      ? "Пол восстановления поднялся на ступень: сигнал разворота подтверждён ещё на одном суточном фиксе подряд."
+      : "Пол восстановления вернулся на нижнюю ступень: счёт фиксов подряд начат заново.";
+    if (f.what === "overlay" && f.on.includes("recovery_floor")) return "Это пол восстановления поверх режима, а не смена режима: он растёт ступенями по суточным фиксам подряд и снимается на фиксе.";
+    if (f.what === "overlay" && f.on.length) return `Это ${overlay} поверх режима, а не смена режима: он включается и снимается на суточном фиксе.`;
     if (f.what === "overlay") return `Снят ${overlay}; сам режим при этом не менялся.`;
-    if (f.what === "both") return "В одном снимке сошлись смена режима и смена оверлея — цель задаёт то, что сильнее.";
+    if (f.what === "both") return "На одном фиксе сошлись смена режима и смена оверлея — цель задаёт то, что сильнее.";
     if (f.what === "regime" && f.regime_up) return f.held
-      ? "Режим улучшился и выдержал удержание: повышение принимается только после 48 часов без встречного снимка."
+      ? "Режим улучшился и подтвердился: повышение принимается только на втором суточном фиксе подряд с тем же кандидатом."
       : "Режим улучшился — цель поднята на его ступень.";
-    if (f.what === "regime") return "Режим ухудшился: понижение принимается вторым снимком подряд, обратный ход — не раньше чем через 48 часов.";
+    if (f.what === "regime") return "Режим ухудшился: понижение принимается на первом же суточном фиксе, обратный ход — не раньше второго фикса подряд.";
     return f.dir > 0 ? "Цель повышена по правилам движка." : "Цель понижена по правилам движка.";
   }
   if (ev.kind === "allocation") {
@@ -2576,7 +2856,7 @@ const LLM_SYSTEM = `Ты пишешь короткий разбор к увед�
 
 СЛОВА. Только русский язык; общепринятые сокращения (ФРС, ETF, MVRV) можно, латиницу и кириллицу в одном слове не смешивай. Не называй устройство расчёта: панель, дашборд, баллы, зоны, композит, ядро, ячейки, ворота, якоря, детекторы, монитор, вклад в оценку и имена полей входа читателю неизвестны.
 
-ЕСЛИ СОБЫТИЕ — ИЗМЕНЕНИЕ ДОЛИ КАПИТАЛА. Причина, действие и условие отмены уже посчитаны и стоят в сообщении (why_changed, what_to_do, what_cancels); цена, режим, кандидат и оверлей — в decision_now. Других причин не придумывай и готовые строки не пересказывай. Скажи, что смена значит для позиции, что за рыночный сдвиг за ней стоит и какой признак во входе ближе всего к тому, чтобы её отменить. Слова «режим», «ступень», «пол», «кандидат», «удержание» здесь допустимы — они стоят в самом сообщении; вместо «детектор» говори «сигнал».
+ЕСЛИ СОБЫТИЕ — ИЗМЕНЕНИЕ ДОЛИ КАПИТАЛА. Причина, действие и условие отмены уже посчитаны и стоят в сообщении (why_changed, what_to_do, what_cancels); цена, режим, кандидат и оверлей — в decision_now. Других причин не придумывай и готовые строки не пересказывай. Скажи, что смена значит для позиции, что за рыночный сдвиг за ней стоит и какой признак во входе ближе всего к тому, чтобы её отменить. Слова «режим», «ступень», «пол», «кандидат», «фикс» здесь допустимы — они стоят в самом сообщении; вместо «детектор» говори «сигнал». Решение о режиме принимается раз в сутки, на фиксе: сроки называй в фиксах, как в what_cancels, а не в часах.
 
 ДАТА. Сегодняшняя дата по Москве — в поле today, даты данных — в самих событиях. Не называй данные свежими или давними, не сверившись с ними.
 
@@ -2603,15 +2883,23 @@ function llmContext(panel) {
   const ctx = { market_now: named };
   const eng = panel.allocation?.engine;
   if (eng) {
-    const hold = Date.parse(eng.hold_until || "");
-    const ovl = (eng.overlays || []).map((o) => OVERLAY_WORD[o] || (o === "emergency_override" ? "аварийный режим" : o));
+    // Решение — в терминах суточного фикса: когда принято, когда следующее, ждёт ли повышение
+    // второго фикса, на какой ступени пол. Часов удержания и «снимков подряд» у набора v3 нет.
+    const wait = pendingOf(eng);
+    const fixAt = fixWhen(eng.fix_at), nextAt = fixWhen(eng.next_fix_at);
+    const pct = panel.allocation.pct;
+    const ovl = (eng.overlays || []).map((o) => (o === "recovery_floor" && eng.contract && rungWord(pct) ? `${OVERLAY_WORD[o]}, ${rungWord(pct)}` : OVERLAY_WORD[o] || (o === "emergency_override" ? "аварийный режим" : o)));
+    const m = mvrvOf(eng);
     ctx.decision_now = [
       finite(eng.price) ? `цена биткоина ${fmtUsd(eng.price)}` : "",
       `снимок ${ruMoment(eng.t)}`,
-      panel.allocation.paused ? "решение на паузе, цель не опубликована" : `доля биткоина ${panel.allocation.pct}%`,
+      panel.allocation.paused ? "решение на паузе, цель не опубликована" : `доля биткоина ${pct}%`,
       eng.state ? `режим «${regimeWord(eng.state)}»${finite(eng.base) ? ` (ступень ${eng.base}%)` : ""}` : "",
-      eng.candidate && eng.candidate !== eng.state ? `кандидат «${regimeWord(eng.candidate)}»${finite(hold) ? `, на удержании до ${ruMoment(hold)}` : ""}` : "кандидат совпадает с режимом",
+      wait ? `кандидат «${regimeWord(wait.candidate)}» ждёт второго фикса подряд: ${pendingCount(wait)}${nextAt ? `, решение — на фиксе ${nextAt}` : ""}`
+        : eng.candidate && eng.candidate !== eng.state ? `кандидат «${regimeWord(eng.candidate)}»` : "кандидат совпадает с режимом",
       ovl.length ? `оверлей: ${ovl.join(", ")}` : "оверлеев нет",
+      eng.contract && fixAt ? `решение принимается раз в сутки, на фиксе: последний — ${fixAt}${nextAt ? `, следующий — ${nextAt}` : ""}` : "",
+      eng.contract && m.p !== null ? `MVRV-перцентиль ${mvrvPair(eng)}` : "",
     ].filter(Boolean).join("; ");
   }
   return ctx;
@@ -3620,16 +3908,20 @@ function pruneSent(sent, now) {
   return out;
 }
 
-// Счёт сбросов удержания за время, пока опубликованный режим не менялся: сообщение о принятом
-// повышении говорит, сколько раз отсчёт срывался и когда кандидат появился впервые.
-function nextHoldTrack(prev, panel) {
+// Счёт сорванных ожиданий повышения за время, пока опубликованный режим не менялся (эпизод):
+// сообщение о принятом повышении говорит, сколько раз кандидат не подтвердился на втором фиксе и
+// когда он появился впервые; told_at — когда о срыве в этом эпизоде сообщалось (второй раз за
+// эпизод не сообщается). Смена набора правил начинает счёт заново: сорванное удержание прежнего
+// набора к ожиданию нынешнего не относится.
+function nextHoldTrack(prev, panel, events = []) {
   const eng = panel.allocation.engine;
   if (panel.allocation.paused) return prev?.hold_track || null;
   const prevEng = engineOf(prev?.allocation);
-  const track = prev?.hold_track && prev.hold_track.state === eng.state ? { ...prev.hold_track } : { state: eng.state, first_since: "", resets: 0 };
-  const held = prevEng && !prev.allocation.paused && prevEng.state === eng.state && prevEng.hold_until && severity(prevEng.candidate) > severity(prevEng.state);
-  if (held && prevEng.candidate !== eng.candidate) track.resets++;
-  if (eng.hold_until && !track.first_since) track.first_since = eng.since;
+  const same = prev?.hold_track && prev.hold_track.state === eng.state && !suiteSwitch(prevEng, eng);
+  const track = same ? { ...prev.hold_track } : { state: eng.state, first_since: "", resets: 0 };
+  if (prevEng && !prev.allocation.paused && pendingBroken(prevEng, eng)) track.resets++;
+  if (pendingOf(eng) && !track.first_since) track.first_since = eng.since || eng.fix_at || "";
+  if (events.some((e) => e.kind === "hold")) track.told_at = panel.generated_at || "";
   return track;
 }
 
@@ -3693,7 +3985,7 @@ function snapshotState(panel, prev = null, events = []) {
     state.pause = allocation.paused
       ? { since: was.since || panel.generated_at || "", announced: !!was.announced || told, notified_at: told ? panel.generated_at || "" : was.notified_at || "" }
       : { since: "", announced: false, notified_at: was.notified_at || "" };
-    state.hold_track = nextHoldTrack(prev, panel);
+    state.hold_track = nextHoldTrack(prev, panel, events);
   }
   if (panel.warnings) state.warnings = trackWarnings(prev?.warnings, panel.warnings, Date.parse(panel.generated_at || "") || Date.now(), !prev?.indicators).state;
   else if (prev?.warnings) state.warnings = prev.warnings;
@@ -3718,7 +4010,8 @@ function appendChanges(prev, panel, prevAlloc, steps = null) {
     for (const s of steps) {
       if (!finite(s.t) || !finite(s.from) || !finite(s.to) || sameNum(s.from, s.to) || has(s.t, s.to)) continue;
       const known = Array.isArray(s.overlays_from) && Array.isArray(s.overlays_to);
-      rows.push({ t: s.t, from: s.from, to: s.to, ...(known ? { overlays_from: s.overlays_from, overlays_to: s.overlays_to } : {}) });
+      // пометка шага смены правил: по ней база частот не смешивает смены разных наборов
+      rows.push({ t: s.t, from: s.from, to: s.to, ...(known ? { overlays_from: s.overlays_from, overlays_to: s.overlays_to } : {}), ...(s.policy_switch ? { policy_switch: s.policy_switch } : {}) });
     }
     return rows.sort((a, b) => a.t - b.t).slice(-CHANGES_MAX);
   }

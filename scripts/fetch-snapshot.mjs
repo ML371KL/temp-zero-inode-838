@@ -20,6 +20,10 @@ import { executionPolicyMetadataV1 } from "../docs/execution-policy-v1.mjs";
 import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
 import { applyRevisionBounceToleranceV1, buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
 import { riskOffConfirmationDeferredV2 } from "../docs/policy-v2-candidate.mjs";
+import { policySuiteMetadataV3 } from "../docs/policy-suite-v3.mjs";
+import { evaluateV3Inputs } from "../docs/policy-v3-candidate.mjs";
+import { runShadowVariantsV1 } from "./monitor-lines-v1.mjs";
+import { buildLiveDecisionV3, fixDiffV3, liveAllocationMetadataV3, liveInputsV3, liveRegimeBirthV3, liveRegimeMetaV3 } from "./live-decision-v3.mjs";
 
 // Одноразовый графт-пакет восстановления форвард-монитора (инцидент 2026-07-21): криптографически
 // провалидированный архив доинцидентной цепи + параметры генезиса новой эры. Файл статичен и
@@ -29,7 +33,7 @@ let MONITOR_GRAFT_V1=null;
 try{MONITOR_GRAFT_V1=JSON.parse(readFileSync(new URL("../docs/monitor-graft-v1.json",import.meta.url),"utf8"));}catch{}
 import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, optionalFieldProblemsV1, HISTORY_HOURLY_DAYS, HISTORY_RETENTION_DAYS } from "./public-snapshot-contract.mjs";
 
-const VERSION = "2.14.0";
+const VERSION = "2.15.0";
 // Risk-on regime upgrades must persist this long before the headline changes; risk-off stays fast.
 // Rationale (walk-forward reconstruction 2019-2026): the median regime dwell was 3 days and the
 // headline flipped ~57 times/year. An asymmetric hold cuts flip-flop ~3x while keeping crash exits
@@ -2428,8 +2432,15 @@ function compute(){
   // scores, with hand-picked, unvalidated magnitudes). The gauge is now the clean block-weighted score; the
   // detector states are still shown as risk chips and the integrity detector still drives the emergency override.
   const scores={strategic:finite(strategicRaw)?clamp(strategicRaw,-100,100):null,tactical:finite(tacticalRaw)?clamp(tacticalRaw,-100,100):null,strategic_raw:strategicRaw,tactical_raw:tacticalRaw,strategic_adjustment:adjS,tactical_adjustment:adjT};
-  const candidates=candidateRegimes(blocks,metrics,detectors,hardOverride),stableS=stabilize(candidates.strategic,"strategic",hardOverride),stableT=stabilize(candidates.tactical,"tactical",hardOverride);
-  const regime={strategic:stableS.state,tactical:stableT.state};scores.critical_coverage_ok=candidates.criticalStrategic&&candidates.criticalTactical;scores.critical_missing={strategic:candidates.missingS||[],tactical:candidates.missingT||[]};scores.valuation_available=!!candidates.valuationAvailable;scores.coverage_strategic=mean([blocks.macro.strategic.coverage,blocks.demand.strategic.coverage,blocks.cycle.strategic.coverage]);scores.coverage_tactical=mean([blocks.demand.tactical.coverage,blocks.leverage.tactical.coverage,blocks.market.tactical.coverage]);
+  const candidates=candidateRegimes(blocks,metrics,detectors,hardOverride);
+  // ПРЕЖНИЙ НАБОР — ОПОРА (выпуск 2.15.0). Правила v1 считаются как считались: тот же запертый
+  // гистерезис (stabilizeCore), та же запись решения. Меняется только место, где лежит их прежнее
+  // состояние: опубликованные regime / regime_meta теперь описывают боевой набор v3, поэтому
+  // среднесрочное состояние v1 переносится в reference_v1. На первом прогоне после выпуска опоры
+  // в прежнем снимке ещё нет — там regime / regime_meta и есть состояние v1.
+  const priorV1=previous?.reference_v1?.regime_meta?{state:previous.reference_v1.regime?.strategic,meta:previous.reference_v1.regime_meta.strategic}:{state:previous?.regime?.strategic,meta:previous?.regime_meta?.strategic};
+  const stableS=stabilizeCore(candidates.strategic,priorV1.state,priorV1.meta,NOW,{hard:hardOverride,fresh:!previous,mock:!!previous?.mock}),stableT=stabilize(candidates.tactical,"tactical",hardOverride);
+  const regimeV1={strategic:stableS.state,tactical:stableT.state},regimeMetaV1={strategic:stableS,tactical:stableT};scores.critical_coverage_ok=candidates.criticalStrategic&&candidates.criticalTactical;scores.critical_missing={strategic:candidates.missingS||[],tactical:candidates.missingT||[]};scores.valuation_available=!!candidates.valuationAvailable;scores.coverage_strategic=mean([blocks.macro.strategic.coverage,blocks.demand.strategic.coverage,blocks.cycle.strategic.coverage]);scores.coverage_tactical=mean([blocks.demand.tactical.coverage,blocks.leverage.tactical.coverage,blocks.market.tactical.coverage]);
   const onchainIds=["mvrv_cycle","exchange_supply","network_activity","miner_regime"],onchainAvailable=onchainIds.filter(id=>getM(metrics,id)?.score!=null).length;
   scores.onchain_coverage=onchainAvailable/onchainIds.length;scores.onchain_status=onchainAvailable===4?"full":onchainAvailable>=2?"partial":"minimal";
   const factors={strategic:metrics.filter(x=>x.vote&&x.strategic&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value})),tactical:metrics.filter(x=>x.vote&&x.tactical&&x.score!=null).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score)).slice(0,8).map(x=>({id:x.id,name:x.name,score:x.score,value:x.value}))};
@@ -2442,18 +2453,18 @@ function compute(){
   const bounceFiltered=applyRevisionBounceToleranceV1(sourceRevisionAlertsV1(previous?.source_vintages,sourceVintages,previous?.datasets,datasets),{currentVintages:sourceVintages,bounceState:previous?.source_vintages?.bounce_state,now:NOW});
   const revisionAlerts=bounceFiltered.alerts;
   sourceVintages.bounce_state=bounceFiltered.bounceState;
-  const {decision,inputSummary}=buildDecisionRecordV1({generatedAt:iso(NOW),regime,regimeMeta:{strategic:stableS,tactical:stableT},metrics,blocks,detectors,scores,sourceVintages,revisionAlerts});
+  const {decision:decisionV1,inputSummary}=buildDecisionRecordV1({generatedAt:iso(NOW),regime:regimeV1,regimeMeta:regimeMetaV1,metrics,blocks,detectors,scores,sourceVintages,revisionAlerts});
   // Теневые события для policy-v2-кандидатов гистерезиса (аудит 2026-07-21): фиксируем, когда
   // одиночный degraded-снимок стёр бы идущее 48ч-удержание повышения и когда risk-off подтвердился
   // парой снимков с разносом <30 минут (бурст двойного планировщика). На решение не влияют.
-  const prevStrategicMeta=previous?.regime_meta?.strategic||{};
+  const prevStrategicMeta=priorV1.meta||{};
   const prevGeneratedAt=Date.parse(previous?.generated_at||"");
   const upgradeWasHeld=Boolean(prevStrategicMeta.hold_until&&prevStrategicMeta.candidate&&prevStrategicMeta.candidate!==prevStrategicMeta.state);
   const shadowHysteresis={
     upgrade_hold_reset_by_degraded:upgradeWasHeld&&["insufficient","emergency"].includes(stableS.candidate)?1:0,
     // Порог берётся из контракта v2 (единственный источник правды), а не зашит здесь: иначе
     // публикуемое `min_interval_minutes` разъехалось бы с тем, что реально считает счётчик.
-    risk_off_confirmed_under_min_interval:previous?.regime?.strategic&&stableS.state===stableS.candidate&&stableS.state!==previous.regime.strategic&&severity(stableS.state)<severity(previous.regime.strategic)&&riskOffConfirmationDeferredV2({previousSnapshotAt:previous?.generated_at,now:NOW})?1:0,
+    risk_off_confirmed_under_min_interval:priorV1.state&&stableS.state===stableS.candidate&&stableS.state!==priorV1.state&&severity(stableS.state)<severity(priorV1.state)&&riskOffConfirmationDeferredV2({previousSnapshotAt:previous?.generated_at,now:NOW})?1:0,
   };
   // Второе окно MVRV для теневого кандидата v2 (двухоконное согласие капитуляционного пола):
   // ПОЛНАЯ доступная глубина ряда без усечения (CM ~5 лет, резерв bitview.space обрезан до 4 лет;
@@ -2478,8 +2489,6 @@ function compute(){
       return value;
     }catch(error){note(scope,error);return null;}
   };
-  const regimeMeta={strategic:stableS,tactical:stableT};
-  const regimeBirth=optional("regime_birth",()=>buildRegimeBirthV1({previous,now:NOW,price,regimeMeta,metrics,blocks,detectors,mock:MOCK}));
   const tickDiff=optional("tick_diff",()=>buildTickDiffV1({previous,metrics,detectors,mock:MOCK}));
   // Ряд MVRV — тем же выбором, что в карточке mvrv_cycle (Coin Metrics, иначе резерв целиком).
   const mvrvV1=optional("mvrv_series",()=>chooseWholeSeries("CapMVRVCur","MVRV",{fallbackSource:"bitcoin-data.com",fallbackUrls:[SOURCE_URLS.bitcoindata]}).series)||[];
@@ -2488,16 +2497,41 @@ function compute(){
   if(Array.isArray(sourceStates.etf?.legs))sourceStates.etf.legs=annotateEtfLegOutagesV1(sourceStates.etf.legs,previous?.sources?.etf?.legs,NOW);
   if(sourceStates.etf?.legs!==undefined&&optional("etf_legs",()=>sourceStates.etf.legs)===null)delete sourceStates.etf.legs;
   const dataWarnings=optional("data_warnings",()=>buildDataWarningsV1({etfLegs:sourceStates.etf?.legs,flowSupplyCheck:datasets.coinmetrics?.flow_supply_check??exchangeFlowSupplyCheck(data("coinmetrics"))}));
-  const variantInputs=optional("variant_inputs",()=>buildVariantInputsV1({price,hardOverride,regime,regimeMeta,candidates,decision,metrics,blocks,detectors,
+  const variantInputs=optional("variant_inputs",()=>buildVariantInputsV1({price,hardOverride,regime:regimeV1,regimeMeta:regimeMetaV1,candidates,decision:decisionV1,metrics,blocks,detectors,
     series:{hashrate:netSeries("hashrate"),difficulty:netSeries("difficulty"),exchange_supply:cmSeries("SplyExNtv"),exchange_netflow:cmNetflowSeries(),price_daily:marketSeries("price"),mvrv:mvrvV1,mvrv_deep:series(data("mvrv_deep")||[])},
     observedAt:{mvrv:mvrvV1.length?iso(last(mvrvV1).t):null,coinmetrics:obs("coinmetrics"),etf:obs("etf"),network:obs("network"),market:obs("market"),mvrv_deep:obs("mvrv_deep")}}));
   const shadowValues=optional("shadow_values",()=>Object.fromEntries(shadowMetrics.map(x=>[x.id,num(x.value_num)])));
-  const monitorArgs={previousMonitor:graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1),now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta,shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}};
+  // БОЕВОЕ РЕШЕНИЕ — НАБОР v3 (docs/policy-suite-v3.mjs). Решает движок кандидата v3, тот же, что с
+  // 13.10.2026 считал теневую линию: суточный фикс, свои баллы четырёх семей, пол ступенями. Движок
+  // вызывается здесь один раз; монитор получает готовый прогон и второй раз состояние не шагает.
+  // Нет входов вариантов или движок не ответил — решение на паузе: витрина цель не показывает,
+  // монитор держит прежнюю долю, сторож открывает инцидент.
+  const previousMonitor=graftForwardMonitorV1(previous?.monitoring,MONITOR_GRAFT_V1);
+  const variantRun=runShadowVariantsV1({now:NOW,inputs:variantInputs,state:previousMonitor?.variants_state});
+  const liveView=variantRun.ok?variantRun.published.policy_v3_shadow??null:null;
+  const decision=buildLiveDecisionV3({generatedAt:iso(NOW),v1Decision:decisionV1,view:liveView,engineError:variantRun.error});
+  // Что боевое правило читает на этом прогоне (решает оно на фиксе) и состояние режима по фиксам.
+  const liveCalc=variantInputs?optional("live_calc",()=>evaluateV3Inputs({now:NOW,inputs:variantInputs})):null;
+  const priorLiveMeta=previous?.regime_meta?.strategic??null,fixedNow=!!liveView&&liveView.fix_at===iso(NOW);
+  const liveMeta=liveRegimeMetaV3({decision,view:liveView,previousMeta:priorLiveMeta,now:NOW,calc:fixedNow?liveCalc:null});
+  const regime={strategic:decision.strategic,tactical:stableT.state},regimeMeta={strategic:liveMeta,tactical:stableT};
+  // Рождение кандидатов: краткосрочного — как раньше (соседние снимки); среднесрочного — на фиксе,
+  // где он появился, с разницей от прошлого фикса.
+  const regimeBirth=optional("regime_birth",()=>{
+    const base=buildRegimeBirthV1({previous,now:NOW,price,regimeMeta:regimeMetaV1,metrics,blocks,detectors,mock:MOCK});
+    return base?{...base,strategic:liveRegimeBirthV3({previousBirth:previous?.regime_birth?.strategic??null,previousMeta:priorLiveMeta,meta:liveMeta,metrics,now:NOW,price})}:null;
+  });
+  // Причина смены оверлея для журнала смен цели: полы меняются только на фиксе, поэтому на прогоне
+  // фикса монитору передаётся разница фиксов, а не разница соседних снимков.
+  const fixDiff=fixedNow&&priorLiveMeta?.fix&&liveMeta.fix?optional("fix_diff",()=>fixDiffV3(priorLiveMeta.fix,liveMeta.fix,metrics)):null;
+  const liveInputs=liveCalc?optional("live_inputs",()=>liveInputsV3(liveCalc,iso(NOW))):null;
+  const referenceV1={regime:{strategic:regimeV1.strategic},regime_meta:{strategic:stableS},decision:{policy_id:decisionV1.policy_id,policy_hash:decisionV1.policy_hash,status:decisionV1.status,strategic:decisionV1.strategic,tactical:decisionV1.tactical,base_target_pct:decisionV1.base_target_pct,target_pct:decisionV1.target_pct,binding_overlays:decisionV1.binding_overlays,inputs:decisionV1.inputs,quality:{status:decisionV1.quality.status},state_hash:decisionV1.state_hash}};
+  const monitorArgs={previousMonitor,referenceDecision:decisionV1,referenceRegimeMeta:regimeMetaV1,variantRun,now:NOW,price,decision,inputSummary,sourceVintages,revisionAlerts,cashQuotePct:last(fred("DTB3"))?.v??null,cashQuoteBasis:"treasury_bill_discount",priceSeries:marketSeries("price"),previousSnapshotPresent:!!previous,regimeMeta,shadowHysteresis,v2Inputs:{mvrv_percentile_deep:mvrvDeepPct}};
   // Монитор получает входы теневых линий, значения теневых карточек, рождение кандидата и разницу
   // снимков (SPEC 1.3). Если он упал НА НИХ, повторяется прежний вызов без них: живая линия v1 и
   // журнал решений не имеют права встать из-за теневого слоя. Монитор входное состояние не мутирует
   // (работает с его копией), поэтому повтор безопасен; настоящая ошибка прежнего пути упадёт и на нём.
-  const monitorCall={...monitorArgs,variantInputs,shadowValues,regimeBirth,tickDiff};
+  const monitorCall={...monitorArgs,variantInputs,shadowValues,regimeBirth,tickDiff:fixDiff??tickDiff};
   lastMonitorCall=monitorCall;
   let monitoring;
   try{monitoring=updateForwardMonitorV1(monitorCall);}
@@ -2522,9 +2556,9 @@ function compute(){
   if(boundedHistory.trimmed)console.error(`history byte budget: dropped ${boundedHistory.trimmed} oldest rows`);
   const behavior=behaviors(regime.strategic,regime.tactical);
   return{
-    schema:3,version:VERSION,policy:policyMetadataV1(),policy_suite:policySuiteMetadataV1(),policy_components:{allocation:policyMetadataV1(),model:modelPolicyMetadataV1(),execution:executionPolicyMetadataV1()},generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
+    schema:3,version:VERSION,policy:liveAllocationMetadataV3(),policy_suite:policySuiteMetadataV3(),policy_components:{allocation:liveAllocationMetadataV3(),model:modelPolicyMetadataV1(),execution:executionPolicyMetadataV1()},generated_at:iso(NOW),mock:MOCK,thesis:THESIS,price,price_observed_at:referencePriceUsesSpot()?obs("spot"):obs("market"),
     verdict:`${STRATEGIC_TEXT[regime.strategic]} · ${TACTICAL_TEXT[regime.tactical]}`,
-    regime,regime_meta:{strategic:stableS,tactical:stableT},phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
+    regime,regime_meta:regimeMeta,live_inputs:liveInputs,reference_v1:referenceV1,phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
     // Необязательные поля (SPEC 1.1): потребитель обязан работать и без них. null — холодный старт
     // либо отказ расчёта (тогда причина — в diagnostics).
     regime_birth:regimeBirth,tick_diff:tickDiff,valuation_levels:valuationLevels,data_warnings:dataWarnings,diagnostics,
@@ -2538,14 +2572,14 @@ function compute(){
       indicator_scale:"−2…+2; числовые баллы вторичны относительно гейтов",
       dynamic_metrics:"MVRV, ETF rolling flows, rate volatility and network activity use rolling percentiles or relative changes",
       mechanical_metrics:"stablecoin peg, funding, basis, spreads and price-to-moving-average relations use economic/mechanical thresholds",
-      regime_logic:"strategic = Macro × Demand × Cycle, negative ladder anchored on Demand (lone adverse macro/cycle => transition; demand adverse => deteriorating; two adverse => defensive); tactical = Fast demand × Market integrity × Realized volatility; leverage is penalty-only fragility evidence",
+      regime_logic:"strategic = Macro × Demand × Cycle, negative ladder anchored on Demand (lone adverse macro/cycle => transition; demand adverse => deteriorating; two adverse => defensive), read once per UTC day by the v3 engine with its own scores for network (30-day hashrate means), exchange supply, valuation (cheap only if the 4-year and full-history MVRV windows agree) and trend (last closed day); tactical = Fast demand × Market integrity × Realized volatility; leverage is penalty-only fragility evidence",
       family_completeness:"a family that lost half or more of its inputs may warn but not support: its positive vote is capped at 0 (the family is never nulled — that would let one series switch off a required family)",
-      hysteresis:"risk-off changes require two consecutive snapshots; risk-on changes additionally require the candidate to persist 48h AND at least 12 observed snapshots; hard override is immediate",
-      detector_power:"macro_shock or distribution fired cap the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition; all three keep anchor+confirmation structure",
-      allocation_policy:`${POLICY_V1.id}; frozen ${POLICY_V1.frozen_at}; historical recalibration ${POLICY_V1.historical_recalibration}`,
+      hysteresis:"medium-term: one decision per UTC day on the first snapshot at or after 06:00 UTC (the fix) — a worse regime is adopted on that fix, a better one on the second consecutive fix with the same candidate, a missed day resets the count; short-term: risk-off after two consecutive snapshots, risk-on after 48h and at least 12 snapshots; hard override is immediate",
+      detector_power:"macro_shock fired caps the medium-term verdict at deteriorating; recovery good lifts defensive/deteriorating to transition and raises the floor 40/60/80 by consecutive fixes; distribution is shown for reference and has no power in the live rule",
+      allocation_policy:`${policySuiteMetadataV3().id} (engine ${policySuiteMetadataV3().decision_engine_id} revision ${policySuiteMetadataV3().decision_engine_revision}); approved ${policySuiteMetadataV3().approved_at}; historical recalibration ${policySuiteMetadataV3().historical_recalibration}; ladder ${Object.values(POLICY_V1.ladder).join("/")}`,
       model_policy:`${MODEL_POLICY_V1.id}; decision sections locked by SHA-256`,
       point_in_time:"forward evidence stores hash commitments plus exact daily decision inputs; they verify recorded inputs and reproduce the allocation, but the public snapshot does not retain full raw provider payloads",
-      forward_monitoring:"policy v1, previous policy and simple benchmarks are observed prospectively; monitoring never recalibrates live thresholds",
+      forward_monitoring:"the live policy (v1 rules until release 2.15.0, v3 rules after), the frozen v1 rules, earlier policies and simple benchmarks are observed prospectively; monitoring never recalibrates live thresholds",
       exclusions:["NUPL and labelled cohort metrics (near-monotone transform of MVRV — would triple-count valuation)","liquidation heatmaps and aggregated liquidations (no reliable free source from CI)","dealer GEX and max pain","cross-exchange CVD and order-book microstructure","social sentiment, app rankings and Google Trends","corporate and sovereign labelled wallets","seasonality, Fibonacci, CME gaps and halving-cycle timing"],
       shadow_context:"Non-voting shadow cards (vote:false, score:null) accumulate forward evidence for a possible policy v2 per POLICY.md: daily TGA, G3 central-bank liquidity, BTC-gold correlation, STH cost basis, SOPR/LTH-SOPR, IV term structure with put/call OI, 24h OI purge, hash-ribbon recovery cross. They never vote, never enter detectors, and their source failures never degrade decision quality (decision_relevant:false). STH/SOPR moved here from exclusions by owner decision 2026-07-21.",
       strategic_weights:Object.fromEntries(Object.entries(BLOCKS).map(([k,v])=>[k,v.strategicWeight])),

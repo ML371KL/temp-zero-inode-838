@@ -145,47 +145,61 @@ try{
     assert.deepEqual(second.pub.diagnostics,[]);
   }
 
-  // ---- C4. Рождение кандидата: запись на снимке смены, перенос, потеря внутреннего состояния ----
+  // ---- C4. Рождение кандидата боевого режима: запись на ФИКСЕ, где он сменился, перенос, отказы ----
+  // С выпуска 2.15.0 среднесрочный режим — боевой набор v3: кандидат меняется только на суточном
+  // фиксе (первый прогон не раньше 06:00 UTC), а причина — разница с прошлым фиксом. Сценарию нужен
+  // прогон, на который фикс приходится, поэтому часы дочернего процесса переводятся на 06:30 UTC
+  // суток, следующих за последним фиксом холодного старта (перевод только вперёд).
   {
-    const now=cold.pub,otherCandidate=now.regime_meta.strategic.candidate==="defensive"?"transition":"defensive";
+    const shiftModule=pathToFileURL(fileURLToPath(new URL("./collector-shift-clock.mjs",import.meta.url))).href;
+    const lastFixDay=cold.state.monitoring.variants_state.v3.d,nextFix=(lastFixDay+1)*DAY+6.5*H,t0=Date.now();
+    // Часы идут: каждый следующий прогон сценария чуть позже предыдущего, но в тех же сутках фикса.
+    const atFix=()=>({SHIFT_CLOCK_HOURS:String((nextFix-t0)/H),NODE_OPTIONS:`${process.env.NODE_OPTIONS||""} --import=${shiftModule}`.trim()});
+    assert.ok(nextFix>t0,"фикс сценария — в будущем относительно настоящих часов");
+    const now=cold.pub,liveNow=now.regime_meta.strategic,otherCandidate=liveNow.candidate==="defensive"?"transition":"defensive";
+    assert.ok(liveNow.fix&&typeof liveNow.fix_at==="string","холодный старт оставляет снимок фикса в состоянии режима");
     const crafted=structuredClone(cold.state),other=score=>score===-1?-2:-1;
-    crafted.regime.strategic=otherCandidate;
-    crafted.regime_meta.strategic={...crafted.regime_meta.strategic,state:otherCandidate,candidate:otherCandidate};
-    // В «прошлом» снимке у двух семей другие баллы, у блока спроса другой балл, у детектора другое состояние.
-    const etfBefore=other(card(now,"etf_regime").score),liquidityBefore=other(card(now,"liquidity_regime").score);
-    crafted.metrics.find(x=>x.id==="etf_regime").score=etfBefore;
-    crafted.metrics.find(x=>x.id==="liquidity_regime").score=liquidityBefore;
-    const demandNow=now.blocks.demand.strategic.score,demandBefore=demandNow-37.5;
-    crafted.blocks.demand.strategic.score=demandBefore;
-    const recoveryNow=now.detectors.find(x=>x.id==="recovery").state,recoveryBefore=recoveryNow==="calm"?"watch":"calm";
-    crafted.detectors.find(x=>x.id==="recovery").state=recoveryBefore;
+    // В «прошлом» фиксе другой кандидат, у двух семей другие баллы, у блока спроса другой балл, у детектора другое состояние.
+    const before=crafted.regime_meta.strategic;
+    before.candidate=otherCandidate;
+    const etfBefore=other(before.fix.families.demand.etf),liquidityBefore=other(before.fix.families.macro.liquidity);
+    before.fix.families.demand.etf=etfBefore;before.fix.families.macro.liquidity=liquidityBefore;
+    const demandBefore=before.fix.blocks.demand-37.5;before.fix.blocks.demand=demandBefore;
+    const recoveryBefore=before.fix.recovery_state==="calm"?"watch":"calm";before.fix.recovery_state=recoveryBefore;
     crafted.detectors.find(x=>x.id==="leverage").state=now.detectors.find(x=>x.id==="leverage").state==="calm"?"watch":"calm";   // детектор краткосрочного контура
-    const born=tick({previous:crafted}),birth=born.pub.regime_birth.strategic;
+    const born=tick({previous:crafted,env:atFix()}),birth=born.pub.regime_birth.strategic,meta=born.pub.regime_meta.strategic,fix=meta.fix;
+    assert.equal(meta.fix_at,born.pub.generated_at,"на этом прогоне состоялся фикс");
+    assert.ok(born.pub.decision.reason_codes.includes("fix"),`решение принято на фиксе: ${born.pub.decision.reason_codes}`);
     const bands=MODEL_POLICY_V1.regime_bands,band=v=>v>=bands.supportive_min?"supportive":v<=bands.adverse_max?"adverse":"neutral";
-    assert.deepEqual([birth.candidate,birth.from_candidate],[born.pub.regime_meta.strategic.candidate,otherCandidate]);
-    assert.equal(birth.t,born.pub.generated_at,"запись делается на снимке, где кандидат сменился");
-    assert.equal(birth.t,born.pub.regime_meta.strategic.since,"рождение кандидата совпадает с началом его отсчёта в гистерезисе");
+    assert.deepEqual([birth.candidate,birth.from_candidate],[meta.candidate,otherCandidate]);
+    assert.equal(birth.t,born.pub.generated_at,"запись делается на фиксе, где кандидат сменился");
+    assert.equal(birth.t,meta.since,"рождение кандидата совпадает с началом его счёта фиксов");
+    assert.equal(meta.count,1);
     assert.equal(birth.price,born.pub.price);
-    assert.deepEqual(birth.blocks,{demand:{from:demandBefore,to:demandNow,band_from:band(demandBefore),band_to:band(demandNow)}},"блоки — только изменившиеся, с полосами до и после");
-    assert.deepEqual(birth.families.map(x=>[x.block,x.family,x.id,x.name,x.from,x.to]),[
-      ["macro","liquidity","liquidity_regime",card(now,"liquidity_regime").name,liquidityBefore,card(now,"liquidity_regime").score],
-      ["demand","etf","etf_regime",card(now,"etf_regime").name,etfBefore,card(now,"etf_regime").score]],"семьи — только изменившиеся, имена из карточек");
-    assert.deepEqual(birth.detectors,[{id:"recovery",from:recoveryBefore,to:recoveryNow}],"детекторы — только среднесрочного контура");
+    assert.deepEqual(birth.blocks.demand,{from:demandBefore,to:fix.blocks.demand,band_from:band(demandBefore),band_to:band(fix.blocks.demand)},"блок — с баллами и полосами прошлого и этого фикса");
+    // Семьи — все, чей балл на этом фиксе отличается от прошлого, с именами карточек; баллы — как их читает движок v3.
+    const expected=[];
+    for(const [block,scores] of Object.entries(fix.families))for(const [family,to] of Object.entries(scores)){const from=before.fix.families[block]?.[family];if(typeof from==="number"&&typeof to==="number"&&from!==to){const c=now.metrics.find(m=>m.vote&&m.block===block&&m.family===family&&m.strategic!==false);expected.push([block,family,c?.id??null,c?.name??null,from,to]);}}
+    assert.deepEqual(birth.families.map(x=>[x.block,x.family,x.id,x.name,x.from,x.to]),expected.slice(0,8),"семьи — только изменившиеся между фиксами, имена из карточек");
+    assert.ok(expected.some(x=>x[2]==="liquidity_regime"&&x[4]===liquidityBefore)&&expected.some(x=>x[2]==="etf_regime"&&x[4]===etfBefore),"обе подменённые семьи попали в причину");
+    assert.deepEqual(birth.detectors.filter(x=>x.id==="recovery"),fix.recovery_state===recoveryBefore?[]:[{id:"recovery",from:recoveryBefore,to:fix.recovery_state}],"детектор восстановления — по состоянию движка на фиксах");
     assert.equal(birth.note,null);
     assert.equal(born.pub.regime_birth.tactical,null,"краткосрочный кандидат не менялся");
-    assert.deepEqual(born.pub.tick_diff.detectors.map(x=>x.id).sort(),["leverage","recovery"],"разница снимков несёт все изменившиеся детекторы");
+    assert.ok(born.pub.tick_diff.detectors.some(x=>x.id==="leverage"),"разница соседних снимков по-прежнему несёт изменившиеся детекторы");
     assert.deepEqual(optionalSnapshotProblemsV1(born.pub),[]);
-    // Перенос: пока кандидат тот же, запись едет из такта в такт без изменений — через внутреннее
+    // Перенос: пока кандидат тот же, запись едет из прогона в прогон без изменений — через внутреннее
     // состояние и через опубликованный снимок (так сборщик стартует после потери состояния).
-    const carried=tick({previous:born.state});
+    const carried=tick({previous:born.state,env:atFix()});
     assert.deepEqual(carried.pub.regime_birth.strategic,birth,"запись о рождении переносится, пока кандидат тот же");
-    assert.deepEqual(tick({previous:carried.state}).pub.regime_birth.strategic,birth,"и на третьем такте тоже");
-    assert.deepEqual(tick({previous:born.pub}).pub.regime_birth.strategic,birth,"перенос работает и от опубликованного снимка");
+    assert.deepEqual([carried.pub.regime_meta.strategic.fix_at,carried.pub.regime_meta.strategic.count],[meta.fix_at,1],"между фиксами фикс и счёт стоят");
+    assert.ok(carried.pub.decision.reason_codes.includes("between_fixes"));
+    assert.deepEqual(tick({previous:carried.state,env:atFix()}).pub.regime_birth.strategic,birth,"и на третьем прогоне тоже");
+    assert.deepEqual(tick({previous:born.pub,env:atFix()}).pub.regime_birth.strategic,birth,"перенос работает и от опубликованного снимка");
 
     // ОТКАЗ НЕОБЯЗАТЕЛЬНОГО РАСЧЁТА: null, строка диагностики, сбор не падает, качество не понижено.
-    const broken=tick({previous:{...crafted,detectors:"мусор"}});
+    const broken=tick({previous:{...crafted,detectors:"мусор"},env:atFix()});
     assert.equal(broken.pub.regime_birth,null);assert.equal(broken.pub.tick_diff,null);
-    assert.deepEqual(broken.pub.diagnostics.map(x=>x.scope),["regime_birth","tick_diff"],"отказавшие расчёты названы в диагностике снимка");
+    assert.deepEqual(broken.pub.diagnostics.map(x=>x.scope),["tick_diff","regime_birth"],"отказавшие расчёты названы в диагностике снимка");
     assert.ok(broken.pub.diagnostics.every(x=>typeof x.error==="string"&&x.error.length>0));
     assert.match(broken.stderr,/optional calculation failed: regime_birth/,"и в журнале прогона");
     assert.equal(broken.pub.decision.quality.status,born.pub.decision.quality.status,"отказ необязательного расчёта не имеет права понижать качество решения");
@@ -196,9 +210,28 @@ try{
     // раздутая сверх бюджета размера, заменяется на null со строкой диагностики.
     const fat=structuredClone(born.state);
     fat.regime_birth.strategic.families=Array.from({length:300},(_,i)=>({block:"demand",family:"etf",id:`m${i}`,name:"х".repeat(30),from:0,to:1}));
-    const trimmed=tick({previous:fat});
+    const trimmed=tick({previous:fat,env:atFix()});
     assert.equal(trimmed.pub.regime_birth,null);
     assert.match(trimmed.pub.diagnostics.find(x=>x.scope==="regime_birth")?.error||"",/не прошло контракт снимка/);
+  }
+
+  // ---- C5. Опора v1: гистерезис прежних правил идёт от СВОЕГО прежнего состояния, а не от боевого режима ----
+  {
+    // Прежнее состояние — не синтетика (иначе гистерезис принимает кандидата сразу). У опоры —
+    // «конструктивный», опубликованный боевой режим — как на холодном старте. Кандидат v1 на этом
+    // прогоне хуже конструктивного: понижение требует двух снимков подряд, поэтому опора обязана
+    // остаться «конструктивной» со счётом встречных снимков 1. Читай сборщик состояние v1 из
+    // опубликованного режима — он увидел бы там тот же режим, что и кандидат, и счёта не было бы.
+    const since=new Date(Date.parse(cold.pub.generated_at)-H).toISOString();
+    const crafted={...structuredClone(cold.state),mock:false,reference_v1:{regime:{strategic:"constructive"},regime_meta:{strategic:{state:"constructive",candidate:"constructive",count:5,since,downStreak:0,anchor:"constructive"}},decision:cold.state.reference_v1.decision}};
+    const next=tick({previous:crafted}),ref=next.pub.reference_v1,candidate=ref.regime_meta.strategic.candidate;
+    assert.ok(["transition","deteriorating","defensive","unconfirmed_positive"].includes(candidate),`фикстура: кандидат v1 в синтетике хуже конструктивного: ${candidate}`);
+    assert.deepEqual([ref.regime.strategic,ref.regime_meta.strategic.state,ref.regime_meta.strategic.downStreak,ref.decision.strategic],["constructive","constructive",1,"constructive"],"опора держит свой режим до второго встречного снимка");
+    assert.equal(next.pub.regime.strategic,next.pub.decision.strategic,"опубликованный режим — режим боевого решения");
+    assert.notEqual(next.pub.regime.strategic,"constructive","боевой режим от состояния опоры не зависит");
+    // Второй встречный снимок подряд — понижение опоры принято.
+    const confirmed=tick({previous:{...next.state,mock:false}}).pub.reference_v1;
+    assert.deepEqual([confirmed.regime.strategic,confirmed.regime_meta.strategic.downStreak],[candidate,2]);
   }
 
   // ---- C6. Что compute() передаёт монитору: входы вариантов, значения теневых карточек, рождение, разница ----
@@ -215,7 +248,7 @@ if(process.env.MVRV_SOURCE==="fallback")m.collectorDatasets.coinmetrics.data={..
 const mvrvLast={main:m.collectorDatasets.coinmetrics.data.CapMVRVCur.at(-1)?.v??null,reserve:reserve.MVRV.at(-1).v};
 const snap=m.compute(),call=m.monitorCallArguments(),x={variantInputs:call.variantInputs,shadowValues:call.shadowValues,regimeBirth:call.regimeBirth,tickDiff:call.tickDiff};
 const brief=a=>a===null?null:{n:a.length,first:a[0],last:a[a.length-1]};
-console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_meta:snap.regime_meta,decision:snap.decision,blocks:snap.blocks,override:snap.override,detectors:snap.detectors,scores:snap.scores,
+console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_meta:snap.regime_meta,reference_v1:snap.reference_v1,live_inputs:snap.live_inputs,decision:snap.decision,blocks:snap.blocks,override:snap.override,detectors:snap.detectors,scores:snap.scores,
   regime_birth:snap.regime_birth,tick_diff:snap.tick_diff,metrics:snap.metrics.map(q=>({id:q.id,vote:q.vote,score:q.score,value_num:q.value_num,observed_at:q.observed_at})),diagnostics:snap.diagnostics},
   parameters:Object.keys(call),mvrvLast,valuation_levels:snap.valuation_levels,mvrvCardSource:snap.metrics.find(q=>q.id==="mvrv_cycle").source,
   extras:{...x,variantInputs:{...x.variantInputs,series:Object.fromEntries(Object.entries(x.variantInputs.series).map(([k,v])=>[k,brief(v)]))}}}));
@@ -227,17 +260,19 @@ console.log(JSON.stringify({snap:{price:snap.price,regime:snap.regime,regime_met
     };
     const main=drive(),{snap,extras,parameters}=main,v=extras.variantInputs,det=id=>snap.detectors.find(x=>x.id===id).state,mvrv=snap.metrics.find(x=>x.id==="mvrv_cycle");
     // Имена параметров вызова — граница потоков «сборщик» ↔ «монитор» (SPEC 1.3): прежние четырнадцать и четыре новых.
-    assert.deepEqual(parameters,["previousMonitor","now","price","decision","inputSummary","sourceVintages","revisionAlerts","cashQuotePct","cashQuoteBasis","priceSeries","previousSnapshotPresent","regimeMeta","shadowHysteresis","v2Inputs","variantInputs","shadowValues","regimeBirth","tickDiff"],"параметры вызова монитора");
+    assert.deepEqual(parameters,["previousMonitor","referenceDecision","referenceRegimeMeta","variantRun","now","price","decision","inputSummary","sourceVintages","revisionAlerts","cashQuotePct","cashQuoteBasis","priceSeries","previousSnapshotPresent","regimeMeta","shadowHysteresis","v2Inputs","variantInputs","shadowValues","regimeBirth","tickDiff"],"параметры вызова монитора: с выпуска 2.15.0 — опора v1 и готовый прогон движка вариантов");
     assert.deepEqual(Object.keys(v),["price","hard_override","v1","families","series","observed_at"],"входы вариантов — ровно ключи SPEC 1.4");
     // critical_ok — покрытие среднесрочного контура; в снимке публикуется только общее (оба горизонта),
     // поэтому сверяется следствие: общее покрытие в порядке — значит, и среднесрочное тоже.
     assert.equal(typeof v.v1.critical_ok,"boolean");
     if(snap.scores.critical_coverage_ok)assert.equal(v.v1.critical_ok,true,"при полном покрытии среднесрочный контур не может быть «insufficient»");
     if(snap.scores.critical_missing.strategic.length)assert.equal(v.v1.critical_ok,false,"нет обязательной среднесрочной семьи — покрытия нет");
-    assert.deepEqual(v.v1,{state:snap.regime.strategic,candidate:snap.regime_meta.strategic.candidate,critical_ok:v.v1.critical_ok,target_pct:snap.decision.target_pct,
-      recovery_state:det("recovery"),macro_shock_state:det("macro_shock"),distribution_state:det("distribution"),mvrv_percentile:mvrv.value_num,valuation_score:mvrv.score},"состояние v1 — то, что опубликовано в этом же снимке");
+    // Состояние v1 во входах движка — опора (reference_v1), а не опубликованные режим и решение: те — боевого набора v3.
+    const ref=snap.reference_v1;
+    assert.deepEqual(v.v1,{state:ref.regime.strategic,candidate:ref.regime_meta.strategic.candidate,critical_ok:v.v1.critical_ok,target_pct:ref.decision.target_pct,
+      recovery_state:det("recovery"),macro_shock_state:det("macro_shock"),distribution_state:det("distribution"),mvrv_percentile:mvrv.value_num,valuation_score:mvrv.score},"состояние v1 — опора, опубликованная в этом же снимке");
     assert.deepEqual([v.price,v.hard_override],[snap.price,!!snap.override]);
-    assert.equal(v.v1.mvrv_percentile,snap.decision.inputs.mvrv_percentile,"перцентиль MVRV — тот же, по которому собрано решение");
+    assert.equal(v.v1.mvrv_percentile,ref.decision.inputs.mvrv_percentile,"перцентиль MVRV — тот же, по которому собрано решение v1");
     for(const block of ["macro","demand","cycle"]){
       const s=snap.blocks[block].strategic;
       assert.deepEqual(v.families[block],Object.fromEntries(s.expected.map(f=>[f,s.families[f]??null])),`${block}: баллы семей — из блока, отсутствующая семья — null`);
