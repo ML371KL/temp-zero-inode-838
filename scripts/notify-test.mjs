@@ -744,14 +744,67 @@ const blockCards = (b) => ({
   cycle: { strategic: { score: b.cycle, families: famOf(5) } },
 });
 
-/* Снимок НОВОЙ формы (выпуск 2.15.0, боевой набор v3). Цель, оверлеи и цели режимов фикстура
+/* Поля выпуска 2.15.1 — в форме контракта (CONTRACT-2.15.1.md).
+   Уровни цены у порогов «дёшево»: [уровень окна 4 лет, уровень всей истории]. Цены окон РАЗНЫЕ, и
+   меньшая у одного порога — вся история, у другого — 4 года: бот, печатающий уровень одного и того
+   же окна вместо цены правила, ошибётся хотя бы на одном из двух порогов.                        */
+const LEVEL_PRICES = { capitulation_floor: [63600, 58200], recovery_anchor: [70400, 72800] };
+const LEVEL_MVRV = { capitulation_floor: [1.2006, 0.9201], recovery_anchor: [1.3598, 1.2834] };
+// o.levels: null — поля valuation_levels нет; o.levels_off — причина, по которой уровни всей истории
+// сняты (deep.used:false, цены правила нет); o.rule_null — цена правила не названа (rule_price_usd:null);
+// o.level_prices — свои цены окон. old — форма 2.15.0: уровни только по окну четырёх лет.
+function valuationLevels(o, deep, t, old) {
+  if (o.levels === null) return undefined;
+  const prices = { ...LEVEL_PRICES, ...(o.level_prices || {}) };
+  const two = deep !== null, published = two && !o.levels_off;
+  const as_of = `${t.slice(0, 10)}T00:00:00.000Z`;
+  const cheapRow = (key, percentile) => {
+    const [price_usd, far] = prices[key], [mvrv, mvrvFar] = LEVEL_MVRV[key];
+    const row = { key, percentile, mvrv, price_usd };
+    if (old) return row;
+    if (published) return { ...row, mvrv_deep: mvrvFar, price_usd_deep: far, rule_price_usd: o.rule_null ? null : Math.min(price_usd, far) };
+    return two ? row : { ...row, rule_price_usd: o.rule_null ? null : price_usd };
+  };
+  const base = { as_of, mvrv: 1.1049, realized_price_usd: 53229, window_days: 1460 };
+  const levels = [cheapRow("capitulation_floor", 10), cheapRow("recovery_anchor", 25), { key: "valuation_gate", percentile: 82, mvrv: 2.235, price_usd: 118966 }, { key: "euphoria", percentile: 95, mvrv: 2.467, price_usd: 131318 }];
+  if (old) return { ...base, levels };
+  return { ...base, deep: published ? { used: true, as_of, mvrv: 1.1049, realized_price_usd: 53229, points: 5967, percentile: deep } : { used: false, reason: two ? o.levels_off : "single_window" }, levels };
+}
+// Семьи детектора разворота в разнице фиксов — как их пишет fixDiffV3 сборщика (балл движка).
+const FIX_FAMILIES = [
+  ["cycle", "trend", "trend_regime", "Старший ценовой тренд"],
+  ["demand", "etf", "etf_regime", "US spot-ETF · режим потоков"],
+  ["demand", "exchange_supply", "exchange_supply", "Биржевое предложение BTC"],
+];
+// Разница двух снимков фикса — повтор fixDiffV3: семьи с изменившимся баллом (только те, что есть в
+// обоих снимках), состояния двух детекторов, оба перцентиля MVRV; partial — прошлый снимок неполон.
+function fixDiffFixture(was, now) {
+  const families = [], detectors = [];
+  for (const [block, family, id, name] of FIX_FAMILIES) {
+    const from = was.families?.[block]?.[family], to = now.families?.[block]?.[family];
+    if (Number.isFinite(from) && Number.isFinite(to) && from !== to) families.push({ block, family, id, name, from, to });
+  }
+  for (const [id, key] of [["recovery", "recovery_state"], ["macro_shock", "macro_shock_state"]]) if (was[key] && now[key] && was[key] !== now[key]) detectors.push({ id, from: was[key], to: now[key] });
+  const moved = (key) => (Number.isFinite(was[key]) && Number.isFinite(now[key]) && was[key] !== now[key] ? { [key]: { from: was[key], to: now[key] } } : {});
+  return { families, detectors, ...moved("mvrv_percentile"), ...moved("mvrv_percentile_deep"), ...(was.partial === true ? { partial: true } : {}), source: "fix" };
+}
+
+/* Снимок НОВОЙ формы (выпуск 2.15.1, боевой набор v3). Цель, оверлеи и цели режимов фикстура
    считает по правилам набора — так же, как allocationDecisionV3 движка:
      floor — число фиксов подряд с подтверждённым детектором разворота (ступень пола 40 / 60 / 80);
      mvrv  — перцентиль MVRV за 4 года, deep — по всей истории (null — окна всей истории нет);
      pending — сколько фиксов подряд ждёт повышение (1 — «1 из 2»); conf — подтверждений из трёх.
    live_inputs — то, что читает боевое правило; карточки, блоки и детекторы публикуются по методике
-   v1 (card_blocks — баллы блоков на карточках, когда они расходятся с движком).               */
+   v1 (card_blocks — баллы блоков на карточках, когда они расходятся с движком).
+   Поля выпуска 2.15.1: valuation_levels с уровнями двух окон и ценой правила (см. valuationLevels),
+   live_inputs.detectors — карточки детекторов боевого правила, regime_meta.strategic.fix — снимок
+   фикса (fix_partial — неполный, без балла потоков ETF, как у первого фикса после выпуска 2.15.0) и
+   fix_diff — разница двух последних фиксов: её считает timeline() по соседним снимкам ленты, как
+   сборщик; o.fix_diff задаёт её явно (null — разницы нет).
+   form: "2.15.0" — снимок прежнего выпуска: тех же правил, но без этих полей (уровни — только по
+   окну четырёх лет, снимок фикса неполный), как боевой снимок до первого сбора новым кодом.    */
 function btcSnap(o = {}) {
+  const old = o.form === "2.15.0";
   const t = o.t || at(15);
   const state = o.state ?? "deteriorating";
   const candidate = o.candidate ?? state;
@@ -786,9 +839,19 @@ function btcSnap(o = {}) {
     strategic: state, candidate, floor_closes: closes, cheap, reproducible: !paused && !emergency, fix_at, next_fix_at, pending,
     mvrv_percentile: mvrv, mvrv_percentile_deep: deep, deep_window_used: deep !== null, recovery_state: recovery, macro_shock_state: macroShock,
   };
+  // Снимок фикса — на чём принято действующее решение (баллы входов детектора разворота, состояния
+  // детекторов, оба перцентиля). Неполный — без балла потоков ETF: его движок берёт готовым, и в
+  // записи решения, из которой снимок фикса восстановлен после выпуска 2.15.0, его нет.
+  const partialFix = old || o.fix_partial === true;
+  const fix = {
+    families: { demand: { exchange_supply: o.exchange ?? 0, ...(partialFix ? {} : { etf: o.etf ?? 0 }) }, cycle: { trend: o.trend ?? -1 } },
+    blocks: { ...blocks }, recovery_state: recovery, macro_shock_state: macroShock, mvrv_percentile: mvrv, mvrv_percentile_deep: deep, floor_closes: closes, cheap,
+    ...(partialFix ? { partial: true } : {}),
+  };
+  const levels = valuationLevels(o, deep, t, old);
   return {
     generated_at: t,
-    version: "2.15.0",
+    version: old ? "2.15.0" : "2.15.1",
     price: o.price ?? 69116,
     verdict: "ВЕРДИКТ",
     scores: { strategic: -10, critical_missing: { strategic: o.missing || [], tactical: [] } },
@@ -797,7 +860,8 @@ function btcSnap(o = {}) {
     regime: { strategic: state, tactical: "balanced" },
     regime_meta: { strategic: {
       state, candidate, count: o.count ?? 3, since: o.since || fix_at, downStreak: 0, anchor: state, ...(pending ? { hold_until: next_fix_at } : {}),
-      fix_at, next_fix_at, pending, floor: { closes, level_pct: level }, fix: null,
+      fix_at, next_fix_at, pending, floor: { closes, level_pct: level }, fix,
+      ...(old ? {} : { fix_diff: o.fix_diff ?? null }),
     } },
     override: o.override || null,
     blocks: blockCards(o.card_blocks || blocks),
@@ -806,6 +870,11 @@ function btcSnap(o = {}) {
       blocks: { ...blocks }, bands: { macro: band(blocks.macro), demand: band(blocks.demand), cycle: band(blocks.cycle) },
       candidate: emergency ? "emergency" : o.live_candidate ?? candidate, recovery: { state: recovery, anchor, supports: conf }, macro_shock_state: macroShock,
       mvrv_percentile: mvrv, mvrv_percentile_deep: deep, cheap, deep_window_used: deep !== null, closed_day: t.slice(0, 10),
+      ...(old ? {} : { detectors: {
+        recovery: { state: recovery, inputs: `оценка ${anchor ? "низкая" : "не низкая"}${deep === null ? "" : anchor ? " в обоих окнах MVRV" : " хотя бы в одном окне MVRV"} · подтверждений ${conf}/3`, logic: "Низкая циклическая оценка — обязательный якорь; плюс минимум два подтверждения." },
+        macro_shock: { state: macroShock },
+        distribution: { reference: true, logic: "На режим и цель не влияет." },
+      } }),
     },
     decision: paused
       ? { policy_id: "btc-decision-suite-v3", status: "paused", strategic: "insufficient", base_target_pct: null, target_pct: null, binding_overlays: [], reason_codes: ["no_target_on_fix", "fix_deferred", "insufficient_data"], inputs, quality: { status: "paused" } }
@@ -821,6 +890,7 @@ function btcSnap(o = {}) {
     sources: o.sources || {},
     history: [],
     monitoring: o.log ? { target_change_log: o.log } : {},
+    ...(levels ? { valuation_levels: levels } : {}),
     ...(o.extra || {}),
   };
 }
@@ -869,11 +939,21 @@ function btcSnapV1(o = {}) {
   };
 }
 // Лента снимков: у каждого — история решений из всех предыдущих и себя самого, как у панели.
-// form: "v1" — снимок прежней формы.
+// form: "v1" — снимок прежней формы (набор v1), "2.15.0" — набор v3 без полей выпуска 2.15.1.
+// Разницу двух последних фиксов лента считает как сборщик (liveRegimeMetaV3): на прогоне фикса —
+// между снимком этого фикса и снимком фикса из прошлого снимка ленты, между фиксами — переносит без
+// изменений; у первого снимка ленты и после снимка без снимка фикса её нет (null).
 const timeline = (list) => {
   const history = [];
+  let before = null;
   return list.map((o) => {
     const snap = o.form === "v1" ? btcSnapV1(o) : btcSnap(o);
+    const meta = snap.regime_meta.strategic, was = before;
+    before = meta;
+    if ("fix_diff" in meta && o.fix_diff === undefined) {
+      if (was?.fix && was.fix_at !== meta.fix_at && snap.generated_at === meta.fix_at) meta.fix_diff = { ...fixDiffFixture(was.fix, meta.fix), at: meta.fix_at, from_at: was.fix_at };
+      else if (was?.fix_diff && was.fix_diff.at === meta.fix_at) meta.fix_diff = was.fix_diff;
+    }
     history.push({ t: snap.generated_at, price: snap.price, regime: { strategic: snap.regime.strategic }, decision: { status: snap.decision.status, base_target_pct: snap.decision.base_target_pct, target_pct: snap.decision.target_pct, binding_overlays: snap.decision.binding_overlays } });
     snap.history = history.slice();
     return snap;
@@ -1015,9 +1095,10 @@ test("пороги и строка правила берутся из того, 
 
 // Вход на пол восстановления: режим прежний, цель поднята первой ступенью пола. Детектор разворота
 // даёт режиму и право на «переходный» — этот кандидат ждёт второго фикса.
-const floorOn = (extra = {}) => timeline([
-  { t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1, trend: -1, price: 68900 },
-  { t: fx(0), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, since: fx(0), count: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1, ...extra },
+// extra — поправки к снимку фикса, both — к обоим снимкам (форма снимка, окна MVRV, цены уровней).
+const floorOn = (extra = {}, both = {}) => timeline([
+  { t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1, trend: -1, price: 68900, ...both },
+  { t: fx(0), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, since: fx(0), count: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1, ...both, ...extra },
 ]);
 const FLOOR_ROW = {
   t: fx(0), from_pct: 20, to_pct: 40, direction: "up", price: 69116, strategic_from: "deteriorating", strategic_to: "deteriorating", overlays_from: [], overlays_to: ["recovery_floor"], kind: "overlay",
@@ -1028,22 +1109,264 @@ testAsync("пол восстановления назван полом и сту
   const text = (await runBot(floorOn({ log: [FLOOR_ROW] }))).sent[0].text;
   assert.match(text, /Доля биткоина увеличена\n20% → 40%\nBTC \$69 116/);
   assert.match(text, /Включён пол восстановления 40% \(ступень 1 из 3\) поверх режима «ухудшается» \(ступень 20%\)/, text);
-  assert.match(text, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, text);
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе \(до этого — наблюдение\) — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, text);
   assert.match(text, /Кандидат «переходный» \(ступень 45%\) ждёт второго фикса подряд: 1 из 2, решение — на фиксе 21\.08, 09:00 МСК/);
   assert.match(text, /Следующая ступень пола — 60% на суточном фиксе \(ближайший — 21\.08, 09:00 МСК\), если детектор разворота останется подтверждённым/);
-  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к ступени режима — 20%/);
+  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог — цена ≈ \$70,4 тыс\.\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к ступени режима — 20%/);
   assert.match(text, /\n\nЭто пол восстановления поверх режима, а не смена режима: он растёт ступенями по суточным фиксам подряд/, "шаблон выбирается по тому, что изменилось, а не по знаку");
   assert.doesNotMatch(text, /одним снимком|80%/, `пол набора v3 не включается сразу на 80% и не живёт «одним снимком»: ${text}`);
 });
 
-testAsync("уровень цены, на котором пол снимется, печатается, когда снимок его публикует", async () => {
+/* ---- выпуск 2.15.1: цена правила у порогов «дёшево» ---- */
+
+testAsync("цена правила стоит у порога в причине и в «Что отменит» — меньший из уровней двух окон, без оговорки про окно", async () => {
+  // якорь восстановления: уровень за 4 года $70,4 тыс., по всей истории $72,8 тыс. — «дёшево» в обоих
+  // окнах только ниже меньшего из них, и это уровень окна четырёх лет
+  const text = (await runBot(floorOn())).sent[0].text;
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе[^\n]*\(оба ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3/, text);
+  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог — цена ≈ \$70,4 тыс\.\)/, text);
+  assert.doesNotMatch(text, /окна 4 лет|окна всей истории|72,8|это цена/, `ни оговорки про окно, ни уровня другого окна: ${text}`);
+  // меньший уровень — у всей истории: цена правила — он, а не уровень окна четырёх лет
+  const far = (await runBot(floorOn({}, { level_prices: { recovery_anchor: [72800, 68300] } }))).sent[0].text;
+  assert.match(far, /\(оба ниже 25; порог — цена ≈ \$68,3 тыс\.\)[^]*дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог — цена ≈ \$68,3 тыс\.\)/, far);
+  assert.doesNotMatch(far, /окна 4 лет|72,8/, far);
+});
+
+testAsync("без цены правила остаётся формулировка 2.15.0: уровень окна четырёх лет назван своим именем", async () => {
+  const fourYears = /дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог окна 4 лет — цена ≈ \$70,4 тыс\.\)/;
+  const bare = /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3\n/;
+  // 1) снимок прежнего выпуска: уровни только по окну четырёх лет, разницы фиксов нет
+  const old = (await runBot(floorOn({}, { form: "2.15.0" }))).sent[0].text;
+  assert.match(old, fourYears, old);
+  assert.match(old, bare, `в причине 2.15.0 нет ни цены, ни прежнего состояния детектора, ни сдвинувшегося входа: ${old}`);
+  // 2) уровень всей истории не сошёлся с движком и снят: правило читает два окна, и цена окна
+  //    четырёх лет ценой правила не является
+  for (const reason of ["deep_percentile_mismatch", "deep_series_mismatch", "mvrv_deep_stale", "mvrv_deep_short"]) {
+    const off = (await runBot(floorOn({}, { levels_off: reason }))).sent[0].text;
+    assert.match(off, fourYears, `${reason}: ${off}`);
+    assert.doesNotMatch(off, /порог — цена/, `${reason}: цены правила нет — ${off}`);
+  }
+  // 3) цена правила не названа (rule_price_usd: null)
+  const unnamed = (await runBot(floorOn({}, { rule_null: true }))).sent[0].text;
+  assert.match(unnamed, fourYears, unnamed);
+  assert.doesNotMatch(unnamed, /порог — цена/, unnamed);
+  // 4) окну всей истории не хватает до порога, а его уровень снят — цены в строке нет вовсе
+  const cap = texts(await runBot(timeline([
+    { t: pre(0), state: "defensive", mvrv: 9.2, deep: 8.1, levels_off: "mvrv_deep_stale" },
+    { t: fx(0), state: "defensive", mvrv: 8, deep: 12.4, levels_off: "mvrv_deep_stale" },
+  ])), "allocation")[0];
+  assert.match(cap, /Причина: окна MVRV разошлись — по всей истории перцентиль 8,1 → 12,4, выше 10 \(за 4 года 8\)\n/, cap);
+  assert.match(cap, /Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль по всей истории тоже будет 10 или ниже \(сейчас 12,4; за 4 года — 8\)\n/, cap);
+  // 5) снимок без описания окна всей истории и без окна всей истории у движка: уровень единственного окна
   const valuation_levels = { as_of: at(0), levels: [{ key: "capitulation_floor", percentile: 10, mvrv: 1.17, price_usd: 63600 }, { key: "recovery_anchor", percentile: 25, mvrv: 1.34, price_usd: 72800 }] };
-  // сборщик считает уровень по окну четырёх лет — при двух окнах он так и назван
-  const text = (await runBot(floorOn({ extra: { valuation_levels } }))).sent[0].text;
-  assert.match(text, /MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог окна 4 лет — цена ≈ \$72,8 тыс\.\)/, text);
-  // окна всей истории нет — решает одно окно, и уровень относится к нему
-  const single = (await runBot(floorOn({ deep: null, extra: { valuation_levels } }))).sent[0].text;
+  const single = (await runBot(floorOn({}, { deep: null, extra: { valuation_levels } }))).sent[0].text;
   assert.match(single, /MVRV-перцентиль дойдёт до 25 \(сейчас 19,5; это цена ≈ \$72,8 тыс\.\)/, single);
+});
+
+testAsync("окно всей истории отсутствует (single_window): цена правила — уровень единственного окна", async () => {
+  const text = (await runBot(floorOn({}, { deep: null }))).sent[0].text;
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе[^\n]*MVRV-перцентиль 19,5 \(ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3/, text);
+  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 \(сейчас 19,5; порог — цена ≈ \$70,4 тыс\.\) или подтверждений станет меньше 2 из 3/, text);
+  assert.doesNotMatch(text, /окн|по всей истории|72,8/, `окно одно — второе не упоминается: ${text}`);
+});
+
+/* ---- выпуск 2.15.1: разница двух последних фиксов как источник причины ---- */
+
+// Разница фиксов, заданная явно: тренд сдвинулся, детектор перешёл из наблюдения в подтверждённые.
+const TREND_MOVE = { block: "cycle", family: "trend", id: "trend_regime", name: "Старший ценовой тренд", from: -1, to: 2 };
+const fixDiffAt = (d, patch = {}) => ({ at: fx(d), from_at: fx(d - 1), families: [TREND_MOVE], detectors: [{ id: "recovery", from: "watch", to: "good" }], source: "fix", ...patch });
+
+testAsync("сдвинувшийся вход детектора берётся из разницы фиксов, когда журнал его не несёт", async () => {
+  const moved = /Причина: детектор разворота подтверждён на фиксе \(до этого — наблюдение\) — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)\n/;
+  // журнала монитора в снимке нет вовсе
+  assert.match((await runBot(floorOn())).sent[0].text, moved);
+  // запись журнала о шаге есть, но семей не несёт
+  const bare = { ...FLOOR_ROW, cause: { text: "пол восстановления включён", families: [], detectors: [], candidate_since: null } };
+  assert.match((await runBot(floorOn({ log: [bare] }))).sent[0].text, moved);
+  // посторонняя семья из той же разницы причиной пола не называется; вход без id карточки узнаётся по блоку и семье
+  const mixed = fixDiffAt(0, { families: [
+    { block: "demand", family: "institutional", id: "institutional_quality", name: "Качество институционального спроса", from: -1, to: 0 },
+    { block: "demand", family: "etf", id: null, name: null, from: 0, to: 0.5 },
+  ] });
+  const text = (await runBot(floorOn({ fix_diff: mixed }))).sent[0].text;
+  assert.match(text, /подтверждений 2 из 3; сдвинулся показатель «Потоки в биткоин-ETF в США» \(0 → \+0,5\)\n/, text);
+  assert.doesNotMatch(text, /Позиции фондов|институциональн/, text);
+  // полная разница фиксов главнее журнала: семьи, которой в ней нет, нет и в причине
+  const still = (await runBot(floorOn({ fix_diff: fixDiffAt(0, { families: [] }), log: [FLOOR_ROW] }))).sent[0].text;
+  assert.match(still, /подтверждён на фиксе \(до этого — наблюдение\)[^\n]*подтверждений 2 из 3\n/, still);
+  assert.doesNotMatch(still, /сдвинулся показатель/, still);
+  // пол снят, а порог и счёт подтверждений в порядке — названо, чем стал детектор
+  const lost = (await runBot(timeline([
+    { t: fx(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 2, floor: 1 },
+    { t: fx(1), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 2, recovery: "watch" },
+  ]))).sent[0].text;
+  assert.match(lost, /40% → 20%[^]*Причина: детектор разворота больше не подтверждён \(подтверждён → наблюдение\)\n/, lost);
+});
+
+testAsync("разница от другого фикса в причину не идёт", async () => {
+  // Сборщик переносит разницу без изменений до следующего фикса; здесь в снимке фикса 20.08 лежит
+  // разница, помеченная фиксом 19.08 (расчёт на новом фиксе не состоялся).
+  const stale = fixDiffAt(-1, { mvrv_percentile: { from: 40, to: 27.2 }, mvrv_percentile_deep: { from: 41, to: 23.4 } });
+  const text = (await runBot(floorOn({ fix_diff: stale }))).sent[0].text;
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль/, text);
+  assert.doesNotMatch(text, /сдвинулся показатель|до этого/, `вчерашняя разница сегодняшний шаг не объясняет: ${text}`);
+  // чужая разница не подменяет и запись журнала о самом шаге
+  const logged = (await runBot(floorOn({ fix_diff: fixDiffAt(-1, { families: [] }), log: [FLOOR_ROW] }))).sent[0].text;
+  assert.match(logged, /сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)\n/, logged);
+  // «было» перцентилей при чужой разнице — из базы сравнения, как раньше
+  const off = (await runBot(timeline([
+    { t: pre(0), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1 },
+    { t: fx(0), state: "deteriorating", candidate: "deteriorating", mvrv: 27.2, deep: 23.4, conf: 2, trend: 2, count: 1, fix_diff: stale },
+  ]))).sent[0].text;
+  assert.match(off, /MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25/, off);
+  assert.doesNotMatch(off, /40 →|41 →/, off);
+  // разница действующего фикса, перенесённая в снимок между фиксами, шаг этого снимка не объясняет:
+  // она посчитана на фиксе, а шаг сделан не на нём (у набора v3 так не бывает — проверяется само условие)
+  const between = timeline([
+    { t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1, trend: -1 },
+    { t: fx(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1, trend: 2 },
+    { t: at(15 + 60), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1 },
+  ]);
+  assert.deepEqual(between[2].regime_meta.strategic.fix_diff.families.map((f) => f.id), ["trend_regime"], "фикстура: разница фикса 20.08 перенесена в снимок через час");
+  const late = (await runBot(between)).sent[0].text;
+  assert.match(late, /20% → 40%[^]*Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль[^\n]*подтверждений 2 из 3\n/, late);
+  assert.doesNotMatch(late, /сдвинулся показатель/, late);
+});
+
+testAsync("«было» перцентилей MVRV — входы прошлого фикса из разницы фиксов, а не база сравнения бота", async () => {
+  // Бот пропустил сутки: в его базе фикс 20.08 (12 и 11), а пол капитуляции включён на фиксе 22.08
+  // после фикса 21.08 (10,5 и 8,1). По всей истории перцентиль между двумя фиксами не менялся.
+  const days = (extra = {}) => timeline([
+    { t: fx(0), state: "defensive", mvrv: 12, deep: 11 },
+    { t: fx(1), state: "defensive", mvrv: 10.5, deep: 8.1 },
+    { t: fx(2), state: "defensive", mvrv: 9.2, deep: 8.1, ...extra },
+  ]);
+  const text = texts(await runBot(days(), { only: [0, 2] }), "allocation")[0];
+  assert.match(text, /5% → 40%[^]*Причина: MVRV-перцентиль 10,5 → 9,2 за 4 года и 8,1 по всей истории — 10 или ниже в обоих окнах/, text);
+  assert.doesNotMatch(text, /12 →|11 →/, `«было» из базы двухдневной давности — не прошлый фикс: ${text}`);
+  // разницы фиксов нет (фикс без расчёта, снимок формы 2.15.0) — «было» из базы сравнения, как раньше
+  const base = texts(await runBot(days({ fix_diff: null }), { only: [0, 2] }), "allocation")[0];
+  assert.match(base, /Причина: MVRV-перцентиль 12 → 9,2 за 4 года и 11 → 8,1 по всей истории — 10 или ниже в обоих окнах/, base);
+  // «стало» разницы не сходится с тем, что записало решение, — такой разнице «было» не верят
+  const alien = fixDiffAt(2, { families: [], detectors: [], mvrv_percentile: { from: 30, to: 15 } });
+  const odd = texts(await runBot(days({ fix_diff: alien }), { only: [0, 2] }), "allocation")[0];
+  assert.match(odd, /Причина: MVRV-перцентиль 9,2 за 4 года и 8,1 по всей истории — 10 или ниже в обоих окнах/, odd);
+});
+
+testAsync("неполная разница фиксов (partial): о семье, которой в ней нет, говорит журнал", async () => {
+  // Первый фикс после выпуска: прошлый снимок фикса восстановлен из записи решения и балла потоков
+  // ETF не несёт. Сдвинулись и тренд, и потоки ETF — в разнице только тренд.
+  const run = (extra = {}) => runBot(timeline([
+    { t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 0, trend: -1, etf: -1, fix_partial: true },
+    { t: fx(0), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, since: fx(0), count: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, etf: 0.5, floor: 1, ...extra },
+  ]));
+  const snap = timeline([{ t: pre(0), fix_partial: true, etf: -1 }, { t: fx(0), etf: 0.5, trend: 2 }])[1];
+  assert.deepEqual([snap.regime_meta.strategic.fix_diff.partial, snap.regime_meta.strategic.fix_diff.families.map((f) => f.id)], [true, ["trend_regime"]], "фикстура: разница помечена неполной и потоков ETF не несёт");
+  const etfRow = { ...FLOOR_ROW, cause: { ...FLOOR_ROW.cause, families: [{ block: "demand", family: "etf", id: "etf_regime", name: "US spot-ETF · режим потоков", from: -1, to: 0.5 }, TREND_MOVE] } };
+  const both = (await run({ log: [etfRow] })).sent[0].text;
+  assert.match(both, /сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\), «Потоки в биткоин-ETF в США» \(−1 → \+0,5\)\n/, `тренд — из разницы (один раз), потоки ETF — из журнала: ${both}`);
+  // журнала нет: назван только тренд, и о потоках ETF бот ничего не утверждает
+  const alone = (await run()).sent[0].text;
+  assert.match(alone, /сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)\n/, alone);
+  assert.doesNotMatch(alone, /ETF|не сдвинул|не менял|прежн/, alone);
+});
+
+testAsync("срыв ожидания: без записи о рождении кандидата «что сдвинулось» берётся из разницы фиксов", async () => {
+  const text = texts(await runBot(timeline([waiting(0), dropped(1)])), "hold")[0];
+  assert.match(text, /Причина: на фиксе кандидат снова «ухудшается»: спрос неблагоприятен \(−25 при пороге −20\); между фиксами сдвинулось: «Потоки в биткоин-ETF в США» 0 → −0,5 \(источник отдал устаревшие данные\)\n/, text);
+  // разницы нет — строка остаётся без неё
+  const none = texts(await runBot(timeline([waiting(0), { ...dropped(1), fix_diff: null }])), "hold")[0];
+  assert.match(none, /Причина: на фиксе кандидат снова «ухудшается»: спрос неблагоприятен \(−25 при пороге −20\)\n/, none);
+  // бот пропустил фикс: разница последних двух фиксов — не тот промежуток, что между базой и снимком
+  const skipped = texts(await runBot(timeline([waiting(0), { ...waiting(1), etf: 0.5, count: 1 }, dropped(2)]), { only: [0, 2] }), "hold")[0];
+  assert.match(skipped, /Причина: на фиксе кандидат снова «ухудшается»/, skipped);
+  assert.doesNotMatch(skipped, /между фиксами сдвинулось/, skipped);
+});
+
+testAsync("шаг «форма 2.15.0 → форма 2.15.1» без смены цели — тишина", async () => {
+  // Как на бою 21.11.2026: набор v3, режим «защитный», окна MVRV расходятся (6,9 и 18,3), цель 5%.
+  // Сборщик нового выпуска начинает публиковать цену правила, карточки детекторов и разницу фиксов.
+  // Карточка детектора разворота по методике v1 (одно окно) на всех трёх снимках говорит «подтверждён»,
+  // а боевое правило его подтверждённым не считает: со снимка новой формы бот читает карточку
+  // правила, и смена источника карточки тоже не событие.
+  const day = { state: "defensive", mvrv: 6.9, deep: 18.3, conf: 1, count: 2, recovery_card: "good" };
+  const snaps = timeline([
+    { form: "2.15.0", t: at(420), ...day },
+    { t: at(435), ...day, fix_partial: true },    // первый снимок новой формы, между фиксами: снимок фикса прежний, неполный
+    { t: fx(1), ...day, trend: -2, count: 3 },    // первый фикс новым кодом: разница с неполным снимком
+  ]);
+  assert.equal(snaps[0].regime_meta.strategic.fix_diff, undefined, "фикстура: у формы 2.15.0 разницы фиксов нет");
+  assert.equal(snaps[0].valuation_levels.deep, undefined);
+  assert.equal(snaps[2].regime_meta.strategic.fix_diff.partial, true);
+  const base = await runBot([snaps[0]]);
+  assert.deepEqual(base.state.allocation.engine.levels.capitulation_floor, { percentile: 10, price: 63600 }, "снимок формы 2.15.0 читается как раньше: уровень окна четырёх лет, без цены правила");
+  // и на состоянии, записанном по форме 2.15.0, и на состоянии без уровней вовсе
+  const bare = JSON.parse(JSON.stringify(base.state));
+  delete bare.allocation.engine.levels;
+  for (const state of [base.state, bare]) {
+    const r = await runBot(snaps.slice(1), { state });
+    assert.deepEqual(r.sent.map((m) => `${m.k}:${m.kind}:${m.title}`), [], "новые поля сами по себе событием не являются");
+    assert.equal(r.state.last_alloc.pct, 5);
+    assert.deepEqual(r.state.allocation.engine.levels.capitulation_floor, { percentile: 10, price: 63600, deep: 58200, rule: 58200, windows: 2 });
+    assert.equal("feed" in r.state.allocation, false, "лента причин (и разобранная разница фиксов в ней) живёт один прогон и в состояние не пишется");
+  }
+});
+
+testAsync("негодные значения в полях выпуска 2.15.1 не роняют бота и ценой правила не становятся", async () => {
+  const fourYears = /дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог окна 4 лет — цена ≈ \$70,4 тыс\.\)/;
+  const row = (patch) => ({ key: "recovery_anchor", percentile: 25, mvrv: 1.36, price_usd: 70400, price_usd_deep: 72800, rule_price_usd: 70400, ...patch });
+  const levels = (deep, patch = {}) => ({ valuation_levels: { ...(deep === undefined ? {} : { deep }), levels: [null, 7, { key: 5, rule_price_usd: 1 }, row(patch)] } });
+  const badLevels = [
+    levels("x"), levels(7), levels([]), levels({ used: "да" }), levels({ used: false }), levels({ used: false, reason: 5 }),
+    levels({ used: true }, { rule_price_usd: "дёшево" }), levels({ used: true }, { rule_price_usd: -1 }), levels({ used: true }, { rule_price_usd: 0 }),
+    levels({ used: true }, { price_usd_deep: { a: 1 } }), levels({ used: true }, { price_usd_deep: null }),
+    // цена правила не равна меньшему из двух уровней — определению из контракта она не отвечает
+    levels({ used: true }, { rule_price_usd: 72800 }), levels({ used: true }, { rule_price_usd: 12345 }),
+    // снимок говорит «окно одно», а движок читает два: чья это цена, неизвестно
+    levels({ used: false, reason: "single_window" }),
+  ];
+  for (const extra of badLevels) {
+    const text = (await runBot(floorOn({ extra }))).sent[0].text;
+    assert.match(text, fourYears, `${JSON.stringify(extra)}: ${text}`);
+    assert.doesNotMatch(text, /порог — цена/, `${JSON.stringify(extra)}: ${text}`);
+  }
+  // движок читает одно окно, а снимок называет не «окна нет», а другую причину: цена правила не признаётся
+  const lone = (await runBot(floorOn({}, { deep: null, extra: levels({ used: false, reason: "mvrv_deep_stale" }) }))).sent[0].text;
+  assert.match(lone, /дойдёт до 25 \(сейчас 19,5; это цена ≈ \$70,4 тыс\.\)/, lone);
+  assert.doesNotMatch(lone, /порог — цена/, lone);
+  const plain =/Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3\n/;
+  const badDiffs = ["x", 7, [], {}, { at: 5 }, { at: "не дата", families: [TREND_MOVE] },
+    { at: fx(0), families: "x", detectors: 7, mvrv_percentile: "y", mvrv_percentile_deep: { from: "a" }, partial: "да" },
+    { at: fx(0), families: [null, 7, { id: 5, from: "a", to: 2 }, { id: "trend_regime", from: null, to: 2 }, { block: 1, family: 2, from: 1, to: 2 }], detectors: [null, { id: 5 }, { id: "recovery", from: 1, to: "good" }, { id: "recovery", from: "мусор", to: "good" }, { id: "recovery", from: "watch", to: "calm" }] }];
+  for (const fix_diff of badDiffs) {
+    const snaps = floorOn({ fix_diff });
+    const r = await runBot(snaps);
+    assert.deepEqual(r.sent.map((m) => `${m.before}→${m.after}`), ["20%→40%"], JSON.stringify(fix_diff));
+    assert.match(r.sent[0].text, plain, `${JSON.stringify(fix_diff)}: ${r.sent[0].text}`);
+    assert.doesNotThrow(() => mute(() => llmInput([r.sent[0].ev], fromSnapshotJSON(snaps[1]))));
+  }
+  // карточки детекторов боевого правила — мусор: состояние детектора читается из detectors[], как раньше
+  for (const cards of ["x", 7, [], { recovery: 7 }, { recovery: { state: 5, inputs: {}, logic: [] } }]) {
+    const snaps = floorOn();
+    snaps[1].live_inputs.detectors = cards;
+    assert.deepEqual((await runBot(snaps)).sent.map((m) => `${m.before}→${m.after}`), ["20%→40%"], JSON.stringify(cards));
+    assert.equal(mute(() => fromSnapshotJSON(snaps[1])).detectors.find((d) => d.id === "recovery").state, "good");
+  }
+});
+
+test("детектор разворота у набора v3 читается с карточки боевого правила, а не с карточки методики v1", () => {
+  // За 4 года оценка низкая, по всей истории — нет: по методике v1 (одно окно) детектор подтверждён,
+  // боевое правило якоря не видит. Проверка связи обязана говорить то же, что витрина.
+  const o = { state: "deteriorating", mvrv: 19, deep: 30, conf: 2, recovery_card: "good" };
+  const ruled = mute(() => fromSnapshotJSON(btcSnap(o)));
+  assert.deepEqual(ruled.detectors.find((d) => d.id === "recovery"), { id: "recovery", name: "Капитуляция → восстановление", state: "calm", inputs: "оценка не низкая хотя бы в одном окне MVRV · подтверждений 2/3", note: "Низкая циклическая оценка — обязательный якорь; плюс минимум два подтверждения." });
+  assert.match(pingMessage(ruled), /Сигналы риска спокойны/, pingMessage(ruled));
+  // снимок формы 2.15.0 карточек боевого правила не несёт — читается detectors[], как раньше
+  const old = mute(() => fromSnapshotJSON(btcSnap({ ...o, form: "2.15.0" })));
+  assert.equal(old.detectors.find((d) => d.id === "recovery").state, "good");
+  assert.match(pingMessage(old), /Сигналы риска не в покое: Признаки разворота после капитуляции \(подтверждён\)/);
+  // остальные детекторы — из detectors[] при любой форме
+  assert.equal(ruled.detectors.find((d) => d.id === "macro_shock").state, "calm");
 });
 
 testAsync("снятие пола из-за роста оценки не подаётся как «обстановка хуже прежней»", async () => {
@@ -1055,8 +1378,8 @@ testAsync("снятие пола из-за роста оценки не пода
   const text = (await runBot(off)).sent[0].text;
   assert.match(text, /Доля биткоина сокращена\n40% → 20%/);
   assert.match(text, /Снят пол восстановления: цель вернулась к ступени режима «ухудшается» \(20%\)/, text);
-  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25 в обоих окнах/);
-  assert.match(text, /Что отменит\n• Пол вернётся на суточном фиксе первой ступенью, 40% — нужно: MVRV-перцентиль ниже 25 в обоих окнах \(сейчас 27,2 за 4 года и 23,4 по всей истории\)/);
+  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25 в обоих окнах \(цена ≈ \$70,4 тыс\.\)\n/, text);
+  assert.match(text, /Что отменит\n• Пол вернётся на суточном фиксе первой ступенью, 40% — нужно: MVRV-перцентиль ниже 25 в обоих окнах \(сейчас 27,2 за 4 года и 23,4 по всей истории; порог — цена ≈ \$70,4 тыс\.\)\n/, text);
   assert.doesNotMatch(text, /хуже прежней|уводит часть позиции/);
 });
 
@@ -1070,9 +1393,9 @@ testAsync("снятие пола и принятое повышение режи
   const text = (await runBot(snaps)).sent[0].text;
   assert.match(text, /Доля биткоина сокращена\n60% → 45%/);
   assert.match(text, /Снят пол восстановления, режим «ухудшается» → «переходный» \(ступень 45%\), принят на втором фиксе подряд/, text);
-  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25 в обоих окнах/);
+  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25 в обоих окнах \(цена ≈ \$70,4 тыс\.\)\n/, text);
   assert.match(text, /Что делать\n• Понижение — сразу/);
-  assert.match(text, /Что отменит\n• Пол поднимет цель до 60% не раньше чем на втором фиксе подряд с подтверждённым детектором разворота — нужно: MVRV-перцентиль ниже 25 в обоих окнах \(сейчас 27,2 за 4 года и 23,4 по всей истории\)/, text);
+  assert.match(text, /Что отменит\n• Пол поднимет цель до 60% не раньше чем на втором фиксе подряд с подтверждённым детектором разворота — нужно: MVRV-перцентиль ниже 25 в обоих окнах \(сейчас 27,2 за 4 года и 23,4 по всей истории; порог — цена ≈ \$70,4 тыс\.\)\n/, text);
   assert.match(text, /\n\nНа одном фиксе сошлись смена режима и смена оверлея/);
 });
 
@@ -1109,7 +1432,9 @@ testAsync("под полом восстановления лежит пол ка
   const deepCheap = { state: "defensive", mvrv: 9, deep: 8, conf: 2 };
   const text = texts(await runBot(timeline([{ t: fx(0), ...deepCheap, floor: 1 }, { t: fx(1), ...deepCheap, floor: 2 }])), "allocation")[0];
   assert.match(text, /40% → 60%[^]*Пол восстановления: ступень 2 из 3, цель 60% поверх режима «защитный» \(ступень 5%\)/, text);
-  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 9 за 4 года и 8 по всей истории\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к полу капитуляции — 40%, а без него — к ступени режима, 5%/, text);
+  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 9 за 4 года и 8 по всей истории; порог — цена ≈ \$70,4 тыс\.\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к полу капитуляции — 40%, а без него — к ступени режима, 5%/, text);
+  // у шага ступени причина — счёт фиксов: цена порога стоит только там, где пол включают и снимают
+  assert.match(text, /Причина: детектор разворота подтверждён второй фикс подряд — MVRV-перцентиль 9 за 4 года и 8 по всей истории \(оба ниже 25\), подтверждений 2 из 3\n/, text);
 });
 
 testAsync("ступень пола: причина журнала монитора о давней смене режима к шагу не приписывается", async () => {
@@ -1349,13 +1674,15 @@ testAsync("пол капитуляции: включается только пр
   assert.deepEqual(r.sent.map((m) => `${m.before}→${m.after}`), ["5%→40%", "40%→5%"]);
   const cap = r.sent[0].text;
   assert.match(cap, /Включён пол капитуляции 40% поверх режима «защитный» \(ступень 5%\)/, cap);
-  assert.match(cap, /Причина: MVRV-перцентиль 11 → 9,2 за 4 года и 9 → 8,1 по всей истории — 10 или ниже в обоих окнах/, cap);
-  assert.match(cap, /Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше 10 в любом из двух окон \(сейчас 9,2 за 4 года и 8,1 по всей истории\)\. Цель вернётся к ступени режима — 5%/, cap);
+  // цена правила — меньший из уровней двух окон ($63,6 тыс. за 4 года, $58,2 тыс. по всей истории)
+  assert.match(cap, /Причина: MVRV-перцентиль 11 → 9,2 за 4 года и 9 → 8,1 по всей истории — 10 или ниже в обоих окнах \(порог — цена ≈ \$58,2 тыс\.\)\n/, cap);
+  assert.match(cap, /Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше 10 в любом из двух окон \(сейчас 9,2 за 4 года и 8,1 по всей истории; порог — цена ≈ \$58,2 тыс\.\)\. Цель вернётся к ступени режима — 5%/, cap);
   assert.doesNotMatch(cap, /лучше прежней|одним снимком|эйфори/);
   const off = r.sent[1].text;
   assert.match(off, /Снят пол капитуляции: цель вернулась к ступени режима «защитный» \(5%\)/, off);
-  assert.match(off, /Причина: окна MVRV разошлись — по всей истории перцентиль 8,1 → 12,4, выше 10 \(за 4 года 8\)/, off);
-  assert.match(off, /Что отменит\n• Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль по всей истории тоже будет 10 или ниже \(сейчас 12,4; за 4 года — 8\)/, off);
+  assert.match(off, /Причина: окна MVRV разошлись — по всей истории перцентиль 8,1 → 12,4, выше 10 \(за 4 года 8; порог — цена ≈ \$58,2 тыс\.\)\n/, off);
+  assert.match(off, /Что отменит\n• Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль по всей истории тоже будет 10 или ниже \(сейчас 12,4; порог — цена ≈ \$58,2 тыс\.; за 4 года — 8\)\n/, off);
+  assert.doesNotMatch(cap + off, /окна 4 лет|63,6/, "при цене правила уровень одного окна не печатается и оговорки про окно нет");
 });
 
 testAsync("пол капитуляции: при расхождении окон не включается, а без окна всей истории решает одно", async () => {
@@ -1366,21 +1693,23 @@ testAsync("пол капитуляции: при расхождении окон
   ]));
   assert.deepEqual(texts(split, "allocation"), [], "окна разошлись — пола нет, и сообщения о доле нет");
   assert.equal(split.state.last_alloc.pct, 5);
-  // ряд всей истории короток или устарел — движок решает по одному окну, как набор v1
-  const levels = { valuation_levels: { levels: [{ key: "capitulation_floor", percentile: 10, price_usd: 63600 }] } };
+  // ряд всей истории короток или устарел — движок решает по одному окну, как набор v1; снимок так
+  // и говорит (deep.used:false, single_window), и цена правила — уровень этого единственного окна
   const single = texts(await runBot(timeline([
     { t: pre(0), state: "defensive", mvrv: 11, deep: null },
-    { t: fx(0), state: "defensive", mvrv: 10, deep: null, extra: levels },
+    { t: fx(0), state: "defensive", mvrv: 10, deep: null },
   ])), "allocation")[0];
-  assert.match(single, /Причина: MVRV-перцентиль 11 → 10 — 10 или ниже\n/, single);
-  assert.match(single, /Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше 10 \(сейчас 10; это цена ≈ \$63,6 тыс\.\)\. Цель вернётся к ступени режима — 5%/, single);
-  // снят по окну четырёх лет при двух окнах
+  assert.match(single, /Причина: MVRV-перцентиль 11 → 10 — 10 или ниже \(порог — цена ≈ \$63,6 тыс\.\)\n/, single);
+  assert.match(single, /Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше 10 \(сейчас 10; порог — цена ≈ \$63,6 тыс\.\)\. Цель вернётся к ступени режима — 5%/, single);
+  assert.doesNotMatch(single, /окна|по всей истории|58,2/, `окно одно — ни второго числа, ни уровня всей истории: ${single}`);
+  // снят по окну четырёх лет при двух окнах: порога не хватает ему, и цена правила — его уровень
+  const prices = { level_prices: { capitulation_floor: [61900, 63600] } };
   const off = texts(await runBot(timeline([
-    { t: pre(0), state: "defensive", mvrv: 9.2, deep: 8.1 },
-    { t: fx(0), state: "defensive", mvrv: 11.9, deep: 8.4 },
+    { t: pre(0), state: "defensive", mvrv: 9.2, deep: 8.1, ...prices },
+    { t: fx(0), state: "defensive", mvrv: 11.9, deep: 8.4, ...prices },
   ])), "allocation")[0];
-  assert.match(off, /Причина: MVRV-перцентиль за 4 года 9,2 → 11,9 — выше 10 \(по всей истории 8,4\)/, off);
-  assert.match(off, /Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль за 4 года тоже будет 10 или ниже \(сейчас 11,9; по всей истории — 8,4\)/, off);
+  assert.match(off, /Причина: MVRV-перцентиль за 4 года 9,2 → 11,9 — выше 10 \(по всей истории 8,4; порог — цена ≈ \$61,9 тыс\.\)\n/, off);
+  assert.match(off, /Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль за 4 года тоже будет 10 или ниже \(сейчас 11,9; порог — цена ≈ \$61,9 тыс\.; по всей истории — 8,4\)\n/, off);
 });
 
 testAsync("шаги цели, пропущенные между запусками, названы поимённо", async () => {
@@ -1425,7 +1754,8 @@ const V1_ERA = [-9000, -6000, -3000].flatMap((min) => [
 const HEALTHY = { operational_status: "healthy", operational_issues: [] };
 const releaseStep = (extra1 = {}) => timeline([
   { form: "v1", t: at(420), state: "defensive", mvrv: 6.9, target: 40, overlays: ["capitulation_floor"], count: 776, since: at(-11000), price: 61539, extra: { monitoring: { target_change_log: V1_ERA, health: HEALTHY } } },
-  { t: at(435), state: "defensive", mvrv: 6.9, deep: 18.3, count: 1, price: 61494, extra: { monitoring: { target_change_log: [...V1_ERA, SWITCH_ROW], health: HEALTHY } }, ...extra1 },
+  // первый снимок набора v3 — формы 2.15.0: полей выпуска 2.15.1 (цена правила, разница фиксов) в нём нет
+  { form: "2.15.0", t: at(435), state: "defensive", mvrv: 6.9, deep: 18.3, count: 1, price: 61494, extra: { monitoring: { target_change_log: [...V1_ERA, SWITCH_ROW], health: HEALTHY } }, ...extra1 },
 ]);
 // Состояние, каким его оставил бот ДО выпуска: фактов набора v3 в нём нет, а факты набора v1 есть.
 function preReleaseState(state) {
@@ -1958,6 +2288,31 @@ testAsync("во входе модели о смене доли есть прич
   assert.doesNotMatch(input, /удержани|48 час|снимком подряд|одним снимком/, "решение описано в фиксах, а не в часах и снимках набора v1");
 });
 
+testAsync("во входе модели — цена правила у порогов «дёшево» и разница двух последних фиксов", async () => {
+  const nowOf = (snap) => JSON.parse(mute(() => llmInput([], fromSnapshotJSON(snap)))).panel_context.decision_now.replace(/ /g, " ");
+  const snaps = floorOn();
+  const now = nowOf(snaps[1]);
+  assert.ok(now.includes("пороги «дёшево» в цене: пол капитуляции (перцентиль 10 или ниже) — цена ≈ $58,2 тыс., пол восстановления (перцентиль ниже 25) — цена ≈ $70,4 тыс."), now);
+  assert.ok(now.includes("между двумя последними фиксами сдвинулось: сигнал разворота: наблюдение → подтверждён, «Тренд цены биткоина» −1 → +2"), now);
+  // перцентили — «было → стало» прошлого и нынешнего фикса; тот, что не менялся, не повторяется
+  const cap = timeline([{ t: fx(0), state: "defensive", mvrv: 10.5, deep: 8.1 }, { t: fx(1), state: "defensive", mvrv: 9.2, deep: 8.1 }])[1];
+  assert.ok(nowOf(cap).includes("между двумя последними фиксами сдвинулось: MVRV-перцентиль 10,5 → 9,2 за 4 года"), nowOf(cap));
+  assert.doesNotMatch(nowOf(cap), /→ 8,1/, nowOf(cap));
+  // между фиксами разница переносится и по-прежнему описывает действующий фикс
+  const carried = timeline([{ t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, trend: -1 }, { t: fx(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, trend: 1 }, { t: at(15 + 60), state: "deteriorating", mvrv: 19.5, deep: 22.1, trend: 1 }])[2];
+  assert.ok(nowOf(carried).includes("между двумя последними фиксами сдвинулось: «Тренд цены биткоина» −1 → +1"), nowOf(carried));
+  // разница от другого фикса и пустая разница строки не дают
+  assert.doesNotMatch(nowOf(floorOn({ fix_diff: fixDiffAt(-1) })[1]), /между двумя последними фиксами/);
+  assert.doesNotMatch(nowOf(floorOn({ fix_diff: fixDiffAt(0, { families: [], detectors: [], partial: true }) })[1]), /между двумя последними фиксами|не менял|не сдвинул/);
+  // на дорогом рынке пороги «дёшево» во вход не идут; у снимка формы 2.15.0 нет ни цены правила, ни разницы
+  const rich = timeline([{ t: pre(0), state: "transition", mvrv: 60, deep: 62 }, { t: fx(0), state: "transition", mvrv: 60, deep: 62 }])[1];
+  assert.doesNotMatch(nowOf(rich), /пороги|между двумя последними фиксами/, nowOf(rich));
+  const old = nowOf(floorOn({}, { form: "2.15.0" })[1]);
+  assert.match(old, /MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории$/, old);
+  // уровень всей истории снят — уровень окна четырёх лет за цену правила модели не выдаётся
+  assert.doesNotMatch(nowOf(floorOn({}, { levels_off: "mvrv_deep_stale" })[1]), /пороги/);
+});
+
 testAsync("разбор модели о смене доли: честный идёт в сообщение, с посторонним числом — заменяется шаблоном", async () => {
   // Весь путь разом: main() → запрос модели (сеть подменена) → сверка чисел → текст сообщения.
   const send = async (txt) => {
@@ -2241,12 +2596,14 @@ testAsync("смена одного оверлея объясняется со с
   const tick_diff = { families: [{ block: "cycle", family: "trend", id: "trend_regime", name: "Старший ценовой тренд", from: 0, to: 2 }, { block: "leverage", family: "oi", id: "oi_quality", name: "Качество движения", from: 0, to: 1 }], detectors: [{ id: "recovery", from: "watch", to: "good" }] };
   // в записи журнала рядом с ногой детектора может стоять и посторонняя семья — причиной пола она не называется
   const mixed = { ...FLOOR_ROW, cause: { ...FLOOR_ROW.cause, families: [...FLOOR_ROW.cause.families, { block: "demand", family: "institutional", id: "institutional_quality", name: "Качество институционального спроса", from: -1, to: 0 }] } };
-  const text = (await runBot(floorOn({ log: [mixed], extra: { tick_diff } }))).sent[0].text;
-  assert.match(text, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)\n/, text);
+  // Разницы двух фиксов в снимке нет (fix_diff: null — фикс без расчёта либо снимок формы 2.15.0):
+  // сдвинувшийся вход называет запись журнала о том же шаге.
+  const text = (await runBot(floorOn({ fix_diff: null, log: [mixed], extra: { tick_diff } }))).sent[0].text;
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)\n/, text);
   assert.doesNotMatch(text, /Причина: пол восстановления включён|Качество движения|0 → \+2|Позиции фондов/, "ни повтора строки о поле, ни карточки вне детектора, ни разницы соседних снимков вместо разницы фиксов");
   assert.match(text, /Открыть панель · 20\.08, 09:08 МСК$/, "в подвале — время самого шага цели");
-  // журнала нет — сдвинувшийся вход не называется вовсе
-  const noLog = (await runBot(floorOn({ extra: { tick_diff } }))).sent[0].text;
+  // нет ни разницы фиксов, ни журнала — сдвинувшийся вход не называется вовсе
+  const noLog = (await runBot(floorOn({ fix_diff: null, extra: { tick_diff } }))).sent[0].text;
   assert.match(noLog, /подтверждений 2 из 3\n/, noLog);
   assert.doesNotMatch(noLog, /сдвинулся показатель/, noLog);
   // тот же шаг, пропущенный между запусками: снимка смены у бота нет — причина берётся из журнала
@@ -2265,8 +2622,8 @@ testAsync("смена одного оверлея объясняется со с
   const old = (await runBot(later.map((x, k) => (k === 2 ? { ...x, monitoring: { target_change_log: [seeded] } } : x)), { only: [0, 2] })).sent[0].text;
   assert.match(old, /20% → 40%\nBTC \$65 000\n/, old);
   assert.match(old, /Причина: пол recovery включён: старший ценовой тренд −1 → 2/, old);
-  const oldLive = (await runBot(floorOn({ log: [seeded] }))).sent[0].text;
-  assert.match(oldLive, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, oldLive);
+  const oldLive = (await runBot(floorOn({ fix_diff: null, log: [seeded] }))).sent[0].text;
+  assert.match(oldLive, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25; порог — цена ≈ \$70,4 тыс\.\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, oldLive);
 });
 
 testAsync("причина журнала, повторяющая сам переход, причиной не считается", async () => {
