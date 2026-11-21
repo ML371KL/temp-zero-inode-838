@@ -222,6 +222,15 @@ for(const [k,state] of Object.entries(s.sources||{})){
     if(!strictFinite(level?.mvrv)||!strictFinite(level?.percentile))continue;
     if((levels.mvrv<level.mvrv-2e-4&&percentile>level.percentile)||(levels.mvrv>level.mvrv+2e-4&&percentile<level.percentile))report(`valuation level ${level.key} contradicts the MVRV card: MVRV ${levels.mvrv} vs level ${level.mvrv}, percentile ${percentile} vs ${level.percentile}`);
   }
+  // Выпуск 2.15.1 — то же для окна всей истории: значение ряда лежит по ту сторону своего уровня, по какую
+  // перцентиль, который прочитало боевое правило (live_inputs), лежит от порога. Цена правила при «дёшево»
+  // не может быть ниже цены дня наблюдения: условие уже выполнено.
+  const deepPercentile=s.live_inputs?.mvrv_percentile_deep;
+  if(levels?.deep?.used===true&&Array.isArray(levels.levels)&&strictFinite(deepPercentile)&&strictFinite(levels.deep.mvrv))for(const level of levels.levels){
+    if(!strictFinite(level?.mvrv_deep)||!strictFinite(level?.percentile))continue;
+    if((levels.deep.mvrv<level.mvrv_deep-2e-4&&deepPercentile>level.percentile+.01)||(levels.deep.mvrv>level.mvrv_deep+2e-4&&deepPercentile<level.percentile-.01))report(`valuation level ${level.key} contradicts the full-history MVRV window: MVRV ${levels.deep.mvrv} vs level ${level.mvrv_deep}, percentile ${deepPercentile} vs ${level.percentile}`);
+  }
+  if(levels&&s.live_inputs?.deep_window_used===true&&levels.deep&&levels.deep.used!==true)warn.push(`valuation levels for the full-history window are withheld: ${levels.deep.reason}`);
   if(Array.isArray(s.diagnostics)&&s.diagnostics.length)warn.push(`optional calculations failed: ${s.diagnostics.map(x=>`${x?.scope}: ${x?.error}`).join("; ").slice(0,400)}`);
 }
 

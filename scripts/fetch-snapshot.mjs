@@ -21,7 +21,7 @@ import { policySuiteMetadataV1 } from "../docs/policy-suite-v1.mjs";
 import { applyRevisionBounceToleranceV1, buildDecisionRecordV1, buildSourceVintagesV1, graftForwardMonitorV1, sourceRevisionAlertsV1, updateForwardMonitorV1 } from "./forward-monitor-v1.mjs";
 import { riskOffConfirmationDeferredV2 } from "../docs/policy-v2-candidate.mjs";
 import { policySuiteMetadataV3 } from "../docs/policy-suite-v3.mjs";
-import { evaluateV3Inputs } from "../docs/policy-v3-candidate.mjs";
+import { evaluateV3Inputs, mvrvDeepPercentileV3 } from "../docs/policy-v3-candidate.mjs";
 import { runShadowVariantsV1 } from "./monitor-lines-v1.mjs";
 import { buildLiveDecisionV3, fixDiffV3, liveAllocationMetadataV3, liveInputsV3, liveRegimeBirthV3, liveRegimeMetaV3 } from "./live-decision-v3.mjs";
 
@@ -2336,6 +2336,37 @@ function buildValuationLevelsV1({mvrvSeries,priceSeries,windowDays=4*365}){
       return{key,percentile,mvrv:finite(level)?round4(level):null,price_usd:finite(level)&&finite(realized)?Math.round(level*realized):null};
     })};
 }
+// УРОВНИ ПО ОКНУ ВСЕЙ ИСТОРИИ (выпуск 2.15.1). Боевой набор v3 считает «дёшево» — пол капитуляции и якорь
+// восстановления — только при согласии двух окон MVRV: четырёх лет и всей истории. Уровни выше посчитаны по
+// окну четырёх лет; к двум «дешёвым» порогам здесь добавляются уровень по ряду всей истории и цена правила
+// (rule_price_usd) — та, ниже которой условие боевого правила выполнено: при двух окнах это меньшая из
+// двух цен, при одном окне — цена окна четырёх лет.
+// Ряд — тот же, что получает движок, пригодность — его же проверкой (mvrvDeepPercentileV3: длина, свежесть).
+// Перцентиль текущей точки по этому ряду обязан совпасть с тем, что движок посчитал на этом прогоне: число,
+// которое не сходится с правилом, не публикуется. Движок не отвечал — уровни остаются как были.
+const RULE_PRICE_KEYS=["capitulation_floor","recovery_anchor"];
+function addDeepValuationLevelsV3(levels,{mvrvDeep,priceSeries,now,engineDeepUsed,enginePercentileDeep}={}){
+  if(!levels||!Array.isArray(levels.levels)||typeof engineDeepUsed!=="boolean")return levels;
+  const round2=v=>Math.round(v*100)/100,round4=v=>Math.round(v*1e4)/1e4;
+  const single=reason=>({...levels,deep:{used:false,reason},levels:levels.levels.map(l=>RULE_PRICE_KEYS.includes(l.key)?{...l,rule_price_usd:l.price_usd}:l)});
+  if(!engineDeepUsed)return single("single_window");
+  const probe=mvrvDeepPercentileV3({mvrvDeep,now});
+  const s=(Array.isArray(mvrvDeep)?mvrvDeep:[]).filter(p=>p&&finite(p.t)&&finite(p.v)&&Number(p.t)<=now).map(p=>({t:Number(p.t),v:Number(p.v)})),point=last(s),values=s.map(p=>p.v);
+  const own=point?percentileRank(values,point.v):null;
+  // Расхождение с движком — уровни по всей истории не публикуются и цена правила не называется вовсе:
+  // правило при этом читает два окна, и цена одного окна была бы неправдой.
+  const mismatch=reason=>({...levels,deep:{used:false,reason}});
+  if(probe.used!==true||!finite(own)||!(point.v>0)||Math.abs(own-probe.percentile)>1e-9)return mismatch(probe.reason||"deep_series_mismatch");
+  if(finite(enginePercentileDeep)&&Math.abs(round2(own)-Number(enginePercentileDeep))>0.011)return mismatch("deep_percentile_mismatch");
+  const close=num((priceSeries||[]).find(x=>dayKey(x.t)===dayKey(point.t))?.v),realized=finite(close)&&close>0?close/point.v:null;
+  return{...levels,
+    deep:{used:true,as_of:iso(point.t),mvrv:round4(point.v),realized_price_usd:finite(realized)?Math.round(realized):null,points:values.length,percentile:round2(own)},
+    levels:levels.levels.map(l=>{
+      if(!RULE_PRICE_KEYS.includes(l.key))return l;
+      const rule=VALUATION_LEVELS.find(x=>x.key===l.key)?.rule,level=mvrvLevelAt(values,l.percentile,rule),deepPrice=finite(level)&&finite(realized)?Math.round(level*realized):null;
+      return{...l,mvrv_deep:finite(level)?round4(level):null,price_usd_deep:deepPrice,rule_price_usd:finite(l.price_usd)&&finite(deepPrice)?Math.min(l.price_usd,deepPrice):null};
+    })};
+}
 
 // ПРЕДУПРЕЖДЕНИЯ О ДАННЫХ: несогласованность рядов и потеря резервов. На decision.quality не влияют.
 const ruGenitive=n=>({2:"двух",3:"трёх",4:"четырёх",5:"пяти"})[n]||String(n);
@@ -2513,7 +2544,9 @@ function compute(){
   // Что боевое правило читает на этом прогоне (решает оно на фиксе) и состояние режима по фиксам.
   const liveCalc=variantInputs?optional("live_calc",()=>evaluateV3Inputs({now:NOW,inputs:variantInputs})):null;
   const priorLiveMeta=previous?.regime_meta?.strategic??null,fixedNow=!!liveView&&liveView.fix_at===iso(NOW);
-  const liveMeta=liveRegimeMetaV3({decision,view:liveView,previousMeta:priorLiveMeta,now:NOW,calc:fixedNow?liveCalc:null});
+  const liveMeta=liveRegimeMetaV3({decision,view:liveView,previousMeta:priorLiveMeta,now:NOW,calc:fixedNow?liveCalc:null,metrics});
+  // Уровни цены у порогов «дёшево» — по тем же двум окнам MVRV, что читает правило (см. addDeepValuationLevelsV3).
+  const valuationLevelsLive=valuationLevels?optional("valuation_levels_deep",()=>addDeepValuationLevelsV3(valuationLevels,{mvrvDeep:variantInputs?.series?.mvrv_deep,priceSeries:marketSeries("price"),now:NOW,engineDeepUsed:liveCalc?.record?.deep_window_used,enginePercentileDeep:liveCalc?.record?.mvrv_percentile_deep}))??valuationLevels:valuationLevels;
   const regime={strategic:decision.strategic,tactical:stableT.state},regimeMeta={strategic:liveMeta,tactical:stableT};
   // Рождение кандидатов: краткосрочного — как раньше (соседние снимки); среднесрочного — на фиксе,
   // где он появился, с разницей от прошлого фикса.
@@ -2561,7 +2594,7 @@ function compute(){
     regime,regime_meta:regimeMeta,live_inputs:liveInputs,reference_v1:referenceV1,phase:phase(regime.strategic,regime.tactical,detectors),override:hardOverride,behavior,scores,blocks,metrics,detectors,factors,decision,
     // Необязательные поля (SPEC 1.1): потребитель обязан работать и без них. null — холодный старт
     // либо отказ расчёта (тогда причина — в diagnostics).
-    regime_birth:regimeBirth,tick_diff:tickDiff,valuation_levels:valuationLevels,data_warnings:dataWarnings,diagnostics,
+    regime_birth:regimeBirth,tick_diff:tickDiff,valuation_levels:valuationLevelsLive,data_warnings:dataWarnings,diagnostics,
     sources:sourceStates,source_vintages:sourceVintages,source_revision_alerts:revisionAlerts,monitoring,history:boundedHistory.history,datasets,
     // Метки попыток переносятся вперёд целиком: источник, не опрошенный в этом прогоне из-за
     // интервала, обязан помнить, когда к нему ходили в последний раз. Реестр остаётся и в
@@ -2596,7 +2629,7 @@ export { fetchBitviewDaily, relabelMvrvFallback, FRED_SERIES, ETF_BLOCK_MIRRORS,
   // buildMetrics, что стоит под замком, а не её копию (scripts/collector-etf-episode.mjs).
   buildMetrics, datasets as collectorDatasets,
   exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, repairExchangeFlowsV1, CM_FLOW_REPAIR_MIN_BTC, CM_RELABEL_JUMP_BTC, presentExchangeNetflow30d, cmNetflowSeries, fetchMvrvDeep, UNCHANGED, MVRV_DEEP_MIN_POINTS, validateMvrvDeep,
-  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS,
+  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, addDeepValuationLevelsV3, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS,
   collect, compute, monitorCallArguments, fetchCoinMetrics };
 
 function atomicJson(path,value){

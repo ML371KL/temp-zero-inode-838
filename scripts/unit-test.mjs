@@ -8,8 +8,9 @@ import {
   closedDaysOnly, krakenDatedBasis, oiPurgeWindow,
   updateCanonRegistry, carryCanonDays, ETF_CANON_HOLD_TTL, ETF_CANON_HOLD_MAX_DAYS, ETF_CANON_REGISTRY_TTL, ETF_LEG_NAMES, parseEtfFlowJson,
   exchangeFlowSupplyCheck, exchangeFlowSupplyWarning, CM_FLOW_SUPPLY_TOLERANCE_BTC, repairExchangeFlowsV1, CM_FLOW_REPAIR_MIN_BTC, CM_RELABEL_JUMP_BTC, presentExchangeNetflow30d, cmNetflowSeries, collectorDatasets, validateMvrvDeep, MVRV_DEEP_MIN_POINTS,
-  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS
+  buildRegimeBirthV1, buildTickDiffV1, buildValuationLevelsV1, mvrvLevelAt, buildDataWarningsV1, annotateEtfLegOutagesV1, ETF_REDUNDANCY_CONFIRM_MS, buildVariantInputsV1, VALUATION_LEVELS, addDeepValuationLevelsV3
 } from "./fetch-snapshot.mjs";
+import { mvrvDeepPercentileV3, scoreValuationV3 } from "../docs/policy-v3-candidate.mjs";
 import { boundedPublicHistoryV1, compactHistoryEntryV1, publicHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES,
   optionalFieldProblemsV1, optionalSnapshotProblemsV1, optionalSnapshotBytesV1, OPTIONAL_FIELD_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
@@ -1058,6 +1059,65 @@ console.log(JSON.stringify({t:parsed.map(x=>x.t),sha:createHash("sha256").update
   ok(noPrice.levels.every(x=>Number.isFinite(x.mvrv)),"уровни MVRV от цены не зависят");
   eq(buildValuationLevelsV1({mvrvSeries:mvrv.slice(-20),priceSeries:price}),null,"слишком короткий ряд — поля нет");
   eq(buildValuationLevelsV1({mvrvSeries:[],priceSeries:price}),null,"нет ряда — поля нет");
+
+  // ОКНО ВСЕЙ ИСТОРИИ И ЦЕНА ПРАВИЛА (выпуск 2.15.1). Набор v3 считает «дёшево» только при согласии двух
+  // окон; уровень по ряду всей истории и цена, ниже которой условие выполнено в обоих окнах, сверяются
+  // с самим правилом движка перебором значения MVRV у границы.
+  {
+    const round2=v=>Math.round(v*100)/100,round4=v=>Math.round(v*1e4)/1e4,realized=82545/1.5343,RULE_KEYS=["capitulation_floor","recovery_anchor"];
+    // Ряд всей истории: 2300 суток, хвост — те же точки, что в ряду четырёх лет (один источник), начало — глубже и дешевле.
+    const deepDays=2300,head=deepDays-days,deep=Array.from({length:deepDays},(_,i)=>({t:end-(deepDays-1-i)*D,v:i<head?.45+((i*104729)%1000)/900:mvrv[i-head].v}));
+    const now=end+12*36e5,probe=mvrvDeepPercentileV3({mvrvDeep:deep,now}),deepValues=deep.map(x=>x.v);
+    ok(probe.used===true&&probe.points===deepDays,"движок принимает ряд всей истории: длина и свежесть в норме");
+    const full=addDeepValuationLevelsV3(levels,{mvrvDeep:deep,priceSeries:price,now,engineDeepUsed:true,enginePercentileDeep:round2(probe.percentile)});
+    eq(full.deep,{used:true,as_of:"2026-10-09T00:00:00.000Z",mvrv:1.5343,realized_price_usd:Math.round(realized),points:deepDays,percentile:round2(probe.percentile)},"окно всей истории описано: дата, значение, длина, перцентиль движка");
+    for(const key of RULE_KEYS){
+      const level=full.levels.find(x=>x.key===key),base=levels.levels.find(x=>x.key===key),rule=VALUATION_LEVELS.find(x=>x.key===key).rule;
+      const own=mvrvLevelAt(deepValues,level.percentile,rule),four=mvrvLevelAt(inWindow,level.percentile,rule);
+      eq([level.mvrv,level.price_usd],[base.mvrv,base.price_usd],`${key}: уровень окна четырёх лет не тронут`);
+      eq([level.mvrv_deep,level.price_usd_deep],[round4(own),Math.round(own*realized)],`${key}: уровень и цена по ряду всей истории`);
+      eq(level.rule_price_usd,Math.min(level.price_usd,level.price_usd_deep),`${key}: цена правила — меньшая из двух`);
+      ok(level.price_usd_deep!==level.price_usd,`${key}: окна дают разные уровни — проверка не вырождена`);
+      // Правило движка на границе: MVRV чуть ниже меньшего из двух уровней — условие выполнено, чуть выше — нет.
+      const holds=v=>{const s=scoreValuationV3({percentile:percentileRank([...inWindow.slice(0,-1),v],v),percentileDeep:percentileRank([...deepValues.slice(0,-1),v],v)});return key==="capitulation_floor"?s.cheap:s.anchor;};
+      const edge=Math.min(own,four),other=Math.max(own,four);
+      ok(holds(edge-1e-9)&&!holds(edge+1e-9),`${key}: цена правила стоит ровно на границе условия движка`);
+      ok(!holds((edge+other)/2),`${key}: между уровнями двух окон условие не выполнено — одно окно «дёшево» не даёт`);
+    }
+    ok(full.levels.filter(x=>!RULE_KEYS.includes(x.key)).every(x=>!("rule_price_usd" in x)&&!("mvrv_deep" in x)&&!("price_usd_deep" in x)),"гейт оценки и эйфория — одно окно: полей всей истории у них нет");
+    eq(optionalFieldProblemsV1("valuation_levels",full),[],"поле с двумя окнами проходит контракт");
+    ok(JSON.stringify(full).length<1200,"поле укладывается в свой предел размера");
+    // Правило читает одно окно (ряд всей истории короток или устарел): цена правила — цена окна четырёх лет.
+    const single=addDeepValuationLevelsV3(levels,{mvrvDeep:deep,priceSeries:price,now,engineDeepUsed:false,enginePercentileDeep:null});
+    eq([single.deep,single.levels.filter(x=>RULE_KEYS.includes(x.key)).map(x=>x.rule_price_usd),single.levels.some(x=>"mvrv_deep" in x)],[{used:false,reason:"single_window"},levels.levels.filter(x=>RULE_KEYS.includes(x.key)).map(x=>x.price_usd),false],"одно окно: цена правила равна цене окна четырёх лет");
+    eq(optionalFieldProblemsV1("valuation_levels",single),[],"поле с одним окном проходит контракт");
+    // Движок не отвечал — что читает правило, неизвестно: поле остаётся прежним.
+    eq(addDeepValuationLevelsV3(levels,{mvrvDeep:deep,priceSeries:price,now}),levels,"без ответа движка уровни не дополняются");
+    eq(addDeepValuationLevelsV3(null,{mvrvDeep:deep,priceSeries:price,now,engineDeepUsed:true}),null,"нет уровней — нечего дополнять");
+    // Число, которое не сходится с правилом, не публикуется: ни уровня, ни цены правила.
+    const off=addDeepValuationLevelsV3(levels,{mvrvDeep:deep,priceSeries:price,now,engineDeepUsed:true,enginePercentileDeep:round2(probe.percentile)+1});
+    eq([off.deep,off.levels.some(x=>"rule_price_usd" in x||"mvrv_deep" in x)],[{used:false,reason:"deep_percentile_mismatch"},false],"перцентиль не сошёлся с записью движка — уровни по всей истории сняты");
+    const stale=addDeepValuationLevelsV3(levels,{mvrvDeep:deep,priceSeries:price,now:now+6*D,engineDeepUsed:true,enginePercentileDeep:null});
+    eq([stale.deep,stale.levels.some(x=>"rule_price_usd" in x)],[{used:false,reason:"mvrv_deep_stale"},false],"ряд устарел для движка — причина названа его же словом");
+    const short=addDeepValuationLevelsV3(levels,{mvrvDeep:deep.slice(-500),priceSeries:price,now,engineDeepUsed:true,enginePercentileDeep:null});
+    eq(short.deep,{used:false,reason:"mvrv_deep_short"},"короткий ряд движок не принимает — уровней нет");
+    for(const x of [off,stale,short])eq(optionalFieldProblemsV1("valuation_levels",x),[],"поле без уровней всей истории проходит контракт");
+    // Точка из будущего в ряду движку не видна — не видна и здесь.
+    const future=addDeepValuationLevelsV3(levels,{mvrvDeep:[...deep,{t:now+D,v:.01}],priceSeries:price,now,engineDeepUsed:true,enginePercentileDeep:round2(probe.percentile)});
+    eq(future,full,"точка из будущего не меняет уровни");
+    // Нет закрытия дня наблюдения — уровни MVRV есть, цен нет.
+    const noClose=addDeepValuationLevelsV3(noPrice,{mvrvDeep:deep,priceSeries:price.filter(x=>x.t!==end),now,engineDeepUsed:true,enginePercentileDeep:round2(probe.percentile)});
+    eq([noClose.deep.realized_price_usd,noClose.levels[0].price_usd_deep,noClose.levels[0].rule_price_usd,Number.isFinite(noClose.levels[0].mvrv_deep)],[null,null,null,true],"без цены дня наблюдения цена правила не называется");
+    // Контракт ловит несогласованность.
+    const wrongRule=structuredClone(full);wrongRule.levels[0].rule_price_usd=Math.max(wrongRule.levels[0].price_usd,wrongRule.levels[0].price_usd_deep);
+    ok(optionalFieldProblemsV1("valuation_levels",wrongRule).some(x=>x.includes("rule_price_usd")),"цена правила, равная большей из двух, отвергается");
+    const orphan=structuredClone(single);orphan.levels[0].mvrv_deep=1;
+    ok(optionalFieldProblemsV1("valuation_levels",orphan).some(x=>x.includes("не объявлено использованным")),"уровень всей истории без объявленного окна отвергается");
+    const wrongPrice=structuredClone(full);wrongPrice.levels[1].price_usd_deep=Math.round(wrongPrice.levels[1].price_usd_deep*1.05);wrongPrice.levels[1].rule_price_usd=Math.min(wrongPrice.levels[1].price_usd,wrongPrice.levels[1].price_usd_deep);
+    ok(optionalFieldProblemsV1("valuation_levels",wrongPrice).some(x=>x.includes("price_usd_deep")),"цена уровня всей истории обязана равняться уровню × реализованная цена");
+    const noReason=structuredClone(single);delete noReason.deep.reason;
+    ok(optionalFieldProblemsV1("valuation_levels",noReason).some(x=>x.includes("deep.reason")),"неиспользованное окно обязано назвать причину");
+  }
 }
 
 // РОЖДЕНИЕ КАНДИДАТА И РАЗНИЦА СНИМКОВ.

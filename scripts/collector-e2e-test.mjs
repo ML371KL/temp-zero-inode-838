@@ -106,6 +106,25 @@ try{
       if(levels.mvrv>level.mvrv+2e-4)assert.ok(percentile>=level.percentile,`MVRV выше уровня ${level.key} — перцентиль карточки не ниже ${level.percentile}: ${percentile}`);
       assert.ok(Math.abs(level.price_usd/(level.mvrv*levels.realized_price_usd)-1)<.002,"цена уровня = уровень × реализованная цена");
     }
+    // Выпуск 2.15.1. Окно всей истории объявлено использованным ровно тогда, когда его читает боевое правило;
+    // его перцентиль — тот, что записал движок; цена правила у двух «дешёвых» порогов — меньшая из двух цен.
+    const live=s.live_inputs,cheapKeys=["capitulation_floor","recovery_anchor"];
+    // В синтетике ряда всей истории нет: правило читает одно окно, и поле говорит это прямо. Путь двух окон
+    // закрыт unit-тестом (сверка с правилом движка на границе) и строгой проверкой живого снимка.
+    assert.deepEqual([live.deep_window_used,levels.deep],[false,{used:false,reason:"single_window"}],"уровни объявляют то же окно, что читает правило");
+    for(const level of levels.levels){
+      if(!cheapKeys.includes(level.key)){assert.ok(!("rule_price_usd" in level)&&!("mvrv_deep" in level),`${level.key}: полей правила «дёшево» нет`);continue;}
+      assert.ok(!("mvrv_deep" in level)&&!("price_usd_deep" in level),`${level.key}: уровня всей истории нет`);
+      assert.equal(level.rule_price_usd,level.price_usd,`${level.key}: при одном окне цена правила — цена окна четырёх лет`);
+    }
+    // «Дёшево» по правилу ⇔ цена дня наблюдения не выше цены правила (на границе — допуск округления).
+    {const floor=levels.levels.find(x=>x.key==="capitulation_floor"),close=levels.mvrv*levels.realized_price_usd;
+      if(close<floor.rule_price_usd*.998)assert.equal(live.cheap,true,"цена ниже цены правила — правило видит «дёшево»");
+      if(close>floor.rule_price_usd*1.002)assert.equal(live.cheap,false,"цена выше цены правила — правило «дёшево» не видит");}
+    // Карточки детекторов так, как их читает правило, и разница фиксов: на холодном старте её нет.
+    assert.deepEqual(Object.keys(live.detectors),["recovery","macro_shock","distribution"]);
+    assert.deepEqual([live.detectors.recovery.state,live.detectors.macro_shock.state,live.detectors.distribution.reference],[live.recovery.state,live.macro_shock_state,true]);
+    assert.equal(s.regime_meta.strategic.fix_diff,null,"холодный старт: прошлого фикса нет — разницы фиксов нет");
     // Сверка потоков и остатка бирж: в синтетике три ряда — независимые блуждания, разрыв заведомо
     // больше допуска. Предупреждение обязано нести ровно то, что даёт измерение на тех же рядах.
     process.env.PREVIOUS_STATE=join(dir,"absent.json");process.env.PREVIOUS_PUBLIC=join(dir,"absent.json");
@@ -187,9 +206,16 @@ try{
     assert.equal(born.pub.regime_birth.tactical,null,"краткосрочный кандидат не менялся");
     assert.ok(born.pub.tick_diff.detectors.some(x=>x.id==="leverage"),"разница соседних снимков по-прежнему несёт изменившиеся детекторы");
     assert.deepEqual(optionalSnapshotProblemsV1(born.pub),[]);
+    // Выпуск 2.15.1: разница двух фиксов опубликована в состоянии режима — все изменившиеся семьи с именами
+    // карточек (в причине рождения их не больше восьми), детекторы по состоянию движка, срок обоих фиксов.
+    const fixDiff=meta.fix_diff;
+    assert.deepEqual([fixDiff.at,fixDiff.from_at,fixDiff.source],[meta.fix_at,liveNow.fix_at,"fix"]);
+    assert.deepEqual(fixDiff.families.map(x=>[x.block,x.family,x.id,x.name,x.from,x.to]),expected.slice(0,12),"разница фиксов — те же семьи, что в причине рождения, с именами");
+    assert.deepEqual(fixDiff.detectors,birth.detectors,"детекторы разницы фиксов — те же, что в причине рождения");
     // Перенос: пока кандидат тот же, запись едет из прогона в прогон без изменений — через внутреннее
     // состояние и через опубликованный снимок (так сборщик стартует после потери состояния).
     const carried=tick({previous:born.state,env:atFix()});
+    assert.deepEqual(carried.pub.regime_meta.strategic.fix_diff,fixDiff,"между фиксами разница фиксов переносится без изменений");
     assert.deepEqual(carried.pub.regime_birth.strategic,birth,"запись о рождении переносится, пока кандидат тот же");
     assert.deepEqual([carried.pub.regime_meta.strategic.fix_at,carried.pub.regime_meta.strategic.count],[meta.fix_at,1],"между фиксами фикс и счёт стоят");
     assert.ok(carried.pub.decision.reason_codes.includes("between_fixes"));
