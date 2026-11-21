@@ -108,6 +108,27 @@ const targets=m=>Object.fromEntries(Object.entries(m.strategies).map(([k,v])=>[k
   assert.equal(unknown.cause.text,"смена боевых правил ? → ?");
 }
 
+// ================= 2а. Ступень пола восстановления: цель меняется без смены режима и набора оверлеев =================
+{
+  // Рождение текущего кандидата — давняя смена режима. Раньше шаг пола получал её причиной.
+  const staleBirth={strategic:{t:iso(T0-9*DAY),candidate:"transition",from_candidate:"deteriorating",blocks:{demand:{from:-25,to:-15,band_from:"adverse",band_to:"neutral"}},families:[{block:"demand",family:"etf",id:"etf_regime",name:"US spot-ETF · режим потоков",from:-1,to:-0.5}],detectors:[]}};
+  const base={at:iso(T0),price:60_000,gateOpen:true,regimeBirth:staleBirth,candidateSince:iso(T0-9*DAY)};
+  const step=(from,to,closes,codes=[])=>targetChangeRecordV1({...base,previous:{target_pct:from,strategic:"transition",binding_overlays:["recovery_floor"]},decision:{target_pct:to,strategic:"transition",binding_overlays:["recovery_floor"],reason_codes:["fix","base:transition","recovery_floor",...codes],inputs:{floor_closes:closes}}});
+  const second=step(45,60,2),third=step(60,80,3);
+  assert.deepEqual([second.kind,second.direction,second.cause.text,second.cause.candidate_since],["overlay","up","пол восстановления: ступень 2 из 3 — детектор подтверждён на втором фиксе подряд",null]);
+  assert.equal(third.cause.text,"пол восстановления: ступень 3 из 3 — детектор подтверждён на третьем фиксе подряд");
+  for(const record of [second,third]){assert.doesNotMatch(record.cause.text,/Спрос|ETF|режим «/,"причина давней смены режима шагу пола не приписывается");assert.deepEqual([record.cause.families,record.cause.detectors],[[],[]]);}
+  const reset=step(80,45,1,["missed_fix_reset"]);
+  assert.deepEqual([reset.kind,reset.direction,reset.cause.text],["overlay","down","пол восстановления: ступень 1 из 3 — счёт фиксов начат заново после пропущенных суток"]);
+  assert.equal(step(60,80,7).cause.text,"пол восстановления: ступень изменилась — детектор подтверждён ещё на одном фиксе подряд","ступень вне лестницы числом не называется");
+  // Без пола в оверлеях прежнее поведение: смена режима — причина из рождения кандидата.
+  const regime=targetChangeRecordV1({...base,previous:{target_pct:20,strategic:"deteriorating",binding_overlays:[]},decision:{target_pct:45,strategic:"transition",binding_overlays:[]}});
+  assert.equal(regime.kind,"regime");assert.match(regime.cause.text,/блок «Спрос» вышел из неблагоприятной полосы/);
+  // Смена набора оверлеев — прежняя запись «пол … включён / снят».
+  const on=targetChangeRecordV1({...base,previous:{target_pct:20,strategic:"deteriorating",binding_overlays:[]},decision:{target_pct:40,strategic:"deteriorating",binding_overlays:["recovery_floor"],inputs:{floor_closes:1}}});
+  assert.deepEqual([on.kind,on.cause.text.startsWith("пол восстановления включён")],["overlay",true]);
+}
+
 // ================= 3. Гейты линий: боевая — по боевому решению, прежние правила — по опоре =================
 {
   let m=tick(null,T0,60_000,{v3:true});
