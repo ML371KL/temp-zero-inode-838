@@ -172,7 +172,7 @@ export function fixFromRecordV3(view){
  *   fix — снимок последнего состоявшегося фикса (для причин смены режима и оверлея).
  * `calc` передаётся только на прогоне, где фикс состоялся (evaluateV3Inputs на тех же входах).
  */
-export function liveRegimeMetaV3({decision,view=null,previousMeta=null,now,calc=null}={}){
+export function liveRegimeMetaV3({decision,view=null,previousMeta=null,now,calc=null,metrics=null}={}){
   const v=isObject(view)?view:null,prev=isObject(previousMeta)&&typeof previousMeta.fix_at==="string"?previousMeta:null;
   const state=decision?.strategic??"insufficient",candidate=str(v?.candidate)??state,fixAt=str(v?.fix_at);
   const newFix=fixAt!==null&&fixAt!==(prev?.fix_at??null),same=prev!==null&&prev.candidate===candidate;
@@ -182,17 +182,29 @@ export function liveRegimeMetaV3({decision,view=null,previousMeta=null,now,calc=
   // отказ расчёта на фиксе. Тогда берётся то, что движок сам записал о своём последнем фиксе, —
   // блоки, детекторы, оценка и четыре семьи, которые он считает сам; остальные семьи появятся на
   // следующем фиксе.
-  const fix=newFix&&calc?fixSnapshotV3(calc,v)??prev?.fix??fixFromRecordV3(v):prev?.fix??fixFromRecordV3(v);
+  const made=newFix&&calc?fixSnapshotV3(calc,v):null;
+  const fix=made??prev?.fix??fixFromRecordV3(v);
+  // РАЗНИЦА ДВУХ ПОСЛЕДНИХ ФИКСОВ (выпуск 2.15.1). Считается на прогоне, где фикс состоялся и есть оба
+  // снимка — этого фикса и прошлого, — и переносится до следующего фикса: по ней уведомления называют,
+  // какой вход сдвинулся, когда записи журнала смен цели об этом шаге нет (цель не менялась либо бот
+  // пропустил прогон). null — разницу посчитать не из чего: фикс без расчёта, прошлого снимка нет.
+  // Справочное поле не имеет права уронить состояние режима: отказ расчёта разницы — её отсутствие.
+  let diff=null;
+  try{diff=made&&prev?.fix?fixDiffV3(prev.fix,made,metrics):null;}catch{diff=null;}
+  const carried=!newFix&&isObject(prev?.fix_diff)&&prev.fix_diff.at===fixAt?prev.fix_diff:null;
+  const fixDiff=diff?{...diff,at:fixAt,from_at:str(prev.fix_at)}:carried;
   return{
     state,candidate,count,since,downStreak:0,anchor:state,
     ...(pending&&str(v?.next_fix_at)?{hold_until:v.next_fix_at}:{}),
     fix_at:fixAt,next_fix_at:str(v?.next_fix_at),pending,
     floor:{closes:Number.isInteger(v?.floor?.closes)?v.floor.closes:0,level_pct:num(v?.floor?.level_pct)},
-    fix,
+    fix,fix_diff:fixDiff,
   };
 }
 
-// Что изменилось между двумя фиксами — в форме tick_diff: семьи, детекторы, перцентиль MVRV.
+// Сколько семей несёт разница фиксов: всего голосующих среднесрочных семей двенадцать, больше не бывает.
+const FIX_DIFF_MAX_FAMILIES=12;
+// Что изменилось между двумя фиксами — в форме tick_diff: семьи, детекторы, оба перцентиля MVRV.
 export function fixDiffV3(previousFix,currentFix,metrics){
   if(!isObject(previousFix)||!isObject(currentFix))return null;
   const cards=familyCards(metrics),families=[],detectors=[];
@@ -201,8 +213,35 @@ export function fixDiffV3(previousFix,currentFix,metrics){
     if(isNum(from)&&isNum(to)&&from!==to){const card=cards.get(`${block}.${family}`)||{};families.push({block,family,id:card.id??null,name:card.name??null,from,to});}
   }
   for(const [id,key] of [["recovery","recovery_state"],["macro_shock","macro_shock_state"]])if(str(previousFix[key])&&str(currentFix[key])&&previousFix[key]!==currentFix[key])detectors.push({id,from:previousFix[key],to:currentFix[key]});
-  const mvrv=isNum(previousFix.mvrv_percentile)&&isNum(currentFix.mvrv_percentile)&&previousFix.mvrv_percentile!==currentFix.mvrv_percentile?{mvrv_percentile:{from:previousFix.mvrv_percentile,to:currentFix.mvrv_percentile}}:{};
-  return{families,detectors,...mvrv,source:"fix"};
+  const moved=key=>isNum(previousFix[key])&&isNum(currentFix[key])&&previousFix[key]!==currentFix[key]?{[key]:{from:previousFix[key],to:currentFix[key]}}:{};
+  // Прошлый снимок фикса может быть неполным (partial: первый фикс после выпуска — без баллов семей,
+  // которые движок берёт готовыми): тогда семьи, которых в нём нет, в разницу не попадают, и это помечено.
+  return{families:families.slice(0,FIX_DIFF_MAX_FAMILIES),detectors,...moved("mvrv_percentile"),...moved("mvrv_percentile_deep"),...(previousFix.partial===true?{partial:true}:{}),source:"fix"};
+}
+
+// КАРТОЧКИ ДЕТЕКТОРОВ ТАК, КАК ИХ ЧИТАЕТ БОЕВОЕ ПРАВИЛО (выпуск 2.15.1). Сборщик публикует detectors[] по
+// методике v1 — её тексты лежат в запертом разделе модели и не правятся. Здесь, вне замка, для набора v3
+// пишется то, что в них стало неверно: якорь «восстановления» — по двум окнам MVRV и его пол ступенями,
+// у «Дистрибуции» права на режим нет (признак reference). Состояние — из расчёта движка на этом прогоне.
+// Витрина берёт карточки отсюда и сама тексты больше не правит; роль детектора (пол ступенями, «справочный»)
+// она печатает отдельной строкой, поэтому в тексте карточки роль не повторяется.
+const ordinalPct=n=>`${n}-го перцентиля`;
+export function liveDetectorCardsV3(calc){
+  if(!isObject(calc)||!isObject(calc.recovery))return null;
+  const P=POLICY_V3_CANDIDATE.scoring,anchorPct=P.valuation.recovery_anchor_below_percentile,need=P.recovery?.good_min_supports??2;
+  const two=calc.record?.deep_window_used===true,anchor=calc.recovery.anchor===true,supports=num(calc.recovery.supports);
+  return{
+    recovery:{
+      state:str(calc.recovery.state),
+      inputs:`оценка ${anchor?"низкая":"не низкая"}${two?(anchor?" в обоих окнах MVRV":" хотя бы в одном окне MVRV"):""} · подтверждений ${supports??"—"}/3`,
+      logic:`Низкая циклическая оценка (MVRV ниже ${ordinalPct(anchorPct)}${two?" и за 4 года, и по всей истории":" за 4 года; окна всей истории сейчас нет"}) — обязательный якорь; плюс минимум ${need===2?"два подтверждения":`${need} подтверждения`} стабилизации тренда/ETF/биржевого предложения. Положительный статус поднимает защитный/ухудшающийся вердикт до переходного (не действует при сработавшем макрошоке).`,
+    },
+    macro_shock:{state:str(calc.macro_shock_state)},
+    distribution:{
+      reference:true,
+      logic:"Высокая накопленная прибыль (MVRV) — обязательный якорь. Оба подтверждения (рост биржевого предложения И потеря ценовых опор) — «сработал»; одно из двух — «наблюдение».",
+    },
+  };
 }
 
 // То, что боевое правило читает на ЭТОМ прогоне (решает оно на фиксе): баллы всех семей как их видит
@@ -217,6 +256,7 @@ export function liveInputsV3(calc,at){
     at:str(at),...rest,bands:Object.fromEntries(Object.entries(snapshot.blocks).map(([k,v])=>[k,BAND(v)])),candidate:str(calc.candidate),
     recovery:{state:recovery_state,anchor:calc.recovery?.anchor===true,supports:num(calc.recovery?.supports)},
     deep_window_used:calc.record?.deep_window_used===true,closed_day:str(calc.record?.observed?.closed_day),
+    detectors:liveDetectorCardsV3(calc),
   };
 }
 

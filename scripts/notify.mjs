@@ -392,6 +392,50 @@ function birthOf(raw) {
   if (!b || !asText(b.candidate)) return null;
   return { t: asText(b.t), candidate: b.candidate, blocks: asObject(b.blocks) || {}, families: rowsOf(b.families), detectors: rowsOf(b.detectors), note: asText(b.note) };
 }
+// Разница двух последних фиксов (regime_meta.strategic.fix_diff, выпуск 2.15.1): баллы семей как их
+// читает движок, состояния детектора разворота и макрошока, оба перцентиля MVRV — «было → стало».
+// at — фикс, на котором она посчитана: сборщик переносит её без изменений до следующего фикса, и к
+// шагу цели она относится, только когда at — фикс этого шага. partial — прошлый снимок фикса был
+// неполным (первый фикс после выпуска): семья, которой в разнице нет, могла и сдвинуться.
+// Перцентиля в разнице нет — он не менялся. null — поля нет (снимок формы 2.15.0) или оно негодно.
+// Три входа детектора разворота узнаются и без id карточки — по блоку и семье движка.
+const FIX_DIFF_LEGS = { "cycle.trend": "trend_regime", "demand.etf": "etf_regime", "demand.exchange_supply": "exchange_supply" };
+function fixDiffOf(raw) {
+  const d = asObject(raw);
+  if (!d || !finite(Date.parse(asText(d.at)))) return null;
+  const leg = (x) => (asObject(x) && finite(x.from) && finite(x.to) ? { from: x.from, to: x.to } : null);
+  return {
+    at: d.at, from_at: asText(d.from_at),
+    families: rowsOf(d.families).filter((f) => finite(f.from) && finite(f.to))
+      .map((f) => ({ id: asText(f.id) || FIX_DIFF_LEGS[`${asText(f.block)}.${asText(f.family)}`] || "", name: asText(f.name), from: f.from, to: f.to })),
+    detectors: rowsOf(d.detectors).filter((x) => asText(x.id) && asText(x.from) && asText(x.to)).map((x) => ({ id: x.id, from: x.from, to: x.to })),
+    mvrv: leg(d.mvrv_percentile), mvrv_deep: leg(d.mvrv_percentile_deep),
+    partial: d.partial === true,
+  };
+}
+// Уровни цены у порогов правила (valuation_levels сборщика). price — уровень по окну четырёх лет,
+// как и раньше. С выпуска 2.15.1 у двух порогов «дёшево» (пол капитуляции, якорь восстановления)
+// есть ещё уровень по всей истории (deep) и ЦЕНА ПРАВИЛА (rule) — цена BTC, ниже которой условие
+// выполнено во всех окнах, которые читает правило. Чья это цена, говорит описание окна всей
+// истории (valuation_levels.deep): used:true — правило читает два окна, цена правила — меньший из
+// двух уровней; used:false с причиной single_window — окно одно, цена правила — его уровень
+// (windows — сколько окон). Описания нет (снимок формы 2.15.0), уровень всей истории снят (любая
+// другая причина), цена не названа или не сходится с этим определением — цены правила нет: уровень
+// окна четырёх лет ценой правила не является, и в тексте он остаётся названным своим именем.
+function valuationLevelsOf(raw) {
+  const vl = asObject(raw), deep = asObject(vl?.deep);
+  const windows = deep?.used === true ? 2 : deep?.used === false && deep.reason === "single_window" ? 1 : 0;
+  const usd = (x) => (finite(x) && x > 0 ? x : null);
+  const out = {};
+  for (const l of asList(vl?.levels)) {
+    if (!asObject(l) || !asText(l.key)) continue;
+    const price = usd(l.price_usd), far = windows === 2 ? usd(l.price_usd_deep) : null, stated = windows ? usd(l.rule_price_usd) : null;
+    const lower = windows === 2 ? (price !== null && far !== null ? Math.min(price, far) : null) : price;
+    const rule = stated !== null && lower !== null && Math.abs(stated - lower) < 1 ? stated : null;
+    out[l.key] = { percentile: l.percentile, price, ...(far !== null ? { deep: far } : {}), ...(rule !== null ? { rule, windows } : {}) };
+  }
+  return out;
+}
 // То, что боевое правило набора v3 читает на ЭТОМ прогоне (live_inputs сборщика): оценки трёх
 // направлений как их видит движок, полосы, кандидат до гистерезиса, детектор разворота и оба
 // перцентиля MVRV. Карточки, блоки и детекторы снимка публикуются по методике v1, а для четырёх
@@ -503,13 +547,22 @@ function fromSnapshotJSON(snap) {
       points,
     };
   });
-  const detectors = (snap.detectors || []).map((d) => ({
-    id: d.id,
-    name: d.name,
-    state: d.state,
-    inputs: d.inputs || "",
-    note: d.logic || d.note || "",
-  }));
+  // Карточка детектора разворота у набора v3 — та, которую читает боевое правило
+  // (live_inputs.detectors.recovery, выпуск 2.15.1): его якорь считается по двум окнам MVRV.
+  // detectors[] публикуется по методике v1 (одно окно) и при несогласии окон с правилом расходится —
+  // тогда состояние детектора в проверке связи спорило бы с витриной и с сообщением о доле.
+  // Остальные детекторы и снимок без этого поля читаются из detectors[], как раньше.
+  const ruleRecovery = asText(asObject(snap.decision)?.policy_id) === V3.suite ? asObject(asObject(asObject(snap.live_inputs)?.detectors)?.recovery) : null;
+  const detectors = (snap.detectors || []).map((d) => {
+    const own = d.id === "recovery" && asText(ruleRecovery?.state) ? ruleRecovery : null;
+    return {
+      id: d.id,
+      name: d.name,
+      state: own ? own.state : d.state,
+      inputs: own ? asText(own.inputs) : d.inputs || "",
+      note: own ? asText(own.logic) : d.logic || d.note || "",
+    };
+  });
   const revisions = (snap.source_revision_alerts || []).map((r) => ({
     key: `${r.source || r.key || "источник"}:${r.observed_at || ""}:${String(r.previous_data_sha256 || "").slice(0, 8)}`,
     text:
@@ -562,8 +615,7 @@ function fromSnapshotJSON(snap) {
     : dec.status && dec.status !== "actionable" ? "status"
     : dec.quality?.status && !["good", "degraded"].includes(dec.quality.status) ? "quality"
     : health && health !== "healthy" ? "monitor" : "";
-  const levels = {};
-  for (const l of asList(asObject(snap.valuation_levels)?.levels)) if (asObject(l) && asText(l.key)) levels[l.key] = { percentile: l.percentile, price: l.price_usd };
+  const levels = valuationLevelsOf(snap.valuation_levels);
   const engine = {
     t: generatedAt,
     price: finite(snap.price) ? snap.price : null,
@@ -643,6 +695,7 @@ function fromSnapshotJSON(snap) {
       log: changeLogSteps(snap.monitoring?.target_change_log),
       history: decisionChanges(snap.history),
       birth: birthOf(asObject(snap.regime_birth)?.strategic),
+      fixDiff: fixDiffOf(asObject(meta)?.fix_diff),
     },
   };
 
@@ -1386,22 +1439,44 @@ function mvrvPair(eng, fix = false) {
   const m = mvrvOf(eng, fix);
   return m.d === null ? fmtPlain(m.p) : `${fmtPlain(m.p)} за 4 года и ${fmtPlain(m.d)} по всей истории`;
 }
-// То же с путём от прошлого фикса: «11,7 → 7,8 за 4 года и 19 → 9,1 по всей истории». Решение
-// хранит входы фикса, поэтому «было» — входы прошлого фикса из базы сравнения, каким бы ни был
-// ритм запусков бота.
-function mvrvPath(eng, prevEng) {
+// «Было» обоих перцентилей — входы ПРОШЛОГО ФИКСА. Источник — разница двух фиксов, посчитанная на
+// фиксе шага (fixDiff): её «было» — ровно прошлый фикс, а перцентиль, которого в ней нет, не
+// менялся. Без неё (снимок формы 2.15.0, фикс без расчёта) — входы фикса из базы сравнения бота:
+// решение хранит входы фикса, но сама база может быть старше прошлого фикса (бот пропустил сутки).
+// «Стало» разницы обязано совпасть с тем, что записало решение, — иначе это не та разница.
+function mvrvWas(eng, prevEng, fixDiff = null) {
+  if (!fixDiff) return { p: prevEng?.mvrv_pct, d: prevEng?.mvrv_deep };
   const m = mvrvOf(eng, true);
-  const leg = (was, now) => (finite(was) && !sameNum(was, now) ? `${fmtPlain(was)} → ${fmtPlain(now)}` : fmtPlain(now));
-  return m.d === null ? leg(prevEng?.mvrv_pct, m.p) : `${leg(prevEng?.mvrv_pct, m.p)} за 4 года и ${leg(prevEng?.mvrv_deep, m.d)} по всей истории`;
+  const from = (leg, now) => (leg && finite(now) && Math.abs(leg.to - now) < 0.011 ? leg.from : null);
+  return { p: from(fixDiff.mvrv, m.p), d: from(fixDiff.mvrv_deep, m.d) };
 }
-// Уровень цены, на котором MVRV-перцентиль проходит порог правила (публикует сборщик; поле
-// необязательное — без него строка остаётся без цены). Сборщик считает уровень только по окну
-// четырёх лет: при двух окнах это порог одного из них, и так он и назван.
-function levelNote(eng, key) {
-  const p = eng?.levels?.[key]?.price;
-  if (!finite(p)) return "";
-  const price = `цена ≈ $${fmtPlain(p / 1000, 1)}${NBSP}тыс.`;
-  return mvrvOf(eng).d === null ? `; это ${price}` : `; порог окна 4 лет — ${price}`;
+const mvrvLeg = (was, now) => (finite(was) && !sameNum(was, now) ? `${fmtPlain(was)} → ${fmtPlain(now)}` : fmtPlain(now));
+// То же с путём от прошлого фикса: «11,7 → 7,8 за 4 года и 19 → 9,1 по всей истории».
+function mvrvPath(eng, prevEng, fixDiff = null) {
+  const m = mvrvOf(eng, true), was = mvrvWas(eng, prevEng, fixDiff);
+  return m.d === null ? mvrvLeg(was.p, m.p) : `${mvrvLeg(was.p, m.p)} за 4 года и ${mvrvLeg(was.d, m.d)} по всей истории`;
+}
+// Цена правила у порога «дёшево» (см. valuationLevelsOf): цена BTC, ниже которой порог выполнен во
+// всех окнах, которые читает правило. Берётся, только когда снимок и движок согласны, сколько этих
+// окон; иначе null. Гейт оценки правило читает по одному окну — цены правила у него нет.
+function rulePrice(eng, key) {
+  const l = eng?.levels?.[key];
+  return l && finite(l.rule) && l.windows === (mvrvOf(eng).d === null ? 1 : 2) ? l.rule : null;
+}
+const priceWord = (usd) => `цена ≈ $${fmtPlain(usd / 1000, 1)}${NBSP}тыс.`;
+// То же словами — для строки причины: «цена ≈ $58,2 тыс.»; пусто — цены правила нет.
+const rulePriceWord = (eng, key) => { const p = rulePrice(eng, key); return p === null ? "" : priceWord(p); };
+// Цена рядом с порогом перцентиля в «Что отменит». Есть цена правила — печатается она, без оговорки
+// про окно: «порог — цена ≈ $58,2 тыс.». Нет (снимок формы 2.15.0, уровень всей истории снят, цена
+// не названа) — формулировка 2.15.0: уровень окна назван своим именем. win — окно, которому не
+// хватает до порога: "d" — вся история (её уровень есть только в снимке новой формы).
+function levelNote(eng, key, win = "p") {
+  const rule = rulePrice(eng, key);
+  if (rule !== null) return `; порог — ${priceWord(rule)}`;
+  const l = eng?.levels?.[key];
+  if (mvrvOf(eng).d === null) return finite(l?.price) ? `; это ${priceWord(l.price)}` : "";
+  if (win === "d") return finite(l?.deep) ? `; порог окна всей истории — ${priceWord(l.deep)}` : "";
+  return finite(l?.price) ? `; порог окна 4 лет — ${priceWord(l.price)}` : "";
 }
 
 // Почему кандидат движка именно такой — правило, которое сработало, в числах самого движка.
@@ -1519,16 +1594,17 @@ function capExitLine(eng) {
   const two = mvrvOf(eng).d !== null;
   return `Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше ${V3.capitulationPct}${two ? " в любом из двух окон" : ""} (сейчас ${mvrvPair(eng)}${levelNote(eng, "capitulation_floor")}).`;
 }
-// Пол капитуляции требует «дёшево» в ОБОИХ окнах: называется то окно, которому до порога не хватает.
+// Пол капитуляции требует «дёшево» в ОБОИХ окнах: называется то окно, которому до порога не хватает,
+// и рядом с его числом — цена правила (когда одному окну не хватает, она и есть уровень этого окна).
 function capReturnLine(eng) {
   const m = mvrvOf(eng), lim = V3.capitulationPct;
   const head = "Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль";
-  const level = levelNote(eng, "capitulation_floor");
-  if (m.d === null) return `${head} будет ${lim} или ниже (сейчас ${fmtPlain(m.p)}${level})`;
+  const level = (win) => levelNote(eng, "capitulation_floor", win);
+  if (m.d === null) return `${head} будет ${lim} или ниже (сейчас ${fmtPlain(m.p)}${level("p")})`;
   const a = m.p <= lim, b = m.d <= lim;
-  if (a && !b) return `${head} по всей истории тоже будет ${lim} или ниже (сейчас ${fmtPlain(m.d)}; за 4 года — ${fmtPlain(m.p)})`;
-  if (!a && b) return `${head} за 4 года тоже будет ${lim} или ниже (сейчас ${fmtPlain(m.p)}${level}; по всей истории — ${fmtPlain(m.d)})`;
-  return `${head} будет ${lim} или ниже в обоих окнах (сейчас ${mvrvPair(eng)}${level})`;
+  if (a && !b) return `${head} по всей истории тоже будет ${lim} или ниже (сейчас ${fmtPlain(m.d)}${level("d")}; за 4 года — ${fmtPlain(m.p)})`;
+  if (!a && b) return `${head} за 4 года тоже будет ${lim} или ниже (сейчас ${fmtPlain(m.p)}${level("p")}; по всей истории — ${fmtPlain(m.d)})`;
+  return `${head} будет ${lim} или ниже в обоих окнах (сейчас ${mvrvPair(eng)}${level("p")})`;
 }
 
 // «Что отменит» — условие В СТОРОНУ, ПРОТИВОПОЛОЖНУЮ смене: для повышения — что вернёт долю вниз,
@@ -1769,16 +1845,34 @@ function structureLine(s, v3 = false) {
 }
 
 // Какие входы детектора сдвинулись. Набор v3 решает на фиксе, и сдвиг входов для него — разница
-// двух ФИКСОВ: её несёт запись журнала монитора об этом шаге (сборщик передаёт монитору разницу
-// фиксов по баллам, которые читает движок). Разница соседних снимков (tick_diff, сравнение
-// карточек с базой) для такого решения не годится: это другой промежуток и баллы методики v1.
-// Нет записи журнала — сдвинувшийся вход не называется вовсе.
+// двух ФИКСОВ по баллам, которые читает движок: сборщик публикует её в снимке и её же передаёт
+// монитору для записи журнала о шаге. Разница соседних снимков (tick_diff, сравнение карточек с
+// базой) для такого решения не годится: это другой промежуток и баллы методики v1.
+// Источники — по порядку:
+//   1) разница двух последних фиксов из самого снимка (fix_diff, выпуск 2.15.1), если она посчитана
+//      на фиксе шага (ctx.fixDiff — уже отобранная): по её метке видно, какие два фикса сравнены, и
+//      она есть и тогда, когда запись журнала семей не несёт. Семьи, которой в ней нет, нет и в
+//      причине — она не сдвинулась, что бы ни стояло в журнале;
+//   2) запись журнала монитора о том же шаге (cause.families) — когда разницы фиксов нет (снимок
+//      формы 2.15.0, фикс без расчёта, разница от другого фикса) и для семей, о которых неполная
+//      разница (partial) молчит: её прошлый снимок фикса этих семей не нёс, и «нет в разнице» там
+//      не значит «не сдвинулась»;
+//   3) нет ни того, ни другого — сдвинувшийся вход не называется вовсе.
 // ids — входы детектора: посторонняя семья из той же записи его причиной не называется.
 function movedInputs(ctx, ids) {
   const staleNote = (id) => (ctx.staleIds?.has(id) ? ", источник отдал устаревшие данные" : "");
-  const fams = (ctx.logFamilies || []).filter((f) => asText(f?.id) && ids.includes(f.id));
+  const pick = (list) => (list || []).filter((f) => asText(f?.id) && ids.includes(f.id));
+  const diff = ctx.fixDiff || null;
+  const own = diff ? pick(diff.families) : [];
+  const logged = !diff || diff.partial ? pick(ctx.logFamilies).filter((f) => !own.some((x) => x.id === f.id)) : [];
+  const fams = [...own, ...logged];
   return { ids: fams.map((f) => f.id), text: fams.map((f) => `«${humanTitle(f.id, f.name)}» (${fmtSigned(f.from)} → ${fmtSigned(f.to)}${staleNote(f.id)})`).join(", ") };
 }
+// Разница двух последних фиксов, если она описывает ДЕЙСТВУЮЩИЙ фикс снимка (метка at — его
+// fix_at); разница, перенесённая с другого фикса, не годится ни в причину, ни во вход разбора.
+const fixDiffNow = (feed, eng) => (feed?.fixDiff && eng?.fix_at && feed.fixDiff.at === eng.fix_at ? feed.fixDiff : null);
+// Снимок — прогон самого фикса: момент фикса и есть момент снимка, на котором он состоялся.
+const onFixRun = (eng) => { const t = Date.parse(eng?.fix_at || ""); return finite(t) && Math.abs(t - eng.t) < 1000; };
 
 // Причина смены оверлея или ступени пола — в числах, которые записал фикс: оба перцентиля MVRV
 // против порога, счёт подтверждений, число фиксов подряд. У полов гистерезиса нет: они включаются,
@@ -1786,16 +1880,24 @@ function movedInputs(ctx, ids) {
 // решения текущего снимка. Якорь называется числом: 20.08 пол сняли из-за MVRV-перцентиля
 // 19,5 → 27,2 на растущем рынке, а в сообщении стояло «обстановка хуже прежней».
 // Снимку прежней формы правил не приписываем — причину такого шага даёт журнал монитора.
+// Что было на прошлом фиксе («было» перцентилей, прежнее состояние детектора, какой его вход
+// сдвинулся), говорит разница двух фиксов (ctx.fixDiff), если она посчитана на фиксе шага; рядом с
+// порогом «дёшево» у включения и снятия пола стоит цена правила, когда снимок её публикует.
 function overlayCause(step, eng, ctx) {
   if (!eng.contract) return { text: "", ids: [] };
   const k = changeKind(step);
   const m = mvrvOf(eng, true), two = m.d !== null;
-  const path = mvrvPath(eng, ctx.prevEng);
+  const was = mvrvWas(eng, ctx.prevEng, ctx.fixDiff);
+  const path = mvrvPath(eng, ctx.prevEng, ctx.fixDiff);
   const conf = recoveryConfirmations(eng);
   const confNote = conf ? `, подтверждений ${conf.n} из ${conf.of}` : "";
   const moved = movedInputs(ctx, ["trend_regime", "etf_regime", "exchange_supply"]);
   const tail = moved.text ? `; сдвинулся показатель ${moved.text}` : "";
-  const cheap = `MVRV-перцентиль ${mvrvPair(eng, true)} (${two ? "оба ниже" : "ниже"} ${V3.recoveryAnchorPct})`;
+  const anchorPrice = rulePriceWord(eng, "recovery_anchor"), capPrice = rulePriceWord(eng, "capitulation_floor");
+  const cheapAt = (price) => `MVRV-перцентиль ${mvrvPair(eng, true)} (${two ? "оба ниже" : "ниже"} ${V3.recoveryAnchorPct}${price ? `; порог — ${price}` : ""})`;
+  const cheap = cheapAt("");
+  // прежнее и нынешнее состояние детектора разворота — как их записали два фикса
+  const det = (ctx.fixDiff?.detectors || []).find((d) => d.id === "recovery" && DET_LABEL[d.from] && d.to === eng.recovery) || null;
   const fs = floorStepOf(step);
   if (fs) {
     if (!fs.up) return { text: ctx.missedFix ? "Причина: сутки прошли без фикса — счёт фиксов подряд начат заново" : "", ids: [] };
@@ -1805,26 +1907,27 @@ function overlayCause(step, eng, ctx) {
   if (floorOff && step.to > step.from) return { text: "Причина: ступень режима поднялась выше пола", ids: [] };
   if (k.on.includes("recovery_floor")) {
     const rung = floorRung(step.to);
-    return { text: `Причина: детектор разворота подтверждён ${rung > 1 ? `${ORDINAL_ACC[rung]} фикс подряд` : "на фиксе"} — ${cheap}${confNote}${tail}`, ids: moved.ids };
+    const before = rung > 1 || !det ? "" : ` (до этого — ${DET_LABEL[det.from]})`;
+    return { text: `Причина: детектор разворота подтверждён ${rung > 1 ? `${ORDINAL_ACC[rung]} фикс подряд` : "на фиксе"}${before} — ${cheapAt(anchorPrice)}${confNote}${tail}`, ids: moved.ids };
   }
   if (k.off.includes("recovery_floor")) {
     if (eng.macro_shock === "fired") return { text: "Причина: сработал макрошок — он блокирует пол", ids: [] };
     // детектор подтверждён, но счёт фиксов обнулён: первая ступень пола ниже ступени режима
     if (ctx.missedFix && eng.recovery === "good") return { text: "Причина: сутки прошли без фикса — счёт фиксов подряд начат заново, а первая ступень пола ниже ступени режима", ids: [] };
     if ((m.p !== null && m.p >= V3.recoveryAnchorPct) || (two && m.d >= V3.recoveryAnchorPct))
-      return { text: `Причина: оценка перестала быть дешёвой — MVRV-перцентиль ${path} при пороге ${V3.recoveryAnchorPct}${two ? " в обоих окнах" : ""}`, ids: ["mvrv_cycle"] };
+      return { text: `Причина: оценка перестала быть дешёвой — MVRV-перцентиль ${path} при пороге ${V3.recoveryAnchorPct}${two ? " в обоих окнах" : ""}${anchorPrice ? ` (${anchorPrice})` : ""}`, ids: ["mvrv_cycle"] };
     if (conf && conf.n < V3.recoveryNeed) return { text: `Причина: подтверждений осталось ${conf.n} из ${conf.of}, нужно ${V3.recoveryNeed}${tail}`, ids: moved.ids };
-    return { text: "Причина: детектор разворота больше не подтверждён", ids: [] };
+    return { text: `Причина: детектор разворота больше не подтверждён${det ? ` (${DET_LABEL[det.from]} → ${DET_LABEL[det.to] || det.to})` : ""}`, ids: [] };
   }
   const lim = V3.capitulationPct;
-  if (k.on.includes("capitulation_floor")) return { text: `Причина: MVRV-перцентиль ${path} — ${lim} или ниже${two ? " в обоих окнах" : ""}`, ids: ["mvrv_cycle"] };
+  const capNote = capPrice ? ` (порог — ${capPrice})` : "", capTail = capPrice ? `; порог — ${capPrice}` : "";
+  if (k.on.includes("capitulation_floor")) return { text: `Причина: MVRV-перцентиль ${path} — ${lim} или ниже${two ? " в обоих окнах" : ""}${capNote}`, ids: ["mvrv_cycle"] };
   if (k.off.includes("capitulation_floor")) {
     const a = m.p !== null && m.p > lim, b = two && m.d > lim;
-    const leg = (was, now) => (finite(was) && !sameNum(was, now) ? `${fmtPlain(was)} → ${fmtPlain(now)}` : fmtPlain(now));
-    if (!two && a) return { text: `Причина: MVRV-перцентиль ${path} — выше ${lim}`, ids: ["mvrv_cycle"] };
-    if (a && b) return { text: `Причина: MVRV-перцентиль ${path} — выше ${lim}`, ids: ["mvrv_cycle"] };
-    if (a) return { text: `Причина: MVRV-перцентиль за 4 года ${leg(ctx.prevEng?.mvrv_pct, m.p)} — выше ${lim} (по всей истории ${fmtPlain(m.d)})`, ids: ["mvrv_cycle"] };
-    if (b) return { text: `Причина: окна MVRV разошлись — по всей истории перцентиль ${leg(ctx.prevEng?.mvrv_deep, m.d)}, выше ${lim} (за 4 года ${fmtPlain(m.p)})`, ids: ["mvrv_cycle"] };
+    if (!two && a) return { text: `Причина: MVRV-перцентиль ${path} — выше ${lim}${capNote}`, ids: ["mvrv_cycle"] };
+    if (a && b) return { text: `Причина: MVRV-перцентиль ${path} — выше ${lim}${capNote}`, ids: ["mvrv_cycle"] };
+    if (a) return { text: `Причина: MVRV-перцентиль за 4 года ${mvrvLeg(was.p, m.p)} — выше ${lim} (по всей истории ${fmtPlain(m.d)}${capTail})`, ids: ["mvrv_cycle"] };
+    if (b) return { text: `Причина: окна MVRV разошлись — по всей истории перцентиль ${mvrvLeg(was.d, m.d)}, выше ${lim} (за 4 года ${fmtPlain(m.p)}${capTail})`, ids: ["mvrv_cycle"] };
   }
   return { text: "", ids: [] };
 }
@@ -1948,6 +2051,9 @@ function btcAllocationEvent({ panel, prevState, prevEng, lastPct, found, resumed
   const detName = (id) => detectorHuman((panel.detectors || []).find((d) => d.id === id)?.name || id);
   const ctx = {
     prevEng, staleIds,
+    // Разница двух фиксов идёт в причину, только если посчитана на фиксе, где сделан шаг: шаг
+    // случился в текущем снимке, снимок — прогон фикса, и разница помечена этим же фиксом.
+    fixDiff: live && onFixRun(eng) ? fixDiffNow(feed, eng) : null,
     logFamilies: live && last.cause?.families?.length ? last.cause.families : null,
     missedFix: live && (curAlloc.reasons || []).includes("missed_fix_reset"),
   };
@@ -2156,8 +2262,13 @@ function holdResetEvent({ panel, prevState, prevEng, staleIds }) {
   const step = (r) => rungNote(eng, r);
   const fixAt = fixWhen(eng.fix_at);
   const detName = (id) => detectorHuman((panel.detectors || []).find((d) => d.id === id)?.name || id);
-  // что сдвинулось между двумя фиксами — из записи о рождении нынешнего кандидата на этом же фиксе
-  const born = feed.birth && feed.birth.candidate === eng.candidate && feed.birth.t === eng.fix_at ? birthBody(feed.birth, detName, staleIds).text : "";
+  // Что сдвинулось между двумя фиксами — из записи о рождении нынешнего кандидата на этом же фиксе
+  // (она несёт и оценки направлений). Записи нет — из разницы двух последних фиксов, если та
+  // посчитана на этом фиксе от того самого фикса, на котором стоит база сравнения бота: семьи и
+  // детекторы в ней те же, что были бы в записи о рождении.
+  const diff = fixDiffNow(feed, eng);
+  const born = feed.birth && feed.birth.candidate === eng.candidate && feed.birth.t === eng.fix_at ? birthBody(feed.birth, detName, staleIds).text
+    : diff && diff.from_at && diff.from_at === prevEng.fix_at ? birthBody({ blocks: {}, families: diff.families, detectors: diff.detectors }, detName, staleIds).text : "";
   const rule = ruleLine(eng);
   const lines = [
     missed ? "Причина: сутки прошли без фикса — счёт фиксов подряд начат заново"
@@ -2875,6 +2986,8 @@ const LLM_SYSTEM = `Ты пишешь короткий разбор к увед�
 // Исключение — BTC-панель: о её решении модель обязана знать то же, что стоит в сообщении о
 // доле (decision_now). Раньше во входе не было ни цены, ни времени снимка, ни режима, ни
 // кандидата, ни оверлея, а в 8 сменах доли из 15 — и причины: любое объяснение было выдумкой.
+// Сколько сдвинувшихся показателей из разницы фиксов идёт во вход: главное — перцентили и сигналы.
+const FIX_DIFF_LLM_MAX = 6;
 function llmContext(panel) {
   const named = (panel.indicators || [])
     .filter((i) => HUMAN[i.id] && hasValue(fmtValue(i)) && !i.stale)
@@ -2890,6 +3003,25 @@ function llmContext(panel) {
     const pct = panel.allocation.pct;
     const ovl = (eng.overlays || []).map((o) => (o === "recovery_floor" && eng.contract && rungWord(pct) ? `${OVERLAY_WORD[o]}, ${rungWord(pct)}` : OVERLAY_WORD[o] || (o === "emergency_override" ? "аварийный режим" : o)));
     const m = mvrvOf(eng);
+    // Пороги «дёшево» в цене — цена правила из снимка (без неё порог остаётся только перцентилем).
+    // Называются, пока оценка в дешёвой зоне хотя бы одного окна или действует пол: тогда расстояние
+    // от цены до порога и есть то, что ближе всего к смене цели; на дорогом рынке это лишние числа.
+    const capAt = rulePrice(eng, "capitulation_floor"), anchorAt = rulePrice(eng, "recovery_anchor");
+    const nearCheap = [m.p, m.d].some((v) => v !== null && v < V3.recoveryAnchorPct) || (eng.overlays || []).some((o) => o === "recovery_floor" || o === "capitulation_floor");
+    const thresholds = eng.contract && nearCheap ? [
+      capAt !== null ? `пол капитуляции (перцентиль ${V3.capitulationPct} или ниже) — ${priceWord(capAt)}` : "",
+      anchorAt !== null ? `пол восстановления (перцентиль ниже ${V3.recoveryAnchorPct}) — ${priceWord(anchorAt)}` : "",
+    ].filter(Boolean) : [];
+    // Что сдвинулось между двумя последними фиксами — из разницы фиксов снимка, пока она описывает
+    // действующий фикс: оба перцентиля, сигналы и оценки показателей как их читает правило. Пустая
+    // разница строки не даёт: «ничего не сдвинулось» разбору не нужно, а у неполной разницы было бы неправдой.
+    const diff = eng.contract ? fixDiffNow(panel.allocation.feed, eng) : null;
+    const signal = { recovery: "сигнал разворота", macro_shock: "сигнал макрошока" };
+    const between = diff ? [
+      diff.mvrv || diff.mvrv_deep ? `MVRV-перцентиль ${[diff.mvrv ? `${fmtPlain(diff.mvrv.from)} → ${fmtPlain(diff.mvrv.to)} за 4 года` : "", diff.mvrv_deep ? `${fmtPlain(diff.mvrv_deep.from)} → ${fmtPlain(diff.mvrv_deep.to)} по всей истории` : ""].filter(Boolean).join(" и ")}` : "",
+      ...diff.detectors.filter((d) => signal[d.id]).map((d) => `${signal[d.id]}: ${DET_LABEL[d.from] || d.from} → ${DET_LABEL[d.to] || d.to}`),
+      ...diff.families.filter((f) => f.id).slice(0, FIX_DIFF_LLM_MAX).map((f) => `«${humanTitle(f.id, f.name)}» ${fmtSigned(f.from)} → ${fmtSigned(f.to)}`),
+    ].filter(Boolean) : [];
     ctx.decision_now = [
       finite(eng.price) ? `цена биткоина ${fmtUsd(eng.price)}` : "",
       `снимок ${ruMoment(eng.t)}`,
@@ -2900,6 +3032,8 @@ function llmContext(panel) {
       ovl.length ? `оверлей: ${ovl.join(", ")}` : "оверлеев нет",
       eng.contract && fixAt ? `решение принимается раз в сутки, на фиксе: последний — ${fixAt}${nextAt ? `, следующий — ${nextAt}` : ""}` : "",
       eng.contract && m.p !== null ? `MVRV-перцентиль ${mvrvPair(eng)}` : "",
+      thresholds.length ? `пороги «дёшево» в цене: ${thresholds.join(", ")}` : "",
+      between.length ? `между двумя последними фиксами сдвинулось: ${between.join(", ")}` : "",
     ].filter(Boolean).join("; ");
   }
   return ctx;

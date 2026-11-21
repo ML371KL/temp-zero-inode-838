@@ -211,11 +211,67 @@ const verify=d=>{const copy={...d};delete copy.decision_hash;assert.equal(d.deci
   // Что боевое правило читает на прогоне: настоящий расчёт движка на синтетических входах.
   const now=at(2,9),inputs=mk(now,{cand:"defensive",mvrv:8,s:{deep:19,price:"below200w"}}),live=liveInputsV3(evaluateV3Inputs({now,inputs}),iso(now));
   assert.deepEqual([live.at,live.candidate,live.cheap,live.mvrv_percentile,live.deep_window_used,live.recovery.anchor,live.families.cycle.trend,live.families.cycle.valuation,live.bands.macro,live.bands.demand,live.closed_day],[iso(now),"defensive",false,8,true,true,-2,0,"adverse","adverse",iso(at(1)).slice(0,10)]);
-  assert.ok(live.mvrv_percentile_deep>10&&live.mvrv_percentile_deep<25&&JSON.stringify(live).length<900,JSON.stringify(live).length+" Б");
+  // Размер: поле публикуется на каждом прогоне; с карточками детекторов (выпуск 2.15.1) — до 1,6 тыс. знаков.
+  assert.ok(live.mvrv_percentile_deep>10&&live.mvrv_percentile_deep<25&&JSON.stringify(live).length<1600,JSON.stringify(live).length+" знаков");
   assert.equal(liveInputsV3(null,iso(now)),null);
+  // ---- Выпуск 2.15.1: карточки детекторов так, как их читает боевое правило ----
+  {
+    // MVRV за 4 года на 8-м перцентиле, по всей истории на 19-м: якорь восстановления (< 25) выполнен в обоих окнах.
+    const cards=live.detectors;
+    assert.deepEqual(Object.keys(cards),["recovery","macro_shock","distribution"]);
+    assert.deepEqual([cards.recovery.state,cards.macro_shock.state,cards.distribution.reference],[live.recovery.state,live.macro_shock_state,true]);
+    assert.match(cards.recovery.inputs,/^оценка низкая в обоих окнах MVRV · подтверждений [0-3]\/3$/);
+    assert.match(cards.recovery.logic,/MVRV ниже 25-го перцентиля и за 4 года, и по всей истории/);
+    assert.ok(cards.recovery.logic.endsWith("поднимает защитный/ухудшающийся вердикт до переходного (не действует при сработавшем макрошоке)."));
+    assert.ok(cards.distribution.logic.endsWith("одно из двух — «наблюдение»."));
+    // Роль детектора (пол ступенями, «справочный») страница печатает отдельной строкой — текст карточки её не повторяет.
+    for(const text of [cards.recovery.logic,cards.distribution.logic])assert.ok(!text.includes("40 / 60 / 80")&&!text.includes("не влияет"));
+    for(const text of [cards.recovery.logic,cards.distribution.logic])assert.doesNotMatch(text,/ограничение вердикта сверху|<25-го перцентиля\)/,"формулировки прежних правил в карточку боевого правила не попадают");
+    // Якорь по одному окну: за 4 года дёшево (8-й), по всей истории нет (60-й) — правило его не засчитывает.
+    const oneWindow=liveInputsV3(evaluateV3Inputs({now,inputs:mk(now,{cand:"defensive",mvrv:8,s:{deep:60,price:"below200w"}})}),iso(now)).detectors;
+    assert.deepEqual([oneWindow.recovery.state,oneWindow.recovery.inputs.startsWith("оценка не низкая хотя бы в одном окне MVRV · ")],["calm",true]);
+    // Окна всей истории нет (ряд пуст) — правило читает одно окно, и карточка это говорит.
+    const noDeepInputs=mk(now,{cand:"defensive",mvrv:8,s:{price:"below200w"}});noDeepInputs.series.mvrv_deep=[];
+    const noDeep=liveInputsV3(evaluateV3Inputs({now,inputs:noDeepInputs}),iso(now));
+    assert.equal(noDeep.deep_window_used,false);
+    assert.match(noDeep.detectors.recovery.inputs,/^оценка низкая · подтверждений/);
+    assert.match(noDeep.detectors.recovery.logic,/ниже 25-го перцентиля за 4 года; окна всей истории сейчас нет/);
+  }
   // Без вида движка состояние остаётся читаемым.
   const bare=liveRegimeMetaV3({decision:{strategic:"insufficient"},view:null,previousMeta:first,now:at(1,7)});
   assert.deepEqual([bare.state,bare.candidate,bare.fix_at,bare.count,bare.fix],["insufficient","insufficient",null,1,first.fix]);
+  // ---- Выпуск 2.15.1: разница двух последних фиксов в состоянии режима ----
+  {
+    // Первый фикс после состояния прежней формы: прошлого снимка нет — разницы нет.
+    assert.equal(first.fix_diff,null,"без прошлого снимка фикса разница не выдумывается");
+    // Между фиксами (тот же fix_at) разницы по-прежнему нет: переносить нечего.
+    const between=liveRegimeMetaV3({decision:{strategic:"defensive"},view,previousMeta:first,now:at(0,9),metrics:METRICS});
+    assert.deepEqual([between.fix_diff,between.fix],[null,first.fix]);
+    // Второй фикс: тренд и биржи сдвинулись, детектор разворота подтвердился, оба перцентиля ушли ниже.
+    const view2={...view,fix_at:iso(at(1,6)),next_fix_at:iso(at(2,6)),floor:{closes:1,level_pct:40}};
+    const second=liveRegimeMetaV3({decision:{strategic:"defensive"},view:view2,previousMeta:between,now:at(1,6),metrics:METRICS,
+      calc:calc(familiesOf("defensive",{cycle:{trend:-1},demand:{exchange_supply:0.5}}),{recovery:{state:"good"},record:{mvrv_percentile:24.5,mvrv_percentile_deep:22}})});
+    assert.deepEqual([second.fix_diff.at,second.fix_diff.from_at,second.fix_diff.source,second.fix_diff.partial],[iso(at(1,6)),iso(at(0,6)),"fix",undefined]);
+    assert.deepEqual(second.fix_diff.families.map(f=>[f.id,f.name,f.from,f.to]).sort(),[["exchange_supply","Биржевое предложение BTC",0,0.5],["trend_regime","Старший ценовой тренд",2,-1]]);
+    assert.deepEqual([second.fix_diff.detectors,second.fix_diff.mvrv_percentile,second.fix_diff.mvrv_percentile_deep],[[{id:"recovery",from:"watch",to:"good"}],{from:31.24,to:24.5},{from:28,to:22}]);
+    // До следующего фикса разница переносится без изменений, на каком бы прогоне её ни читали.
+    const later=liveRegimeMetaV3({decision:{strategic:"defensive"},view:view2,previousMeta:second,now:at(1,15),metrics:METRICS});
+    assert.deepEqual(later.fix_diff,second.fix_diff);
+    // Следующий фикс без расчёта (отказ движка на фиксе): чужая разница не переносится — она о прошлом фиксе.
+    const view3={...view2,fix_at:iso(at(2,6)),next_fix_at:iso(at(3,6))};
+    const blindFix=liveRegimeMetaV3({decision:{strategic:"defensive"},view:view3,previousMeta:later,now:at(2,6),metrics:METRICS});
+    assert.deepEqual([blindFix.fix_diff,blindFix.fix],[null,second.fix]);
+    // Ничего не сдвинулось — разница есть и пуста: «фикс состоялся, входы прежние» отличается от «неизвестно».
+    const same=liveRegimeMetaV3({decision:{strategic:"defensive"},view:view3,previousMeta:later,now:at(2,6),metrics:METRICS,
+      calc:calc(familiesOf("defensive",{cycle:{trend:-1},demand:{exchange_supply:0.5}}),{recovery:{state:"good"},record:{mvrv_percentile:24.5,mvrv_percentile_deep:22}})});
+    assert.deepEqual([same.fix_diff.families,same.fix_diff.detectors,same.fix_diff.mvrv_percentile,same.fix_diff.at],[[],[],undefined,iso(at(2,6))]);
+    // Прошлый снимок неполный (первый фикс после выпуска — из записи движка): разница помечена.
+    const partialPrev={...later,fix:{...later.fix,partial:true}};
+    assert.equal(liveRegimeMetaV3({decision:{strategic:"defensive"},view:view3,previousMeta:partialPrev,now:at(2,6),metrics:METRICS,calc:calc(familiesOf("defensive"))}).fix_diff.partial,true);
+    // Мусор в карточках не роняет состояние режима: справочное поле — null, режим на месте.
+    const junk=liveRegimeMetaV3({decision:{strategic:"defensive"},view:view3,previousMeta:later,now:at(2,6),metrics:{length:1,0:null},calc:calc(familiesOf("defensive"))});
+    assert.equal(junk.state,"defensive");assert.ok(junk.fix_diff===null||Array.isArray(junk.fix_diff.families));
+  }
 }
 
 // ================= 7. Когда допустимо решение прежнего набора =================

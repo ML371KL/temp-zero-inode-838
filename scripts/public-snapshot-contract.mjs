@@ -324,7 +324,29 @@ function valuationLevelsProblems(value) {
     if (!numberOrNull(level.price_usd) || (isNumber(level.price_usd) && level.price_usd <= 0)) out.push(`${path}.price_usd: положительное число или null`);
     // Цена уровня — уровень MVRV, умноженный на реализованную цену; допуск — на округление обоих чисел.
     else if (isNumber(level.price_usd) && isNumber(level.mvrv) && isNumber(value.realized_price_usd) && Math.abs(level.price_usd / (level.mvrv * value.realized_price_usd) - 1) > 0.002) out.push(`${path}.price_usd: не равна уровню MVRV × реализованная цена`);
+    // Выпуск 2.15.1: уровень по окну всей истории и цена правила. Поля необязательны; если есть — согласованы.
+    const deep = isObject(value.deep) ? value.deep : null, positiveOrNull = x => x === null || (isNumber(x) && x > 0);
+    for (const key of ["mvrv_deep", "price_usd_deep", "rule_price_usd"]) if (level[key] !== undefined && !positiveOrNull(level[key])) out.push(`${path}.${key}: положительное число или null`);
+    if ((level.mvrv_deep !== undefined || level.price_usd_deep !== undefined) && deep?.used !== true) out.push(`${path}: уровень по всей истории опубликован, а окно всей истории не объявлено использованным`);
+    if (isNumber(level.price_usd_deep) && isNumber(level.mvrv_deep) && isNumber(deep?.realized_price_usd) && Math.abs(level.price_usd_deep / (level.mvrv_deep * deep.realized_price_usd) - 1) > 0.002) out.push(`${path}.price_usd_deep: не равна уровню MVRV по всей истории × реализованная цена`);
+    // Цена правила: при двух окнах — меньшая из двух цен (условие «дёшево» выполнено в обоих окнах), при одном — цена окна четырёх лет.
+    if (isNumber(level.rule_price_usd)) {
+      const expected = deep?.used === true ? (isNumber(level.price_usd) && isNumber(level.price_usd_deep) ? Math.min(level.price_usd, level.price_usd_deep) : null) : deep?.used === false && deep.reason === "single_window" ? level.price_usd : null;
+      if (expected !== level.rule_price_usd) out.push(`${path}.rule_price_usd: не равна цене, ниже которой условие выполнено в окнах правила`);
+    }
   });
+  if (value.deep !== undefined) {
+    const d = value.deep;
+    if (!isObject(d) || typeof d.used !== "boolean") out.push("valuation_levels.deep: нужен признак used");
+    else if (!d.used) { if (!isText(d.reason)) out.push("valuation_levels.deep.reason: нужна причина, по которой окно всей истории не использовано"); }
+    else {
+      if (!isIsoTime(d.as_of)) out.push("valuation_levels.deep.as_of: нужна метка времени");
+      if (!isNumber(d.mvrv) || d.mvrv <= 0) out.push("valuation_levels.deep.mvrv: положительное число");
+      if (!(d.realized_price_usd === null || (isNumber(d.realized_price_usd) && d.realized_price_usd > 0))) out.push("valuation_levels.deep.realized_price_usd: положительное число или null");
+      if (!Number.isInteger(d.points) || d.points < 30) out.push("valuation_levels.deep.points: целое число точек ряда");
+      if (!isNumber(d.percentile) || d.percentile < 0 || d.percentile > 100) out.push("valuation_levels.deep.percentile: число 0…100");
+    }
+  }
   return out;
 }
 function dataWarningsProblems(value) {
