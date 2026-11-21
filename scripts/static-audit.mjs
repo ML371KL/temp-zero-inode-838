@@ -5,7 +5,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { POLICY_V1 } from "../docs/policy-v1.mjs";
 import { MODEL_POLICY_V1 } from "../docs/model-policy-v1.mjs";
-import { compactHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
+import { compactHistoryEntryV1, HISTORY_MAX_ROWS, jsonBytesV1, optionalFieldProblemsV1, projectedPublicSnapshotBytesV1, PUBLIC_SNAPSHOT_MAX_BYTES } from "./public-snapshot-contract.mjs";
 
 const root=new URL("../",import.meta.url);
 const html=readFileSync(new URL("../docs/index.html",import.meta.url),"utf8");
@@ -169,7 +169,24 @@ for(const [re,why] of [
   [/euphoria_cap_pct|euphoria_min_mvrv_percentile|euphoria_safety_cap|[Пп]отолок эйфории|[Пп]олы и потолок|полы\/потолок/,"потолка эйфории в боевых правилах нет: витрина не имеет права его называть"],
   [/[Мм]акрошок и дистрибуция|дистрибуция (?:не да[её]т|ограничива)|distributionState:det\(/,"у «Дистрибуции» нет права на режим и цель"],
   [/ЗАМОРОЖЕННОЙ policy v1|живое решение задаёт v1|<b>Policy v1<\/b>|status:"frozen 2026-07-19/,"боевой политикой снова названа v1"],
+  // Выпуск 2.15.1: карточки детекторов боевого правила пишет сборщик (live_inputs.detectors). Страница их текст не
+  // правит заменой подстроки и строку входов «восстановления» сама не собирает.
+  [/DET_FIX/,"страница снова правит текст карточек детекторов"],
+  [/не низкая|хотя бы в одном окне MVRV/,"страница снова сама собирает строку входов «восстановления»"],
+  [/ограничение вердикта сверху|<25-го перцентиля/,"в странице снова зашиты слова карточек детекторов методики v1"],
 ])assert.doesNotMatch(html,re,why);
+// Текст детектора доходит до экрана как пришёл: ни в detView, ни в отрисовке карточек нет замен по строке.
+{
+  const dvStart=html.indexOf("function detView"),dvEnd=html.indexOf("const alarmCount",dvStart),rdStart=html.indexOf("function renderDetectors"),rdEnd=html.indexOf("const SRC_WORD",rdStart);
+  assert.ok(dvStart>0&&dvEnd>dvStart&&rdStart>0&&rdEnd>rdStart,"detView или renderDetectors переехали: проверка ниже смотрела бы не тот текст");
+  for(const body of [html.slice(dvStart,dvEnd),html.slice(rdStart,rdEnd)])assert.doesNotMatch(body,/\.replace(?:All)?\(/,"замена подстроки в тексте карточки детектора");
+  assert.match(html.slice(dvStart,dvEnd),/L\?\.detectors/,"карточки детекторов боевого правила обязаны читаться из live_inputs.detectors");
+  // Цену правила страница берёт из снимка готовой: ни минимума двух цен, ни цены окна всей истории она не читает.
+  const rp=/^const rulePx=.*$/m.exec(html)?.[0];
+  assert.ok(rp&&rp.includes("rule_price_usd"),"цена правила читается из valuation_levels.levels[].rule_price_usd");
+  assert.doesNotMatch(rp,/Math\.min|price_usd_deep|[^_]price_usd/,"страница не выводит цену правила из цен окон");
+  assert.doesNotMatch(html,/Math\.min\([^)]*price_usd/,"страница не считает цену правила сама");
+}
 
 // ПОВЕДЕНИЕ ВИТРИНЫ. Блок VIEW страницы — чистые функции «снимок → что показать»; он исполняется здесь в Node.
 // Проверяется смысл на экране, а не текст исходника: фраза-действие, триггеры, полосы, пауза, перезагрузка.
@@ -350,6 +367,26 @@ for(const [re,why] of [
   const OWN={trend:"cycle",network:"cycle",valuation:"cycle",exchange_supply:"demand"};
   const DET_TEXT={recovery:["оценка низкая · подтверждений 1/3","Низкая циклическая оценка (MVRV <25-го перцентиля) — обязательный якорь; плюс минимум два подтверждения стабилизации тренда/ETF/биржевого предложения."],macro_shock:["условий 1/3","Сжатие Net Liquidity, ужесточение ставок/доллара и кредитный стресс должны подтвердить друг друга."],
     distribution:["оценка не высокая · подтверждений 1/2","Высокая накопленная прибыль (MVRV) — обязательный якорь. Оба подтверждения (рост биржевого предложения И потеря ценовых опор) — «сработал» и ограничение вердикта сверху; одно из двух — «наблюдение»."],integrity:["peg 0.10% · spread 6 б.п.","Hard override."]};
+  // НОВЫЕ ПОЛЯ ВЫПУСКА 2.15.1 в фикстуре пишут те же функции, что и в снимке сборщика: карточки детекторов —
+  // liveInputsV3 (liveDetectorCardsV3), разницу фиксов — liveRegimeMetaV3, уровни всей истории и цену правила —
+  // addDeepValuationLevelsV3 поверх уровней формы 2.15.0. Уровни окна четырёх лет — числа боевого снимка 21.11.2026.
+  const {addDeepValuationLevelsV3}=await import("./fetch-snapshot.mjs");
+  const LEVELS_215={as_of:"2026-11-20T00:00:00.000Z",mvrv:1.1049,realized_price_usd:53229,window_days:1460,levels:[{key:"capitulation_floor",percentile:10,mvrv:1.2006,price_usd:63908},{key:"recovery_anchor",percentile:25,mvrv:1.3598,price_usd:72381},{key:"valuation_gate",percentile:82,mvrv:2.235,price_usd:118966},{key:"euphoria",percentile:95,mvrv:2.467,price_usd:131318}]};
+  // Уровни пробного сбора 21.11.2026 (форма 2.15.1, два окна): порог пола — 63 908 $ за 4 года и 48 974 $ по всей
+  // истории, цена правила — меньшая. Объект выписан явно и сверен с контрактом публичного снимка.
+  const TICK1_LEVELS={...LEVELS_215,levels:LEVELS_215.levels.map(l=>l.key==="capitulation_floor"?{...l,mvrv_deep:.9201,price_usd_deep:48974,rule_price_usd:48974}:l.key==="recovery_anchor"?{...l,mvrv_deep:1.2834,price_usd_deep:68317,rule_price_usd:68317}:l),deep:{used:true,as_of:"2026-11-20T00:00:00.000Z",mvrv:1.1049,realized_price_usd:53229,points:5967,percentile:16.45}};
+  assert.deepEqual(optionalFieldProblemsV1("valuation_levels",TICK1_LEVELS),[],"уровни пробного сбора обязаны проходить контракт публичного снимка");
+  // Ряд всей истории: 2200 суток, значения ровно размазаны по 0,5…3,0, последняя точка — MVRV уровней (вчера по UTC).
+  // Его 10-й и 25-й перцентили ниже уровней окна четырёх лет: цена правила — цена всей истории, как на бою 21.11.
+  const DEEP_N=2200,deepSeries=now=>{const end=Math.floor(now/DAY)*DAY-DAY;return Array.from({length:DEEP_N},(_,i)=>({t:end-(DEEP_N-1-i)*DAY,v:i===DEEP_N-1?LEVELS_215.mvrv:.5+((i*7919)%DEEP_N)/DEEP_N*2.5}))};
+  // deepUsed — читает ли правило окно всей истории на этом прогоне; cut — ряд, который движок не примет (уровни сняты).
+  function levels3(now,deepUsed,{cut=false}={}){
+    const s=deepSeries(now),out=addDeepValuationLevelsV3(structuredClone(LEVELS_215),{mvrvDeep:cut?s.slice(-500):s,priceSeries:[{t:s.at(-1).t,v:LEVELS_215.mvrv*LEVELS_215.realized_price_usd}],now,engineDeepUsed:deepUsed});
+    assert.deepEqual(optionalFieldProblemsV1("valuation_levels",out),[],"уровни фикстуры обязаны проходить контракт публичного снимка");
+    return out;
+  }
+  // Цена так, как её печатает страница, — посчитана здесь независимо.
+  const kusdT=p=>`≈ ${Math.round(p/1e3)} тыс. $`,levelOf=(S,key)=>S.valuation_levels.levels.find(l=>l.key===key);
   // Что правило прочитало бы на этих баллах. own — баллы семей, которые движок считает сам (иначе — как на карточке).
   function calc3({now,scores={},own={},mvrv=42,deep=mvrv,hard=false}){
     const cards=mk({now,scores,mvrv}).metrics,fam=Object.fromEntries(Object.entries(FAM).map(([block,f])=>[block,Object.fromEntries(Object.entries(f).map(([family,id])=>[family,cards.find(m=>m.id===id).score]))]));
@@ -361,8 +398,11 @@ for(const [re,why] of [
   }
   // fix — чем входы на фиксе отличались от нынешних (по умолчанию фикс видел то же, что видно сейчас); strategic —
   // действующий режим (по умолчанию — кандидат фикса); floor — число фиксов подряд с подтверждённым восстановлением;
-  // pending — повышение, ждущее второго фикса; hard — аварийный режим; view — вид линии целиком (для паузы).
-  function mk3({now,scores={},own={},mvrv=42,deep=mvrv,fix=null,strategic=null,floor=0,pending=null,hard=false,fixHoursAgo=3.5,tactical="balanced",events=[],extra={},view}){
+  // pending — повышение, ждущее второго фикса; hard — аварийный режим; view — вид линии целиком (для паузы);
+  // prevFix — чем входы ПРОШЛОГО фикса отличались от входов последнего (тогда в состоянии режима есть fix_diff);
+  // form215 — снимок формы 2.15.0, какой лежит на витрине в окне выпуска: без карточек детекторов боевого правила,
+  // без уровней всей истории и цены правила, без разницы фиксов.
+  function mk3({now,scores={},own={},mvrv=42,deep=mvrv,fix=null,strategic=null,floor=0,pending=null,hard=false,fixHoursAgo=3.5,tactical="balanced",events=[],extra={},view,prevFix=null,form215=false}){
     const cur=calc3({now,scores,own,mvrv,deep,hard}),at=fix?calc3({now,scores:{...scores,...fix.scores},own:{...own,...fix.own},mvrv:fix.mvrv??mvrv,deep:"deep" in fix?fix.deep:deep}):hard?calc3({now,scores,own,mvrv,deep}):cur;
     const state=strategic??at.candidate,alloc=E3.allocationDecisionV3({strategic:state,floorCloses:floor,cheap:at.valuation.cheap}),fixMs=now-fixHoursAgo*HOUR,generatedAt=new Date(now-5*60e3).toISOString();
     const record={blocks:at.blocks,families:Object.fromEntries(Object.keys(OWN).map(f=>[f,{v3:at.families[OWN[f]][f]}])),mvrv_percentile:at.record.mvrv_percentile,mvrv_percentile_deep:at.record.mvrv_percentile_deep,deep_window_used:at.record.deep_window_used,recovery:at.recovery,macro_shock_state:at.macro_shock_state,notes:[]};
@@ -374,8 +414,14 @@ for(const [re,why] of [
     const S=mk({now,scores,mvrv,strategic:hard?"emergency":state,tactical,events,extra}),card=id=>S.metrics.find(m=>m.id===id).score;
     const cardState={recovery:E3.recoveryStateV1Port({anchor:mvrv<25,trend:card("trend_regime"),etf:card("etf_regime"),exchangeSupply:card("exchange_supply")}).state,macro_shock:cur.macro_shock_state,distribution:"calm",integrity:hard?"fired":"calm"};
     S.detectors=Object.entries(DET_TEXT).map(([id,[inputs,logic]])=>({id,name:`«${id}»`,state:cardState[id],inputs,logic}));
-    return Object.assign(S,{regime:{strategic:decision.strategic,tactical},regime_meta:{strategic:L3.liveRegimeMetaV3({decision,view:line,previousMeta:null,now,calc:at}),tactical:{state:tactical,candidate:tactical}},decision,live_inputs:L3.liveInputsV3(cur,generatedAt),
+    // Состояние режима прошлого фикса (сутки назад) — той же функцией: от него liveRegimeMetaV3 считает разницу фиксов.
+    const before=prevFix?L3.liveRegimeMetaV3({decision,view:{...line,fix_at:new Date(fixMs-DAY).toISOString()},previousMeta:null,now:fixMs-DAY,calc:calc3({now,scores:{...scores,...prevFix.scores},own:{...own,...prevFix.own},mvrv:prevFix.mvrv??mvrv,deep:"deep" in prevFix?prevFix.deep:deep})}):null;
+    const out=Object.assign(S,{regime:{strategic:decision.strategic,tactical},regime_meta:{strategic:L3.liveRegimeMetaV3({decision,view:line,previousMeta:before,now,calc:at,metrics:S.metrics}),tactical:{state:tactical,candidate:tactical}},decision,live_inputs:L3.liveInputsV3(cur,generatedAt),
+      valuation_levels:levels3(now,cur.record.deep_window_used),
       reference_v1:{decision:{strategic:state,target_pct:S.decision.target_pct,binding_overlays:S.decision.binding_overlays}},...(hard?{override:"НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА"}:{})});
+    assert.ok(out.live_inputs.detectors&&"fix_diff" in out.regime_meta.strategic&&out.valuation_levels.deep,"ядро перестало писать новые поля 2.15.1 — фикстура проверяла бы страницу на снимке прежней формы");
+    if(form215){delete out.live_inputs.detectors;delete out.regime_meta.strategic.fix_diff;out.valuation_levels=structuredClone(LEVELS_215);}
+    return out;
   }
   // Весь текст среднесрока на первом экране и под вердиктом — для проверок «чего экран не говорит».
   const screen=(S,now)=>[...lines(V.triggersOf(S,now)),...V.overlayLines(S).map(plain),plain(V.levelsText(S)),...V.holdOf(S).map(plain).filter(x=>x.startsWith("Среднесрок"))];
@@ -388,6 +434,11 @@ for(const [re,why] of [
     const base=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});
     assert.equal(base.decision.target_pct,45);assert.deepEqual(base.decision.binding_overlays,[]);assert.equal(base.regime_meta.strategic.next_fix_at,new Date(Math.floor(now/DAY)*DAY+DAY+6*HOUR).toISOString());
     const fixAt=dmtL(base.regime_meta.strategic.next_fix_at),bw=V.whyOf(base);
+    // Цена правила у порогов «дёшево» — из снимка (valuation_levels.levels[].rule_price_usd). В фикстуре с двумя окнами
+    // она меньше цены окна четырёх лет у обоих порогов — проверки ниже не вырождены.
+    const RP={cap:kusdT(levelOf(base,"capitulation_floor").rule_price_usd),rec:kusdT(levelOf(base,"recovery_anchor").rule_price_usd)},P4={cap:kusdT(LEVELS_215.levels[0].price_usd),rec:kusdT(LEVELS_215.levels[1].price_usd)};
+    assert.deepEqual([base.valuation_levels.deep.used,P4.cap,P4.rec,RP.cap!==P4.cap,RP.rec!==P4.rec,[RP.cap,RP.rec].every(x=>/^≈ [0-9]+ тыс\. \$$/.test(x))],[true,"≈ 64 тыс. $","≈ 72 тыс. $",true,true,true],"фикстура: цена правила отличается от цены окна четырёх лет");
+    for(const key of ["capitulation_floor","recovery_anchor"]){const l=levelOf(base,key);assert.ok(l.price_usd_deep<l.price_usd&&l.rule_price_usd===l.price_usd_deep,`фикстура: у порога ${key} цена правила — цена окна всей истории, меньшая из двух`);}
     assert.equal(bw.ok,true,"копия дерева гейтов обязана воспроизводить кандидата правила из live_inputs");assert.equal(bw.rule,"неблагоприятен только Макро → «переходный»");assert.equal(bw.note,null);
     const bt=V.triggersOf(base,now),bdn=bt.find(x=>x.dir==="dn"),bup=bt.find(x=>x.dir==="up");
     assert.equal(bdn.pct,5);assert.equal(plain(bdn.text),"Спрос — в неблагоприятную (3 полушага) · на первом же фиксе","понижение принимается на первом же фиксе");
@@ -407,7 +458,7 @@ for(const [re,why] of [
     assert.ok(Math.abs(oc.families.reduce((a,f)=>a+f.contrib,0)-oc.score)<1e-9,"пункты семей в сумме дают балл блока и у набора v3");
 
     // 3.2 (а). Пол восстановления растёт ступенями 40 / 60 / 80 по фиксам подряд — экран называет свою ступень.
-    const rung=(n,strategic,pending=null)=>mk3({now,strategic,pending,floor:n,mvrv:19,deep:21,scores:twoAdverse,events:[[400,"defensive",5],[3.5,strategic,[40,60,80][n-1],["recovery_floor"]]]});
+    const rung=(n,strategic,pending=null,form215=false)=>mk3({now,form215,strategic,pending,floor:n,mvrv:19,deep:21,scores:twoAdverse,events:[[400,"defensive",5],[3.5,strategic,[40,60,80][n-1],["recovery_floor"]]]});
     const r1=rung(1,"defensive",{candidate:"transition",fixes:1,need:2}),r2=rung(2,"transition"),r3=rung(3,"transition");
     assert.deepEqual([r1,r2,r3].map(s=>[s.decision.base_target_pct,s.decision.target_pct,s.decision.binding_overlays.join()]),[[5,40,"recovery_floor"],[45,60,"recovery_floor"],[45,80,"recovery_floor"]]);
     assert.equal(plain(V.overlayLines(r1)[0]),"Пол восстановления 40 % — ступень 1 из 3 · MVRV сейчас 19-й пц за 4 года, 21-й по всей истории (якорь — ниже 25-го в обоих окнах) · тренд −1 · ETF 0 · биржи 0 — 2 из 3 не ниже нуля","строка пола называет свою ступень и посчитанное");
@@ -415,7 +466,9 @@ for(const [re,why] of [
     for(const x of screen(r1,now))assert.doesNotMatch(x,/Пол восстановления 80|пол 80/,`первая ступень пола подана как 80 %: «${x}»`);
     const t1=V.triggersOf(r1,now),t2=V.triggersOf(r2,now),t3=V.triggersOf(r3,now);
     assert.deepEqual([t1[0].dir,t1[0].pct,t1[0].more],["dn",5,true],"при связывающем поле первым стоит его снятие");
-    assert.match(plain(t1[0].text),new RegExp(`^пол снимается ${RX_FIX}, если восстановление не подтверждено: подтверждений меньше двух \\(сейчас 2 из 3\\), MVRV ≥ 25-го пц в любом из окон \\(сейчас 19-й пц за 4 года, 21-й по всей истории\\) или макрошок$`));
+    assert.equal(plain(t1[0].text),`пол снимается на фиксе ${fixAt}, если восстановление не подтверждено: подтверждений меньше двух (сейчас 2 из 3), MVRV ≥ 25-го пц — выше ${RP.rec} (сейчас 19-й пц за 4 года, 21-й по всей истории) или макрошок`,"у условия снятия пола стоит цена правила — вместо слов об окнах");
+    // Снимок формы 2.15.0 (окно выпуска): цены правила нет — условие названо перцентилем и окнами, без цены.
+    assert.match(plain(V.triggersOf(rung(1,"defensive",{candidate:"transition",fixes:1,need:2},true),now)[0].text),new RegExp(`^пол снимается ${RX_FIX}, если восстановление не подтверждено: подтверждений меньше двух \\(сейчас 2 из 3\\), MVRV ≥ 25-го пц в любом из окон \\(сейчас 19-й пц за 4 года, 21-й по всей истории\\) или макрошок$`));
     assert.ok(plain(t1[0].text).includes(`на фиксе ${fixAt}`),"срок снятия пола — следующий фикс из снимка");
     assert.deepEqual([t1[1].dir,t1[1].pct,plain(t1[1].text)],["up",60,`пол восстановления — ступень 2 из 3 на фиксе ${fixAt}, если детектор подтверждён (сейчас 2 из 3)`],"следующая ступень пола названа со сроком");
     assert.deepEqual([t2[0].pct,t2[1].pct,plain(t2[1].text)],[45,80,`пол восстановления — ступень 3 из 3 на фиксе ${fixAt}, если детектор подтверждён (сейчас 2 из 3)`]);
@@ -436,11 +489,11 @@ for(const [re,why] of [
     assert.equal(oneWin.detectors.find(d=>d.id==="recovery").state,"good","карточка детектора (методика v1, одно окно) считает восстановление выполненным");
     const oneDet=V.detView(oneWin).find(d=>d.id==="recovery");
     assert.deepEqual([oneDet.state,plain(oneDet.inputs)],["calm","оценка не низкая хотя бы в одном окне MVRV · подтверждений 3/3"],"детектор восстановления показан так, как его читает боевое правило");
-    assert.match(plain(oneDet.logic),/MVRV <25-го перцентиля за 4 года и по всей истории/);
-    // Обе правки текста карточек детекторов — замена подстроки в тексте сборщика (он в запертой секции v1). Если
-    // сборщик эти слова изменит, замена на странице молча перестанет срабатывать — поэтому слова закреплены здесь.
-    for(const phrase of [" и ограничение вердикта сверху","(MVRV <25-го перцентиля)"])assert.equal(collector.split(phrase).length,2,`текст детектора в сборщике изменился: страница правит фразу «${phrase.trim()}» заменой подстроки`);
-    assert.doesNotMatch(plain(V.detView(oneWin).find(d=>d.id==="distribution").logic),/ограничение вердикта сверху/,"право «Дистрибуции» из текста карточки убрано");
+    // Строка входов и текст карточки — те, что написал сборщик в live_inputs.detectors: страница их не собирает и не правит.
+    assert.deepEqual([oneDet.inputs,oneDet.logic],[oneWin.live_inputs.detectors.recovery.inputs,oneWin.live_inputs.detectors.recovery.logic]);
+    assert.match(plain(oneDet.logic),/^Низкая циклическая оценка \(MVRV ниже 25-го перцентиля и за 4 года, и по всей истории\) — обязательный якорь; .* до переходного \(не действует при сработавшем макрошоке\)\.$/);
+    assert.ok(!plain(oneDet.logic).includes("40 / 60 / 80")&&plain(oneDet.role).includes("40 / 60 / 80"),"пол ступенями назван в роли детектора, текст карточки его не повторяет");
+    assert.doesNotMatch(plain(V.detView(oneWin).find(d=>d.id==="distribution").logic),/ограничение вердикта сверху/,"права «Дистрибуции» в тексте карточки нет");
     assert.ok(!screen(oneWin,now).some(x=>/пол восстановления/i.test(x)),"якорь по одному окну пол восстановления не обещает");
 
     // 3.3 (б). «Дёшево» — только при согласии двух окон. MVRV ≤ 10 за четыре года, но выше по всей истории:
@@ -450,19 +503,26 @@ for(const [re,why] of [
     assert.equal(half.decision.target_pct,5);assert.deepEqual(half.decision.binding_overlays,[]);assert.equal(half.decision.inputs.cheap,false);
     assert.equal(half.metrics.find(m=>m.id==="mvrv_cycle").score,1,"карточка оценки (одно окно) при этом показывает «дёшево»");
     const ht=V.triggersOf(half,now),hcap=ht.filter(x=>/капитуляц/.test(x.text));
-    assert.deepEqual(hcap.map(x=>[x.dir,x.pct,plain(x.text)]),[["up",40,"пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 7-й пц за 4 года, 18-й по всей истории"]],"условие пола капитуляции названо по двум окнам");
+    assert.deepEqual(hcap.map(x=>[x.dir,x.pct,plain(x.text)]),[["up",40,`пол капитуляции: MVRV ≤ 10-го пц — ниже ${RP.cap} (сейчас 7-й пц за 4 года, 18-й по всей истории)`]],"порог пола капитуляции назван ценой правила");
     for(const x of screen(half,now))assert.doesNotMatch(x,/капитуляции[^·]*(?:включится|включён)|Пол капитуляции/,`экран обещает пол капитуляции при несогласии окон: «${x}»`);
     assert.doesNotMatch(V.levelsText(half),/[0-9]-(?:й|го)/,"дефис в «10-го» и «18-й» в строке порогов не должен давать перенос строки");
-    assert.match(plain(V.levelsText(half)),/· MVRV 7-й пц за 4 года, 18-й по всей истории на \d\d\.\d\d · пол 40 % — ≤ 10-го пц в обоих окнах · якорь восстановления — < 25-го пц в обоих окнах · гейт оценки — ≥ 82-го пц$/);
-    half.valuation_levels={window_days:1460,levels:[{key:"recovery_anchor",percentile:25,price_usd:72800},{key:"capitulation_floor",percentile:10,price_usd:63600},{key:"valuation_gate",percentile:82,price_usd:121200}]};
-    assert.match(plain(V.levelsText(half)),/пол 40 % — ≤ 10-го пц в обоих окнах \(за 4 года — ниже ≈ 64 тыс\. \$\) · якорь восстановления — < 25-го пц в обоих окнах \(за 4 года — ниже ≈ 73 тыс\. \$\) · гейт оценки — выше ≈ 121 тыс\. \$$/,"уровень цены подписан окном, по которому посчитан");
+    // (а) Цена правила стоит у обоих порогов «дёшево» вместо слов об окнах; гейт оценки — одно окно, как был.
+    assert.equal(plain(V.levelsText(half)).split(" · ").slice(2).join(" · "),`пол 40 % — ниже ${RP.cap} · якорь восстановления — ниже ${RP.rec} · гейт оценки — выше ≈ 119 тыс. $`,"у порогов «дёшево» стоит цена правила");
+    assert.match(plain(V.levelsText(half)).split(" · ")[1],/^MVRV 7-й пц за 4 года, 18-й по всей истории на \d\d\.\d\d$/);
+    // (в) Цены правила нет — формулировка 2.15.0: порог перцентилем в обоих окнах, цена окна четырёх лет подписана
+    //     своим окном. Без уровней вовсе — одни перцентили.
+    const halfOld=mk3({now,form215:true,mvrv:7,deep:18,scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.equal(plain(V.levelsText(halfOld)).split(" · ").slice(2).join(" · "),`пол 40 % — ≤ 10-го пц в обоих окнах (за 4 года — ниже ${P4.cap}) · якорь восстановления — < 25-го пц в обоих окнах (за 4 года — ниже ${P4.rec}) · гейт оценки — выше ≈ 119 тыс. $`,"снимок формы 2.15.0: уровень цены подписан окном, по которому посчитан");
+    assert.deepEqual(V.triggersOf(halfOld,now).filter(x=>/капитуляц/.test(x.text)).map(x=>plain(x.text)),["пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 7-й пц за 4 года, 18-й по всей истории"],"снимок формы 2.15.0: условие пола капитуляции названо по двум окнам, без цены");
+    delete halfOld.valuation_levels;
+    assert.match(plain(V.levelsText(halfOld)),/· MVRV 7-й пц за 4 года, 18-й по всей истории на \d\d\.\d\d · пол 40 % — ≤ 10-го пц в обоих окнах · якорь восстановления — < 25-го пц в обоих окнах · гейт оценки — ≥ 82-го пц$/);
     assert.equal(V.blockRows(half).find(r=>r.key==="cycle").families.find(f=>f.id==="mvrv_cycle").score,0,"балл оценки в расчёте — правила (0), а не карточки (+1)");
     assert.deepEqual(V.ruleScore(half,half.metrics.find(m=>m.id==="mvrv_cycle")),{score:0,why:"«дёшево» — по двум окнам MVRV"},"карточка оценки называет балл боевого правила, когда он расходится с её баллом");
     assert.deepEqual(V.ruleScore(ownTrend,ownTrend.metrics.find(m=>m.id==="trend_regime")),{score:0,why:"тренд — по закрытому дню"});
     assert.ok(base.metrics.every(m=>V.ruleScore(base,m)===null),"без расхождения балл правила на карточке не печатается");
     // Округление не переносит перцентиль через порог: 10,3 не печатается «10-м».
     const edge=mk3({now,mvrv:10.3,deep:9,scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
-    assert.ok(lines(V.triggersOf(edge,now)).includes("пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 10,3-й пц за 4 года, 9-й по всей истории"));
+    assert.ok(lines(V.triggersOf(edge,now)).includes(`пол капитуляции: MVRV ≤ 10-го пц — ниже ${RP.cap} (сейчас 10,3-й пц за 4 года, 9-й по всей истории)`));
     // Оба окна согласны, фикс этого ещё не видел: пол включится на фиксе. После фикса — строка пола с перцентилями фикса.
     const both=mk3({now,strategic:"defensive",mvrv:7,deep:9,fix:{deep:18},scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
     assert.equal(both.decision.target_pct,5);
@@ -470,11 +530,19 @@ for(const [re,why] of [
     const capOn=mk3({now,mvrv:7,deep:9,scores:allAdverse,events:[[900,"transition",45],[3.5,"defensive",40,["capitulation_floor"]]]});
     assert.equal(capOn.decision.target_pct,40);assert.deepEqual(capOn.decision.binding_overlays,["capitulation_floor"]);
     assert.equal(plain(V.overlayLines(capOn)[0]),"Пол капитуляции 40 %: на фиксе MVRV 7-й пц за 4 года и 9-й по всей истории (≤ 10 в обоих окнах)");
-    assert.deepEqual([V.triggersOf(capOn,now)[0].pct,plain(V.triggersOf(capOn,now)[0].text)],[5,`пол снимается на фиксе ${fixAt}, если MVRV выше 10-го пц в любом из окон (сейчас 7-й пц за 4 года, 9-й по всей истории)`]);
+    assert.deepEqual([V.triggersOf(capOn,now)[0].pct,plain(V.triggersOf(capOn,now)[0].text)],[5,`пол снимается на фиксе ${fixAt}, если MVRV выше 10-го пц — выше ${RP.cap} (сейчас 7-й пц за 4 года, 9-й по всей истории)`],"у условия снятия пола капитуляции стоит цена правила");
+    const capOld=mk3({now,form215:true,mvrv:7,deep:9,scores:allAdverse,events:[[900,"transition",45],[3.5,"defensive",40,["capitulation_floor"]]]});
+    assert.equal(plain(V.triggersOf(capOld,now)[0].text),`пол снимается на фиксе ${fixAt}, если MVRV выше 10-го пц в любом из окон (сейчас 7-й пц за 4 года, 9-й по всей истории)`,"снимок формы 2.15.0: условие снятия пола — перцентилем и окнами");
     // Ряд всей истории негоден — правило честно работает по одному окну, и экран второе окно не выдумывает.
+    // (г) Уровни объявляют то же одно окно (single_window): цена правила равна цене окна четырёх лет и названа как порог.
     const single=mk3({now,mvrv:7,deep:null,scores:allAdverse,events:[[900,"transition",45],[3.5,"defensive",40,["capitulation_floor"]]]});
     assert.equal(single.decision.target_pct,40);assert.equal(plain(V.overlayLines(single)[0]),"Пол капитуляции 40 %: на фиксе MVRV 7-й пц (≤ 10)");
-    assert.ok(!screen(single,now).some(x=>/в обоих окнах|по всей истории|в любом из окон/.test(x)),"при одном окне экран о двух окнах не говорит");
+    assert.ok(!screen(single,now).some(x=>/в обоих окнах|по всей истории|в любом из окон|за 4 года/.test(x)),"при одном окне экран о двух окнах не говорит");
+    assert.deepEqual([single.valuation_levels.deep,levelOf(single,"capitulation_floor").rule_price_usd,levelOf(single,"recovery_anchor").rule_price_usd],[{used:false,reason:"single_window"},63908,72381],"фикстура: при одном окне цена правила — цена окна четырёх лет");
+    assert.equal(plain(V.triggersOf(single,now)[0].text),`пол снимается на фиксе ${fixAt}, если MVRV выше 10-го пц — выше ${P4.cap} (сейчас 7-й пц)`);
+    assert.equal(plain(V.levelsText(single)).split(" · ").slice(2).join(" · "),`пол 40 % — ниже ${P4.cap} · якорь восстановления — ниже ${P4.rec} · гейт оценки — выше ≈ 119 тыс. $`,"одно окно: цена правила названа без слов об окнах");
+    const singleHint=mk3({now,mvrv:12,deep:null,scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.ok(lines(V.triggersOf(singleHint,now)).includes(`пол капитуляции: MVRV ≤ 10-го пц — ниже ${P4.cap} (сейчас 12-й пц)`),"одно окно: порог пола капитуляции — цена правила");
 
     // 3.4 (в). Повышение принято на первом фиксе и ждёт второго: «на фиксе …» со сроком из снимка.
     const pend=mk3({now,strategic:"deteriorating",pending:{candidate:"transition",fixes:1,need:2},events:[[900,"transition",45],[150,"deteriorating",20]]});
@@ -532,7 +600,8 @@ for(const [re,why] of [
     assert.ok(lines(V.triggersOf(hot,now)).includes("цели выше закрыты гейтом оценки: MVRV 96-й пц (≥ 82)"));
     const dist=V.detView(hot).find(d=>d.id==="distribution");
     assert.deepEqual([dist.state,dist.reference,plain(dist.role)],["fired",true,"справочный: на режим и цель не влияет"]);
-    assert.equal(plain(dist.logic),"Высокая накопленная прибыль (MVRV) — обязательный якорь. Оба подтверждения (рост биржевого предложения И потеря ценовых опор) — «сработал»; одно из двух — «наблюдение».","текст карточки не обещает ограничения вердикта");
+    assert.equal(plain(dist.logic),"Высокая накопленная прибыль (MVRV) — обязательный якорь. Оба подтверждения (рост биржевого предложения И потеря ценовых опор) — «сработал»; одно из двух — «наблюдение».","текст карточки — из live_inputs.detectors: ограничения вердикта он не обещает");
+    assert.equal(dist.logic,hot.live_inputs.detectors.distribution.logic);assert.equal(plain(dist.inputs),"оценка не высокая · подтверждений 1/2","строку входов «Дистрибуции» правило не переписывает");
     for(const s of [base,r1,half,capOn,pend,hot,crash3])for(const x of everything(s,now))
       assert.doesNotMatch(x,/потол\S* эйфори|[Пп]отолок \d|полы и потолок|euphoria|ограничение вердикта сверху|дистрибуци\S* (?:ограничива|не да[её]т)|ЗАМОРОЖЕННОЙ|задаёт v1/i,`страница утверждает правило, которого в наборе v3 нет: «${String(x).slice(0,160)}»`);
     assert.equal(V.detView(base).find(d=>d.id==="macro_shock").role,"не даёт среднесрочному режиму быть лучше «ухудшается» и запрещает пол восстановления");
@@ -581,6 +650,103 @@ for(const [re,why] of [
     old.live_inputs={families:{cycle:{trend:2}},blocks:{cycle:99}};
     assert.ok(old.metrics.every(m=>V.ruleScore(old,m)===null)&&V.blockRows(old).find(r=>r.key==="cycle").score!==99,"у снимка прежней формы баллы — с карточек, даже если в нём окажется live_inputs");
     assert.equal(plain(V.detView(old).find(d=>d.id==="recovery").role),"поднимает «защитный» и «ухудшается» до «переходного» и включает пол 80 %");
+
+    // 3.9. ВЫПУСК 2.15.1: цена правила у порогов «дёшево», карточки детекторов боевого правила, разница фиксов.
+    const quietEvents=[[900,"transition",45],[100,"defensive",5]],cheapItems=S=>plain(V.levelsText(S)).split(" · ").filter(x=>/^(?:пол 40 %|якорь восстановления) — /.test(x));
+    // (б) Числа пробного сбора 21.11.2026: порог пола за 4 года — 63 908 $, по всей истории — 48 974 $. Цена правила —
+    //     меньшая из двух, и страница называет её, а не цену окна четырёх лет.
+    const tick=mk3({now,mvrv:4.83,deep:16.45,scores:allAdverse,events:quietEvents});tick.valuation_levels=structuredClone(TICK1_LEVELS);
+    assert.deepEqual(cheapItems(tick),["пол 40 % — ниже ≈ 49 тыс. $","якорь восстановления — ниже ≈ 68 тыс. $"],"названа цена правила (48 974 и 68 317), а не цена окна четырёх лет (63 908 и 72 381)");
+    assert.ok(lines(V.triggersOf(tick,now)).includes("пол капитуляции: MVRV ≤ 10-го пц — ниже ≈ 49 тыс. $ (сейчас 5-й пц за 4 года, 16-й по всей истории)"),"подсказка пола капитуляции называет цену правила");
+    // (а) При цене правила у порогов «дёшево» нет ни «за 4 года», ни слов об окнах, ни цены окна четырёх лет.
+    for(const x of cheapItems(tick))assert.doesNotMatch(x,/за 4 года|в обоих окнах|пц/,`у порога с ценой правила осталась оговорка: «${x}»`);
+    for(const x of screen(tick,now))assert.doesNotMatch(x,/≈ 64 тыс|≈ 72 тыс|\(за 4 года —/,`цена окна четырёх лет подана как порог правила: «${x}»`);
+    for(const x of plain(V.levelsText(tick)).split(" · "))assert.ok(x.length<=60,`пункт строки порогов длиннее колонки (${x.length}): «${x}»`);
+    // Дефис в «5-й пц» и «10-го пц» не даёт переноса ни в строке порогов, ни в подсказках, ни в строке пола:
+    // с ценой правила подсказка пола капитуляции рвалась на «5-» / «й пц» (снимок экрана 21.11.2026).
+    for(const S of [tick,r1,capOn,half,single])for(const x of [V.levelsText(S),...V.triggersOf(S,now).map(t=>t.text),...V.overlayLines(S)])assert.doesNotMatch(x,/[0-9]-(?:й|го)/,`дефис в порядковом числе рвёт строку: «${plain(x)}»`);
+    assert.ok(V.triggersOf(tick,now).some(t=>t.text.includes(`5${WJ}-${WJ}й`))&&V.overlayLines(r1)[0].includes(`19${WJ}-${WJ}й`),"проверка дефиса не вырождена: порядковые числа в строках есть");
+    // Страница цену правила не выводит сама: печатается число снимка, даже если оно не равно ни одной из цен окон.
+    const alien=structuredClone(tick);alien.valuation_levels.levels[0].rule_price_usd=55555;
+    assert.equal(cheapItems(alien)[0],"пол 40 % — ниже ≈ 56 тыс. $","цена правила — число из снимка, а не расчёт страницы");
+    // Перцентиль всей истории до страницы не дошёл, а уровни объявляют два окна: порог всё равно — цена правила.
+    const noDeepPct=structuredClone(tick);noDeepPct.live_inputs.mvrv_percentile_deep=null;
+    assert.deepEqual(cheapItems(noDeepPct),["пол 40 % — ниже ≈ 49 тыс. $","якорь восстановления — ниже ≈ 68 тыс. $"]);
+    // (в) Уровни всей истории сняты (ряд не сошёлся с движком): правило читает два окна, цены правила нет — формулировка
+    //     2.15.0. Цена окна четырёх лет подписана своим окном и порогом правила не названа.
+    const off=mk3({now,mvrv:7,deep:18,scores:allAdverse,events:quietEvents});off.valuation_levels=levels3(now,true,{cut:true});
+    assert.deepEqual([off.valuation_levels.deep,off.valuation_levels.levels.some(l=>"rule_price_usd" in l)],[{used:false,reason:"mvrv_deep_short"},false],"фикстура: уровни всей истории сняты, цены правила нет");
+    const offOld=[`пол 40 % — ≤ 10-го пц в обоих окнах (за 4 года — ниже ${P4.cap})`,`якорь восстановления — < 25-го пц в обоих окнах (за 4 года — ниже ${P4.rec})`],offHint="пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 7-й пц за 4 года, 18-й по всей истории";
+    assert.deepEqual(cheapItems(off),offOld,"без цены правила порог назван перцентилем в обоих окнах");assert.ok(lines(V.triggersOf(off,now)).includes(offHint));
+    // Цена правила в снимке, чья форма её не обещает (нарушение контракта), порогом не называется: уровни сняты,
+    // поля deep нет вовсе (форма 2.15.0), окно объявлено неизвестным образом.
+    for(const deep of [{used:false,reason:"deep_percentile_mismatch"},{used:false,reason:"mvrv_deep_stale"},{used:false},{used:"true"},undefined,null,"x"]){
+      const s=structuredClone(tick);s.live_inputs.mvrv_percentile=7;s.live_inputs.mvrv_percentile_deep=18;if(deep===undefined)delete s.valuation_levels.deep;else s.valuation_levels.deep=deep;
+      assert.deepEqual(cheapItems(s),offOld,`deep=${JSON.stringify(deep)}: цена правила не имеет права быть названа`);assert.ok(lines(V.triggersOf(s,now)).includes(offHint));
+      for(const x of screen(s,now))assert.doesNotMatch(x,/≈ 49 тыс|≈ 68 тыс|пц — (?:ниже|выше) ≈/,`цена подана как порог правила без права на это: «${x}»`);
+    }
+    // Цена правила null (нет закрытия дня наблюдения), строка, ноль, отрицательное — порог остаётся перцентилем.
+    for(const bad of [null,"48974",0,-5,NaN,{}]){
+      const s=structuredClone(tick);for(const l of s.valuation_levels.levels)if("rule_price_usd" in l)l.rule_price_usd=bad;
+      assert.deepEqual(cheapItems(s),offOld,`rule_price_usd=${JSON.stringify(bad)}: порог — перцентилем`);for(const x of screen(s,now))assert.doesNotMatch(x,/пц — (?:ниже|выше) ≈/);
+    }
+    // Решение прежнего набора v1 читало одно окно: его порог — цена окна четырёх лет, что бы ни лежало в уровнях.
+    const oldLv=structuredClone(old);oldLv.valuation_levels=structuredClone(TICK1_LEVELS);
+    assert.match(plain(V.levelsText(oldLv)),/пол 40 % — ниже ≈ 64 тыс\. \$ · якорь восстановления — ниже ≈ 72 тыс\. \$ · гейт оценки — выше ≈ 119 тыс\. \$$/);assert.match(plain(V.triggersOf(oldLv,now)[0].text),/MVRV ≥ 25-го пц — выше ≈ 72 тыс\. \$ \(сейчас 19-й\)$/);
+
+    // (д) Карточки «восстановление», «макрошок» и «Дистрибуция» — из live_inputs.detectors: подменённое там видно на
+    //     странице, а текст методики v1 из detectors[] у набора v3 не печатается ни в одной форме снимка.
+    const V1_TEXT=[DET_TEXT.recovery[0],DET_TEXT.recovery[1],DET_TEXT.distribution[1]],cardsOf=S=>Object.fromEntries(V.detView(S).map(d=>[d.id,d])),noV1=(S,why)=>{for(const d of V.detView(S))for(const x of [d.inputs,d.logic])assert.ok(!V1_TEXT.includes(x),`${why}: на карточке «${d.id}» текст методики v1 — «${x}»`)};
+    const sub=mk3({now,mvrv:20,deep:31,scores:{...twoAdverse,trend_regime:0},events:quietEvents}),SD=sub.live_inputs.detectors;
+    assert.deepEqual([sub.detectors.find(d=>d.id==="recovery").state,sub.live_inputs.recovery.state,SD.recovery.state,SD.macro_shock.state,SD.distribution.reference],["good","calm","calm","calm",true],"фикстура: карточка v1 и боевое правило расходятся");
+    Object.assign(SD.recovery,{state:"watch",inputs:"ВХОДЫ ПРАВИЛА",logic:"ТЕКСТ ПРАВИЛА"});SD.macro_shock.state="fired";SD.distribution.logic="ТЕКСТ СПРАВОЧНОГО";
+    const sc=cardsOf(sub);
+    assert.deepEqual([sc.recovery.state,sc.recovery.inputs,sc.recovery.logic],["watch","ВХОДЫ ПРАВИЛА","ТЕКСТ ПРАВИЛА"],"«восстановление»: состояние, входы и текст — из live_inputs.detectors");
+    assert.deepEqual([sc.macro_shock.state,sc.macro_shock.inputs,sc.macro_shock.logic],["fired",...DET_TEXT.macro_shock],"«макрошок»: состояние — из live_inputs.detectors, входы и текст — прежние");
+    assert.deepEqual([sc.distribution.logic,sc.distribution.reference,sc.distribution.inputs,sc.distribution.state],["ТЕКСТ СПРАВОЧНОГО",true,DET_TEXT.distribution[0],"calm"],"«Дистрибуция»: текст и признак справочного — из live_inputs.detectors");
+    assert.deepEqual([sc.integrity.inputs,sc.integrity.logic],DET_TEXT.integrity,"остальные детекторы — из detectors[], как были");noV1(sub,"снимок с карточками правила");
+    // Снимок формы 2.15.0 (окно выпуска): поля нет. Состояние — из live_inputs, строки входов и текста у
+    // «восстановления» и «Дистрибуции» нет вовсе, роль на месте.
+    const win=mk3({now,form215:true,mvrv:20,deep:31,scores:{...twoAdverse,trend_regime:0},events:quietEvents});win.live_inputs.macro_shock_state="fired";
+    assert.ok(!("detectors" in win.live_inputs)&&!("deep" in win.valuation_levels)&&!("fix_diff" in win.regime_meta.strategic),"фикстура формы 2.15.0: новых полей нет");
+    const wc=cardsOf(win);
+    assert.deepEqual([wc.recovery.state,wc.recovery.inputs,wc.recovery.logic,plain(wc.recovery.role)],["calm","","","поднимает «защитный» и «ухудшается» до «переходного» и включает пол 40 / 60 / 80 % — по числу фиксов подряд"],"без поля текст «восстановления» не печатается, состояние — из live_inputs");
+    assert.deepEqual([wc.distribution.inputs,wc.distribution.logic,wc.distribution.reference,plain(wc.distribution.role)],["","",true,"справочный: на режим и цель не влияет"],"без поля текст «Дистрибуции» не печатается, детектор остаётся справочным");
+    assert.deepEqual([wc.macro_shock.state,wc.macro_shock.inputs,wc.macro_shock.logic],["fired",...DET_TEXT.macro_shock]);noV1(win,"снимок формы 2.15.0");
+    win.detectors.find(d=>d.id==="distribution").state="fired";assert.equal(V.alarmCount(win),V.alarmCount(Object.assign(structuredClone(win),{detectors:win.detectors.map(d=>d.id==="distribution"?{...d,state:"calm"}:d)})),"и без поля «Дистрибуция» в счёт тревожных не идёт");
+    // Снимок набора v3 без live_inputs (расчёт входов не удался): текст методики v1 тоже не печатается.
+    noV1(bare,"снимок без live_inputs");assert.deepEqual([cardsOf(bare).recovery.inputs,cardsOf(bare).recovery.logic,cardsOf(bare).distribution.logic],["","",""]);
+    // Снимок прежней формы (решение набора v1): карточки — из detectors[], как были, даже если в нём окажется поле.
+    const oldDet=structuredClone(old);oldDet.detectors=structuredClone(sub.detectors);oldDet.live_inputs=structuredClone(sub.live_inputs);
+    assert.deepEqual([cardsOf(oldDet).recovery.state,cardsOf(oldDet).recovery.inputs,cardsOf(oldDet).recovery.logic,cardsOf(oldDet).distribution.logic,cardsOf(oldDet).distribution.reference],["good",DET_TEXT.recovery[0],DET_TEXT.recovery[1],DET_TEXT.distribution[1],false],"решение набора v1 показано карточками методики v1");
+
+    // Разница двух последних фиксов (regime_meta.strategic.fix_diff): первый экран её отдельно не выводит; она уходит
+    // в ИИ-разбор вместе с regime_meta и названа в промпте.
+    const diffed=mk3({now,prevFix:{scores:{trend_regime:-1},mvrv:31},events:[[900,"deteriorating",20],[17*24,"transition",45]]}),fd=diffed.regime_meta.strategic.fix_diff;
+    assert.ok(fd&&fd.source==="fix"&&fd.at===diffed.regime_meta.strategic.fix_at&&fd.families.some(f=>f.id==="trend_regime"&&f.from===-1&&f.to===2)&&fd.mvrv_percentile.from===31,"фикстура: разница фиксов посчитана ядром");
+    const noDiff=structuredClone(diffed);noDiff.regime_meta.strategic.fix_diff=null;
+    assert.deepEqual([screen(diffed,now),V.leadOf(diffed,now)],[screen(noDiff,now),V.leadOf(noDiff,now)],"разница фиксов первый экран не меняет");
+    assert.match(V.aiHead(),/fix_diff — разница двух последних фиксов/,"промпт ИИ-разбора называет разницу фиксов");
+    assert.match(html,/regime_meta:S\.regime_meta,/,"ИИ-разбор получает regime_meta целиком — вместе с fix_diff");
+    assert.match(V.aiHead(),/rule_price_usd — цена правила: ниже неё «дёшево» выполнено во всех окнах, которые читает правило/,"промпт ИИ-разбора объясняет цену правила");
+    assert.doesNotMatch(V.aiHead(),/\(по окну четырёх лет\) — в policy\.valuation_levels/,"промпт снова называет все уровни посчитанными по одному окну");
+    // Уровни уходят в разбор с обоими окнами и ценой правила; уровень 95-го перцентиля (потолка у набора v3 нет) — нет.
+    const aiLv=V.aiPolicy(tick).valuation_levels;
+    assert.deepEqual([aiLv.deep,aiLv.levels,tick.valuation_levels.levels.length],[tick.valuation_levels.deep,tick.valuation_levels.levels.slice(0,3),4],"ИИ-разбор получает уровни обоих окон и цену правила — по порогам, которые читает правило");
+    assert.match(V.aiPolicy(tick).rules.cheap_two_windows,/rule_price_usd/);assert.deepEqual(V.aiPolicy(oldLv).valuation_levels,oldLv.valuation_levels,"снимок прежней формы отдаёт уровни как есть");
+
+    // (е) Мусор в новых полях (их пишет сборщик, читает страница) не роняет экран и не отнимает цели.
+    const J=["x",7,null,[],true,{recovery:"x",macro_shock:null,distribution:7},{recovery:{state:5,inputs:{},logic:[]},macro_shock:{state:{}},distribution:{reference:"да",logic:null}},{__proto__:null,recovery:{state:"неведомое"}}];
+    const JL=["x",7,null,[],{levels:"x",deep:"x"},{levels:[null,7,"x",{key:"capitulation_floor",rule_price_usd:"1",price_usd:"2",price_usd_deep:{}},{key:"recovery_anchor",rule_price_usd:null}],deep:{used:true}},{levels:{a:1},deep:[]},{levels:[{key:"capitulation_floor",rule_price_usd:Infinity,price_usd:null}],deep:{used:false,reason:7}}];
+    const JF=["x",7,[],{families:"x",detectors:7,mvrv_percentile:"x"},{families:[null,7],detectors:[null],at:{}}];
+    for(let i=0;i<Math.max(J.length,JL.length,JF.length);i++){
+      const s=mk3({now,mvrv:7,deep:18,scores:allAdverse,events:quietEvents});
+      s.live_inputs.detectors=J[i%J.length];s.valuation_levels=JL[i%JL.length];s.regime_meta.strategic.fix_diff=JF[i%JF.length];
+      for(const f of ["changeLog","blockRows","whyOf","tactRows","dataNotes","warnMap","holdOf","overlayLines","monitorModel","levelsText","resultText","tactOf","detView","alarmCount","methodParts","policyFacts","aiPolicy"])assert.doesNotThrow(()=>V[f](s),`VIEW.${f} упала на мусоре в новых полях 2.15.1 (набор ${i})`);
+      assert.doesNotThrow(()=>V.triggersOf(s,now));assert.match(plain(V.leadOf(s,now).text),/^Цель 5 % без изменений с [0-9][0-9]\.[0-9][0-9] — действий нет$/,"мусор в новых полях не отнимает цель и её историю");
+      for(const x of screen(s,now))assert.doesNotMatch(x,/пц — (?:ниже|выше) ≈|undefined|NaN|\[object/,`мусор в новых полях дошёл до экрана: «${x}»`);
+      noV1(s,"мусор в карточках правила");for(const d of V.detView(s))assert.ok(typeof d.inputs==="string"&&(typeof d.logic==="string"||d.logic===undefined)&&["fired","watch","good","calm"].includes(d.state),`карточка «${d.id}» на мусоре: входы и текст — строки, состояние известное`);
+    }
   }
 
   // 2.5. Снимок перечитывается: 304 оставляет прежний, 200 заменяет, отказ сети не стирает экран.

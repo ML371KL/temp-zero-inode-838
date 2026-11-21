@@ -222,8 +222,10 @@ const verify=d=>{const copy={...d};delete copy.decision_hash;assert.equal(d.deci
     assert.deepEqual([cards.recovery.state,cards.macro_shock.state,cards.distribution.reference],[live.recovery.state,live.macro_shock_state,true]);
     assert.match(cards.recovery.inputs,/^оценка низкая в обоих окнах MVRV · подтверждений [0-3]\/3$/);
     assert.match(cards.recovery.logic,/MVRV ниже 25-го перцентиля и за 4 года, и по всей истории/);
-    assert.match(cards.recovery.logic,/пол 40 \/ 60 \/ 80 % по фиксам подряд \(не действует при сработавшем макрошоке\)/);
-    assert.match(cards.distribution.logic,/На режим и цель не влияет\.$/);
+    assert.ok(cards.recovery.logic.endsWith("поднимает защитный/ухудшающийся вердикт до переходного (не действует при сработавшем макрошоке)."));
+    assert.ok(cards.distribution.logic.endsWith("одно из двух — «наблюдение»."));
+    // Роль детектора (пол ступенями, «справочный») страница печатает отдельной строкой — текст карточки её не повторяет.
+    for(const text of [cards.recovery.logic,cards.distribution.logic])assert.ok(!text.includes("40 / 60 / 80")&&!text.includes("не влияет"));
     for(const text of [cards.recovery.logic,cards.distribution.logic])assert.doesNotMatch(text,/ограничение вердикта сверху|<25-го перцентиля\)/,"формулировки прежних правил в карточку боевого правила не попадают");
     // Якорь по одному окну: за 4 года дёшево (8-й), по всей истории нет (60-й) — правило его не засчитывает.
     const oneWindow=liveInputsV3(evaluateV3Inputs({now,inputs:mk(now,{cand:"defensive",mvrv:8,s:{deep:60,price:"below200w"}})}),iso(now)).detectors;
