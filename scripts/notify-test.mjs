@@ -684,10 +684,11 @@ test("проверочное сообщение показывает текущ�
 /* ====================== BTC-панель: правки по аудиту уведомлений от 10.10.2026 ======================
    Фикстуры — синтетические снимки той формы, какую публикует панель; числа взяты из настоящих смен
    цели 19.07–10.10.2026. Всё идёт через fromSnapshotJSON → diff → renderMessage, а там, где важна
-   память между запусками (индекс доставленного, пауза, удержание, показанные значения), — через
+   память между запусками (индекс доставленного, пауза, ожидание повышения, показанные значения), — через
    саму main() с подставленным получателем сообщений: ни токена, ни сети для этого не нужно. */
 
 const LADDER = { emergency: 0, defensive: 5, deteriorating: 20, transition: 45, unconfirmed_positive: 95, constructive: 100 };
+const FLOOR_LADDER = [40, 60, 80];
 // оценки трёх направлений, при которых таблица режимов движка даёт именно этот режим
 const REGIME_BLOCKS = {
   defensive: { macro: 0, demand: -31.3, cycle: -20 },
@@ -696,8 +697,24 @@ const REGIME_BLOCKS = {
   unconfirmed_positive: { macro: 25, demand: 5, cycle: 25 },
   constructive: { macro: 25, demand: 25, cycle: 25 },
 };
-const T0 = Date.parse("2026-08-19T20:38:48.000Z");
+// Опорный момент фикстур. Набор v3 решает раз в сутки, на фиксе — первом прогоне не раньше
+// 06:00 UTC. at(15) — фикс 20.08.2026 (06:08:48 UTC, 09:08 МСК), at(0) — прогон за четверть часа до
+// него. Все даты фикстур заданы явно, часы main() подменяет runBot — от дня недели и часа запуска
+// тестов ничего не зависит.
+const T0 = Date.parse("2026-08-20T05:53:48.000Z");
 const at = (min) => new Date(T0 + min * 60000).toISOString();
+const DAY_MIN = 1440;
+// фикс суток d (0 — 20.08, 1 — 21.08, −1 — 19.08) и прогон перед ним
+const fx = (d = 0) => at(15 + d * DAY_MIN);
+const pre = (d = 0) => at(d * DAY_MIN);
+// Последний фикс к моменту t и срок следующего — как их публикует сборщик: фикс фикстур стоит в
+// 06:08:48 UTC, срок следующего — 06:00 UTC следующих суток.
+const FIX_OFFSET_MS = 6 * 3600e3 + 8 * 60e3 + 48e3;
+function fixClock(t) {
+  const ms = Date.parse(t), day = Math.floor(ms / 864e5);
+  const fixDay = ms >= day * 864e5 + FIX_OFFSET_MS ? day : day - 1;
+  return { fix_at: new Date(fixDay * 864e5 + FIX_OFFSET_MS).toISOString(), next_fix_at: new Date((fixDay + 1) * 864e5 + 6 * 3600e3).toISOString() };
+}
 const card = (id, o = {}) => ({
   id, block: "demand", family: id, name: id, vote: true, strategic: true, value: "смешанно", value_num: 0, score: 0, unit: "", delta: "",
   source: "источник", observed_at: "2026-08-18T00:00:00.000Z", stale: false, series: [], note: "", ...o,
@@ -708,8 +725,110 @@ const dailySeries = (day, n, f) => Array.from({ length: n }, (_, k) => {
   const t = Date.parse(day + "T00:00:00Z") - (n - 1 - k) * 864e5;
   return { t, v: f(k, Math.round(t / 864e5)) };
 });
+const snapCards = (o, mvrv) => o.metrics || [
+  card("mvrv_cycle", { block: "cycle", family: "valuation", value: `${Math.round(mvrv)}-й перцентиль 4 лет`, value_num: mvrv }),
+  card("trend_regime", { block: "cycle", family: "trend", value: (o.trend ?? -1) > 0 ? "выше 20W и 200D" : "ниже среднесрочных опор", value_num: o.trend ?? -1, score: o.trend ?? -1 }),
+  card("etf_regime", { family: "etf", value: "смешанно", value_num: o.etf ?? 0, score: o.etf ?? 0, stale: !!o.etf_stale }),
+  card("exchange_supply", { family: "exchange_supply", value: "сбалансировано", value_num: o.exchange ?? 0, score: o.exchange ?? 0 }),
+];
+const snapDetectors = (o, mvrv, recovery) => [
+  { id: "integrity", name: "Нарушение целостности рынка", state: o.override ? "fired" : "calm", inputs: o.override ? "peg 6.20% · spread 350 б.п." : "peg 0.08% · spread 2 б.п." },
+  { id: "macro_shock", name: "Макрошок ликвидности", state: "calm", inputs: "условий 1/3" },
+  { id: "demand_break", name: "Слом маржинального спроса", state: o.demand_break || "calm", inputs: "условий 3/4" },
+  { id: "recovery", name: "Капитуляция → восстановление", state: recovery, inputs: `оценка ${mvrv < 25 ? "низкая" : "не низкая"} · подтверждений ${o.conf ?? 1}/3` },
+];
+const famOf = (n) => Object.fromEntries(Array.from({ length: n }, (_, k) => [`f${k}`, 0]));
+const blockCards = (b) => ({
+  macro: { strategic: { score: b.macro, families: famOf(3) } },
+  demand: { strategic: { score: b.demand, families: famOf(4) } },
+  cycle: { strategic: { score: b.cycle, families: famOf(5) } },
+});
 
+/* Снимок НОВОЙ формы (выпуск 2.15.0, боевой набор v3). Цель, оверлеи и цели режимов фикстура
+   считает по правилам набора — так же, как allocationDecisionV3 движка:
+     floor — число фиксов подряд с подтверждённым детектором разворота (ступень пола 40 / 60 / 80);
+     mvrv  — перцентиль MVRV за 4 года, deep — по всей истории (null — окна всей истории нет);
+     pending — сколько фиксов подряд ждёт повышение (1 — «1 из 2»); conf — подтверждений из трёх.
+   live_inputs — то, что читает боевое правило; карточки, блоки и детекторы публикуются по методике
+   v1 (card_blocks — баллы блоков на карточках, когда они расходятся с движком).               */
 function btcSnap(o = {}) {
+  const t = o.t || at(15);
+  const state = o.state ?? "deteriorating";
+  const candidate = o.candidate ?? state;
+  const blocks = o.blocks || REGIME_BLOCKS[o.table || candidate] || REGIME_BLOCKS.transition;
+  const mvrv = o.mvrv ?? 42;
+  const deep = o.deep === undefined ? mvrv + 2 : o.deep;
+  const cheap = mvrv <= 10 && (deep === null || deep <= 10);
+  const anchor = mvrv < 25 && (deep === null || deep < 25);
+  const conf = o.conf ?? 1;
+  const macroShock = o.macro_shock || "calm";
+  const recovery = o.recovery || (!anchor ? "calm" : conf >= 2 ? "good" : conf >= 1 ? "watch" : "calm");
+  const closes = o.floor ?? 0;
+  const level = closes > 0 ? FLOOR_LADDER[closes - 1] : null;
+  const emergency = state === "emergency";
+  const paused = o.target === null;
+  const alloc = (regime) => {
+    if (regime === "emergency") return { base: 0, target: 0, overlays: [] };
+    const base = LADDER[regime], overlays = [];
+    let target = base;
+    if (level !== null && target < level) { target = level; overlays.push("recovery_floor"); }
+    if (cheap && target < 40) { target = 40; overlays.push("capitulation_floor"); }
+    return { base, target, overlays };
+  };
+  const own = state in LADDER ? alloc(state) : { base: null, target: null, overlays: [] };
+  const overlays = o.overlays || (emergency ? ["emergency_override"] : own.overlays);
+  const clock = fixClock(t);
+  const fix_at = o.fix_at || clock.fix_at, next_fix_at = o.next_fix_at || clock.next_fix_at;
+  const pending = o.pending ? { candidate, fixes: o.pending, need: 2 } : null;
+  const tact = emergency ? "fix_deferred" : t === fix_at ? "fix" : "between_fixes";
+  const band = (x) => (x >= 20 ? "supportive" : x <= -20 ? "adverse" : "neutral");
+  const inputs = {
+    strategic: state, candidate, floor_closes: closes, cheap, reproducible: !paused && !emergency, fix_at, next_fix_at, pending,
+    mvrv_percentile: mvrv, mvrv_percentile_deep: deep, deep_window_used: deep !== null, recovery_state: recovery, macro_shock_state: macroShock,
+  };
+  return {
+    generated_at: t,
+    version: "2.15.0",
+    price: o.price ?? 69116,
+    verdict: "ВЕРДИКТ",
+    scores: { strategic: -10, critical_missing: { strategic: o.missing || [], tactical: [] } },
+    policy_suite: { id: "btc-decision-suite-v3", version: 3, status: "live", supersedes: "btc-decision-suite-v1" },
+    policy_components: { allocation: { id: "btc-decision-suite-v3-candidate", status: "live" }, model: { id: o.model_id || "btc-model-policy-v1" }, execution: { id: "btc-execution-policy-v1" } },
+    regime: { strategic: state, tactical: "balanced" },
+    regime_meta: { strategic: {
+      state, candidate, count: o.count ?? 3, since: o.since || fix_at, downStreak: 0, anchor: state, ...(pending ? { hold_until: next_fix_at } : {}),
+      fix_at, next_fix_at, pending, floor: { closes, level_pct: level }, fix: null,
+    } },
+    override: o.override || null,
+    blocks: blockCards(o.card_blocks || blocks),
+    live_inputs: o.live === null ? null : {
+      at: t, families: { macro: {}, demand: {}, cycle: { valuation: mvrv >= 95 ? -2 : mvrv >= 82 ? -1 : cheap ? 1 : 0 } },
+      blocks: { ...blocks }, bands: { macro: band(blocks.macro), demand: band(blocks.demand), cycle: band(blocks.cycle) },
+      candidate: emergency ? "emergency" : o.live_candidate ?? candidate, recovery: { state: recovery, anchor, supports: conf }, macro_shock_state: macroShock,
+      mvrv_percentile: mvrv, mvrv_percentile_deep: deep, cheap, deep_window_used: deep !== null, closed_day: t.slice(0, 10),
+    },
+    decision: paused
+      ? { policy_id: "btc-decision-suite-v3", status: "paused", strategic: "insufficient", base_target_pct: null, target_pct: null, binding_overlays: [], reason_codes: ["no_target_on_fix", "fix_deferred", "insufficient_data"], inputs, quality: { status: "paused" } }
+      : {
+          policy_id: "btc-decision-suite-v3", status: "actionable", strategic: state, base_target_pct: own.base, target_pct: o.target ?? own.target,
+          regime_targets_pct: Object.fromEntries(Object.keys(LADDER).map((r) => [r, alloc(r).target])),
+          binding_overlays: overlays,
+          reason_codes: emergency ? ["emergency_override", tact] : [tact, `base:${state}`, ...overlays, ...(pending ? [`upgrade_pending:${candidate}:${pending.fixes}/2`] : []), ...(o.reasons || [])],
+          inputs, quality: { status: o.quality || "good" },
+        },
+    metrics: snapCards(o, mvrv),
+    detectors: snapDetectors(o, mvrv, o.recovery_card || recovery),
+    sources: o.sources || {},
+    history: [],
+    monitoring: o.log ? { target_change_log: o.log } : {},
+    ...(o.extra || {}),
+  };
+}
+/* Снимок ПРЕЖНЕЙ формы (до выпуска 2.15.0, набор v1): решение называет набор v1, фикса и ступеней
+   пола нет, пол восстановления — 80 %, пол капитуляции — по одному окну MVRV, удержание повышения —
+   в часах (hold_until). Такой снимок лежит в базе сравнения на шаге выпуска, и бот обязан читать его
+   без ошибок — но правил ему не приписывает.                                                   */
+function btcSnapV1(o = {}) {
   const t = o.t || at(15);
   const state = o.state ?? "deteriorating";
   const candidate = o.candidate ?? state;
@@ -722,42 +841,27 @@ function btcSnap(o = {}) {
   const cap = overlays.includes("euphoria_safety_cap") ? 60 : 100;
   // панель публикует цели режимов уже с действующими оверлеями
   const targets = Object.fromEntries(Object.entries(LADDER).map(([r, p]) => [r, r === "emergency" ? 0 : Math.min(Math.max(p, floor), cap)]));
-  const fam = (n) => Object.fromEntries(Array.from({ length: n }, (_, k) => [`f${k}`, 0]));
   return {
     generated_at: t,
-    version: "2.13.0",
+    version: "2.14.0",
     price: o.price ?? 69116,
     verdict: "ВЕРДИКТ",
     scores: { strategic: -10, critical_missing: { strategic: o.missing || [], tactical: [] } },
     regime: { strategic: state, tactical: "balanced" },
     regime_meta: { strategic: { state, candidate, count: o.count ?? 3, since: o.since || t, downStreak: 0, anchor: state, ...(o.hold_until ? { hold_until: o.hold_until } : {}) } },
     override: o.override || null,
-    policy_components: { allocation: { id: "btc-allocation-policy-v1" }, model: { id: o.model_id || "btc-model-policy-v1" }, execution: { id: "btc-execution-policy-v1" } },
-    blocks: {
-      macro: { strategic: { score: blocks.macro, families: fam(3) } },
-      demand: { strategic: { score: blocks.demand, families: fam(4) } },
-      cycle: { strategic: { score: blocks.cycle, families: fam(5) } },
-    },
+    policy_components: { allocation: { id: "btc-allocation-policy-v1" }, model: { id: "btc-model-policy-v1" }, execution: { id: "btc-execution-policy-v1" } },
+    blocks: blockCards(blocks),
     decision: paused
-      ? { status: "paused", base_target_pct: null, target_pct: null, binding_overlays: [], reason_codes: ["insufficient_data"], quality: { status: "paused" } }
+      ? { policy_id: "btc-decision-suite-v1", status: "paused", base_target_pct: null, target_pct: null, binding_overlays: [], reason_codes: ["insufficient_data"], quality: { status: "paused" } }
       : {
-          status: "actionable", strategic: state, base_target_pct: base, target_pct: o.target ?? base, regime_targets_pct: targets,
+          policy_id: "btc-decision-suite-v1", status: "actionable", strategic: state, base_target_pct: base, target_pct: o.target ?? base, regime_targets_pct: targets,
           binding_overlays: overlays, reason_codes: [`base:${state}`, ...overlays],
           inputs: { strategic: state, recovery_state: o.recovery || "calm", macro_shock_state: "calm", mvrv_percentile: mvrv },
           quality: { status: o.quality || "good" },
         },
-    metrics: o.metrics || [
-      card("mvrv_cycle", { block: "cycle", family: "valuation", value: `${Math.round(mvrv)}-й перцентиль 4 лет`, value_num: mvrv }),
-      card("trend_regime", { block: "cycle", family: "trend", value: (o.trend ?? -1) > 0 ? "выше 20W и 200D" : "ниже среднесрочных опор", value_num: o.trend ?? -1, score: o.trend ?? -1 }),
-      card("etf_regime", { family: "etf", value: "смешанно", value_num: o.etf ?? 0, score: o.etf ?? 0, stale: !!o.etf_stale }),
-      card("exchange_supply", { family: "exchange_supply", value: "сбалансировано", value_num: o.exchange ?? 0, score: o.exchange ?? 0 }),
-    ],
-    detectors: [
-      { id: "integrity", name: "Нарушение целостности рынка", state: o.override ? "fired" : "calm", inputs: o.override ? "peg 6.20% · spread 350 б.п." : "peg 0.08% · spread 2 б.п." },
-      { id: "macro_shock", name: "Макрошок ликвидности", state: "calm", inputs: "условий 1/3" },
-      { id: "demand_break", name: "Слом маржинального спроса", state: o.demand_break || "calm", inputs: "условий 3/4" },
-      { id: "recovery", name: "Капитуляция → восстановление", state: o.recovery || "calm", inputs: `оценка ${mvrv < 25 ? "низкая" : "не низкая"} · подтверждений ${o.conf ?? 1}/3` },
-    ],
+    metrics: snapCards(o, mvrv),
+    detectors: snapDetectors(o, mvrv, o.recovery || "calm"),
     sources: o.sources || {},
     history: [],
     monitoring: o.log ? { target_change_log: o.log } : {},
@@ -765,10 +869,11 @@ function btcSnap(o = {}) {
   };
 }
 // Лента снимков: у каждого — история решений из всех предыдущих и себя самого, как у панели.
+// form: "v1" — снимок прежней формы.
 const timeline = (list) => {
   const history = [];
   return list.map((o) => {
-    const snap = btcSnap(o);
+    const snap = o.form === "v1" ? btcSnapV1(o) : btcSnap(o);
     history.push({ t: snap.generated_at, price: snap.price, regime: { strategic: snap.regime.strategic }, decision: { status: snap.decision.status, base_target_pct: snap.decision.base_target_pct, target_pct: snap.decision.target_pct, binding_overlays: snap.decision.binding_overlays } });
     snap.history = history.slice();
     return snap;
@@ -779,7 +884,7 @@ const silently = async (fn) => {
   console.log = () => {}; console.error = () => {};
   try { return await fn(); } finally { console.log = realLog; console.error = realErr; }
 };
-const plainText = (html) => html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/ /g, " ");
+const plainText = (html) => html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\u00a0/g, " ");
 // Все сообщения, которые за прогон тестов разослала настоящая main(), — их проверяет на стандарт
 // сообщений последний тест файла («единый стиль: каждое разосланное сообщение…»).
 const ALL_SENT = [];
@@ -809,11 +914,12 @@ const texts = (r, kind) => r.sent.filter((m) => !kind || m.kind === kind).map((m
 
 /* ---- п. 1: причина смены доли ---- */
 
-// Повышение 20 → 45, принятое после 48 часов удержания (как 23.09.2026). В такт принятия качнулась
-// посторонняя карточка — потоки ETF: прежний бот назвал её причиной.
-const SINCE = at(15 - 48 * 60);
+// Повышение 20 → 45: кандидат «переходный» появился на фиксе 19.08 (счёт «1 из 2») и принят на
+// втором фиксе подряд, 20.08. В такт принятия качнулась посторонняя карточка — потоки ETF: прежний
+// бот называл такую причиной (23.09.2026).
+const SINCE = fx(-1);
 const UP_LOG = [{
-  t: at(15), from_pct: 20, to_pct: 45, direction: "up", price: 86198, strategic_from: "deteriorating", strategic_to: "transition",
+  t: fx(0), from_pct: 20, to_pct: 45, direction: "up", price: 86198, strategic_from: "deteriorating", strategic_to: "transition",
   overlays_from: [], overlays_to: [], kind: "regime",
   cause: {
     text: "блок «Спрос» вышел из неблагоприятной полосы: качество институционального спроса −1 → 0",
@@ -822,8 +928,8 @@ const UP_LOG = [{
   },
 }];
 const upgrade = (extra1 = {}) => timeline([
-  { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), count: 192, price: 86120, etf: 0 },
-  { t: at(15), state: "transition", candidate: "transition", since: SINCE, count: 193, price: 86198, etf: 0.5, ...extra1 },
+  { t: pre(0), state: "deteriorating", candidate: "transition", pending: 1, since: SINCE, count: 1, price: 86120, etf: 0 },
+  { t: fx(0), state: "transition", candidate: "transition", since: SINCE, count: 2, price: 86198, etf: 0.5, ...extra1 },
 ]);
 
 testAsync("причина смены доли берётся из журнала монитора, а не из разницы соседних снимков", async () => {
@@ -831,13 +937,13 @@ testAsync("причина смены доли берётся из журнала
   assert.equal(r.sent.length, 1, `одна смена — одно сообщение: ${r.sent.map((m) => m.title)}`);
   const text = r.sent[0].text;
   assert.match(text, /Причина: блок «Спрос» вышел из неблагоприятной полосы: качество институционального спроса −1 → 0/, text);
-  assert.match(text, /кандидат с 17\.08, 23:53 МСК/, "момент рождения кандидата обязан быть назван — по Москве");
+  assert.match(text, /кандидат с 19\.08, 09:08 МСК/, "момент рождения кандидата обязан быть назван — по Москве");
   assert.doesNotMatch(text, /Потоки в биткоин-ETF/, "карточка, качнувшаяся в такт принятия, причиной не является");
 });
 
 testAsync("запись журнала с меткой времени, отстающей от снимка, всё равно даёт причину", async () => {
   // монитор и сборщик — разные потоки кода; метка записи не обязана совпасть со снимком до миллисекунды
-  const late = [{ ...UP_LOG[0], t: new Date(Date.parse(at(15)) + 7000).toISOString() }];
+  const late = [{ ...UP_LOG[0], t: new Date(Date.parse(fx(0)) + 7000).toISOString() }];
   const text = (await runBot(upgrade({ log: late }))).sent[0].text;
   assert.match(text, /20% → 45%/);
   assert.match(text, /Причина: блок «Спрос» вышел из неблагоприятной полосы/, text);
@@ -852,14 +958,14 @@ testAsync("без журнала причина строится из запис
   } };
   const r = await runBot(upgrade({ extra: { regime_birth } }));
   const text = r.sent[0].text;
-  assert.match(text, /Причина: оценка спроса −31,3 → −18,8 \(вышла из неблагоприятной полосы\): «Позиции фондов во фьючерсах CME \(отчёт CFTC\)» −1 → 0 \(кандидат с 17\.08, 23:53 МСК\)/, text);
+  assert.match(text, /Причина: оценка спроса −31,3 → −18,8 \(вышла из неблагоприятной полосы\): «Позиции фондов во фьючерсах CME \(отчёт CFTC\)» −1 → 0 \(кандидат с 19\.08, 09:08 МСК\)/, text);
   assert.doesNotMatch(text, /Потоки в биткоин-ETF/);
 });
 
 testAsync("без журнала и без записи о рождении причина не выдумывается", async () => {
   const r = await runBot(upgrade());
   const text = r.sent[0].text;
-  assert.match(text, /Причина: смена режима, принятая после удержания/, text);
+  assert.match(text, /Причина: смена режима, подтверждённая на втором фиксе подряд/, text);
   assert.doesNotMatch(text, /Потоки в биткоин-ETF|Улучшил|Ухудшил/, "случайные изменения соседнего снимка в причины не идут");
   assert.match(text, /Сейчас: неблагоприятных направлений нет/, "правило, по которому режим таков, читается с текущего снимка");
 });
@@ -869,163 +975,291 @@ testAsync("без журнала и без записи о рождении пр
 testAsync("повышение по режиму: было → стало, цена, режим, действие и условие отката ВНИЗ", async () => {
   const text = (await runBot(upgrade({ log: UP_LOG }))).sent[0].text;
   assert.match(text, /^🔔 Bitcoin · Доля биткоина увеличена\n20% → 45%\nBTC \$86 198\n/, text);
-  assert.match(text, /\n\nОткрыть панель · 19\.08, 23:53 МСК$/, "время шага — в подвале, по Москве");
-  assert.match(text, /Режим «ухудшается» → «переходный» \(ступень 45%\), принят после 48 часов удержания/);
+  assert.match(text, /\n\nОткрыть панель · 20\.08, 09:08 МСК$/, "время шага — в подвале, по Москве");
+  assert.match(text, /Режим «ухудшается» → «переходный» \(ступень 45%\), принят на втором фиксе подряд/);
   assert.match(text, /Что делать\n• Повышение — траншами со следующей сессии/);
-  assert.match(text, /Что отменит\n• Понижение до 20% — вторым снимком подряд \(≈ 15 мин\), если оценка спроса опустится до −20 \(сейчас \+6,3\)/, "для повышения откат — это ухудшение, а не улучшение");
+  assert.match(text, /Что отменит\n• Понижение до 20% — на суточном фиксе \(ближайший — 21\.08, 09:00 МСК\), если оценка спроса опустится до −20 \(сейчас \+6,3\)/, "для повышения откат — это ухудшение, а не улучшение");
   const undo = text.split("Что отменит")[1].split("\n\n")[0];
   assert.doesNotMatch(undo, /улучш/, `условие отмены повышения не может быть «в сторону улучшения»: ${undo}`);
   assert.doesNotMatch(text, /Шаткое|Устойчивое|Насколько это устойчиво/, "класса устойчивости у BTC-панели больше нет");
+  assert.doesNotMatch(text, /48 час|снимком подряд|≈ 15 мин|удержани/, `часовой механики набора v1 в сообщении нет: ${text}`);
 });
 
-testAsync("понижение по режиму: исполнять сразу, возврат — не раньше чем через 48 часов", async () => {
+testAsync("понижение по режиму: исполнять сразу, возврат — не раньше второго фикса подряд", async () => {
   const snaps = timeline([
-    { t: at(0), state: "transition", candidate: "deteriorating", table: "deteriorating", count: 1, price: 75600 },
-    { t: at(15), state: "deteriorating", candidate: "deteriorating", count: 2, since: at(0), price: 75563 },
+    { t: pre(0), state: "transition", price: 75600 },
+    { t: fx(0), state: "deteriorating", candidate: "deteriorating", count: 1, since: fx(0), price: 75563 },
   ]);
   const text = (await runBot(snaps)).sent[0].text;
   assert.match(text, /Доля биткоина сокращена\n45% → 20%/);
-  assert.match(text, /Режим «переходный» → «ухудшается» \(ступень 20%\), подтверждён вторым снимком подряд/);
+  assert.match(text, /Режим «переходный» → «ухудшается» \(ступень 20%\), принят на суточном фиксе/);
   assert.match(text, /Сейчас: спрос неблагоприятен \(−25 при пороге −20\)/);
   assert.match(text, /Что делать\n• Понижение — сразу/);
-  assert.match(text, /Что отменит\n• Возврат к 45% — после 48 часов удержания, не раньше 21\.08, 23:53 МСК: нужна оценка спроса выше −20 \(сейчас −25\)/, text);
+  // ближайший фикс (21.08) может только начать счёт «1 из 2» — принять повышение способен следующий за ним
+  assert.match(text, /Что отменит\n• Возврат к 45% — на втором фиксе подряд, не раньше 22\.08, 09:00 МСК: нужна оценка спроса выше −20 \(сейчас −25\)/, text);
   assert.doesNotMatch(text, /Понижение до/, "для понижения условие отмены — возврат вверх");
+  assert.match(text, /\n\nРежим ухудшился: понижение принимается на первом же суточном фиксе, обратный ход — не раньше второго фикса подряд\./, text);
 });
 
-// Вход на пол восстановления (как 19.08.2026): режим прежний, цель поднята оверлеем.
-const floorOn = (extra = {}) => timeline([
-  { t: at(0), state: "deteriorating", candidate: "deteriorating", mvrv: 19.5, recovery: "watch", conf: 1, trend: -1, price: 68900 },
-  { t: at(15), state: "deteriorating", candidate: "transition", table: "deteriorating", hold_until: at(15 + 48 * 60), mvrv: 19.5, recovery: "good", conf: 2, trend: 2, target: 80, overlays: ["recovery_floor"], count: 1, ...extra },
-]);
+test("пороги и строка правила берутся из того, что читает движок, а не из карточек", () => {
+  // Карточки и блоки снимка считаются по методике v1; для четырёх семей движок набора v3 считает
+  // свои баллы. Здесь блоки на карточках говорят «переходный», а движок видит «ухудшается».
+  const snap = btcSnap({ state: "deteriorating", card_blocks: REGIME_BLOCKS.transition });
+  const eng = mute(() => fromSnapshotJSON(snap)).allocation.engine;
+  assert.deepEqual(eng.blocks, REGIME_BLOCKS.deteriorating, "оценки направлений — из live_inputs");
+  assert.equal(engineAgrees(eng), true);
+  // без live_inputs (расчёт сборщика отказал) правило движку не приписывается
+  const blind = mute(() => fromSnapshotJSON(btcSnap({ state: "deteriorating", live: null }))).allocation.engine;
+  assert.equal(engineAgrees(blind), false);
+});
 
-testAsync("пол восстановления назван полом, а его снятие описано условиями детектора", async () => {
-  const text = (await runBot(floorOn())).sent[0].text;
-  assert.match(text, /Доля биткоина увеличена\n20% → 80%\nBTC \$69 116/);
-  assert.match(text, /Включён пол восстановления 80% поверх режима «ухудшается» \(ступень 20%\)/, text);
-  assert.match(text, /Причина: детектор разворота подтверждён — MVRV-перцентиль 19,5 \(ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина»: ниже среднесрочных опор → выше 20W и 200D/);
-  assert.match(text, /Кандидат «переходный» \(ступень 45%\) на удержании: не раньше 21\.08, 23:53 МСК/);
-  assert.match(text, /Что отменит\n• Пол снимается одним снимком, если MVRV-перцентиль дойдёт до 25 \(сейчас 19,5\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к ступени режима — 20%/);
-  assert.match(text, /\n\nЭто пол восстановления поверх режима, а не смена режима/, "шаблон выбирается по тому, что изменилось, а не по знаку");
+// Вход на пол восстановления: режим прежний, цель поднята первой ступенью пола. Детектор разворота
+// даёт режиму и право на «переходный» — этот кандидат ждёт второго фикса.
+const floorOn = (extra = {}) => timeline([
+  { t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1, trend: -1, price: 68900 },
+  { t: fx(0), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, since: fx(0), count: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1, ...extra },
+]);
+const FLOOR_ROW = {
+  t: fx(0), from_pct: 20, to_pct: 40, direction: "up", price: 69116, strategic_from: "deteriorating", strategic_to: "deteriorating", overlays_from: [], overlays_to: ["recovery_floor"], kind: "overlay",
+  cause: { text: "пол восстановления включён: старший ценовой тренд −1 → 2", families: [{ block: "cycle", family: "trend", id: "trend_regime", name: "Старший ценовой тренд", from: -1, to: 2 }], detectors: [{ id: "recovery", from: "watch", to: "good" }], candidate_since: null },
+};
+
+testAsync("пол восстановления назван полом и ступенью, а его снятие описано условиями детектора", async () => {
+  const text = (await runBot(floorOn({ log: [FLOOR_ROW] }))).sent[0].text;
+  assert.match(text, /Доля биткоина увеличена\n20% → 40%\nBTC \$69 116/);
+  assert.match(text, /Включён пол восстановления 40% \(ступень 1 из 3\) поверх режима «ухудшается» \(ступень 20%\)/, text);
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, text);
+  assert.match(text, /Кандидат «переходный» \(ступень 45%\) ждёт второго фикса подряд: 1 из 2, решение — на фиксе 21\.08, 09:00 МСК/);
+  assert.match(text, /Следующая ступень пола — 60% на суточном фиксе \(ближайший — 21\.08, 09:00 МСК\), если детектор разворота останется подтверждённым/);
+  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к ступени режима — 20%/);
+  assert.match(text, /\n\nЭто пол восстановления поверх режима, а не смена режима: он растёт ступенями по суточным фиксам подряд/, "шаблон выбирается по тому, что изменилось, а не по знаку");
+  assert.doesNotMatch(text, /одним снимком|80%/, `пол набора v3 не включается сразу на 80% и не живёт «одним снимком»: ${text}`);
 });
 
 testAsync("уровень цены, на котором пол снимется, печатается, когда снимок его публикует", async () => {
   const valuation_levels = { as_of: at(0), levels: [{ key: "capitulation_floor", percentile: 10, mvrv: 1.17, price_usd: 63600 }, { key: "recovery_anchor", percentile: 25, mvrv: 1.34, price_usd: 72800 }] };
+  // сборщик считает уровень по окну четырёх лет — при двух окнах он так и назван
   const text = (await runBot(floorOn({ extra: { valuation_levels } }))).sent[0].text;
-  assert.match(text, /MVRV-перцентиль дойдёт до 25 \(сейчас 19,5; это цена ≈ \$72,8 тыс\.\)/, text);
+  assert.match(text, /MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории; порог окна 4 лет — цена ≈ \$72,8 тыс\.\)/, text);
+  // окна всей истории нет — решает одно окно, и уровень относится к нему
+  const single = (await runBot(floorOn({ deep: null, extra: { valuation_levels } }))).sent[0].text;
+  assert.match(single, /MVRV-перцентиль дойдёт до 25 \(сейчас 19,5; это цена ≈ \$72,8 тыс\.\)/, single);
 });
 
 testAsync("снятие пола из-за роста оценки не подаётся как «обстановка хуже прежней»", async () => {
-  // 20.08: пол прожил семь часов и снят оттого, что цена выросла и оценка перестала быть дешёвой.
+  // 20.08, ещё при v1: пол сняли оттого, что цена выросла и оценка перестала быть дешёвой.
   const off = timeline([
-    { t: at(15), state: "deteriorating", candidate: "transition", table: "deteriorating", mvrv: 19.5, recovery: "good", conf: 2, trend: 2, target: 80, overlays: ["recovery_floor"] },
-    { t: at(30), state: "deteriorating", candidate: "deteriorating", mvrv: 27.2, recovery: "calm", conf: 2, trend: 2, price: 69158, count: 1 },
+    { t: pre(0), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1 },
+    { t: fx(0), state: "deteriorating", candidate: "deteriorating", mvrv: 27.2, deep: 23.4, conf: 2, trend: 2, price: 69158, count: 1 },
   ]);
   const text = (await runBot(off)).sent[0].text;
-  assert.match(text, /Доля биткоина сокращена\n80% → 20%/);
+  assert.match(text, /Доля биткоина сокращена\n40% → 20%/);
   assert.match(text, /Снят пол восстановления: цель вернулась к ступени режима «ухудшается» \(20%\)/, text);
-  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 при пороге 25/);
-  assert.match(text, /Что отменит\n• Пол вернётся одним снимком — нужно: MVRV-перцентиль ниже 25 \(сейчас 27,2\)/);
+  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25 в обоих окнах/);
+  assert.match(text, /Что отменит\n• Пол вернётся на суточном фиксе первой ступенью, 40% — нужно: MVRV-перцентиль ниже 25 в обоих окнах \(сейчас 27,2 за 4 года и 23,4 по всей истории\)/);
   assert.doesNotMatch(text, /хуже прежней|уводит часть позиции/);
 });
 
-testAsync("снятие пола и принятое повышение режима в одном снимке: названо и то, и другое", async () => {
-  // Удержание кандидата истекло в тот же снимок, где детектор потерял якорь: цель упала с пола
+testAsync("снятие пола и принятое повышение режима на одном фиксе: названо и то, и другое", async () => {
+  // Кандидат подтвердился на втором фиксе — и на нём же детектор потерял якорь: цель упала с пола
   // на новую, более высокую ступень режима.
-  const since = at(15 - 48 * 60);
   const snaps = timeline([
-    { t: at(0), state: "deteriorating", candidate: "transition", table: "deteriorating", since, hold_until: at(15), mvrv: 19.5, recovery: "good", conf: 2, target: 80, overlays: ["recovery_floor"], count: 192 },
-    { t: at(15), state: "transition", candidate: "transition", since, mvrv: 27.2, recovery: "calm", conf: 2, count: 193 },
+    { t: pre(0), state: "deteriorating", candidate: "transition", pending: 1, since: SINCE, count: 1, mvrv: 19.5, deep: 22.1, conf: 2, floor: 2 },
+    { t: fx(0), state: "transition", candidate: "transition", since: SINCE, mvrv: 27.2, deep: 23.4, conf: 2, count: 2 },
   ]);
   const text = (await runBot(snaps)).sent[0].text;
-  assert.match(text, /Доля биткоина сокращена\n80% → 45%/);
-  assert.match(text, /Снят пол восстановления, режим «ухудшается» → «переходный» \(ступень 45%\), принят после 48 часов удержания/, text);
-  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 при пороге 25/);
+  assert.match(text, /Доля биткоина сокращена\n60% → 45%/);
+  assert.match(text, /Снят пол восстановления, режим «ухудшается» → «переходный» \(ступень 45%\), принят на втором фиксе подряд/, text);
+  assert.match(text, /Причина: оценка перестала быть дешёвой — MVRV-перцентиль 19,5 → 27,2 за 4 года и 22,1 → 23,4 по всей истории при пороге 25 в обоих окнах/);
   assert.match(text, /Что делать\n• Понижение — сразу/);
-  assert.match(text, /Что отменит\n• Пол вернётся одним снимком — нужно: MVRV-перцентиль ниже 25 \(сейчас 27,2\)/);
-  assert.match(text, /\n\nВ одном снимке сошлись смена режима и смена оверлея/);
+  assert.match(text, /Что отменит\n• Пол поднимет цель до 60% не раньше чем на втором фиксе подряд с подтверждённым детектором разворота — нужно: MVRV-перцентиль ниже 25 в обоих окнах \(сейчас 27,2 за 4 года и 23,4 по всей истории\)/, text);
+  assert.match(text, /\n\nНа одном фиксе сошлись смена режима и смена оверлея/);
 });
 
-/* ---- п. 3: кандидат и удержание ---- */
-
-testAsync("сообщение о снятии пола не обещает возврата, когда кандидат уже хуже режима", async () => {
-  // 24.07 и 12.08: «80 → 45» прожило 24 и 15 минут — кандидат в момент отправки был «защитный».
+testAsync("пол восстановления растёт ступенями 40 → 60 → 80 по фиксам подряд", async () => {
+  // «Защитный» режим, детектор разворота подтверждён три фикса подряд. На втором фиксе принят и
+  // кандидат «переходный» (право детектора): цель 60% задаёт пол, а не ступень режима 45%.
+  const cheap = { mvrv: 19.5, deep: 22.1, conf: 2 };
   const snaps = timeline([
-    { t: at(0), state: "transition", candidate: "transition", mvrv: 20, recovery: "good", conf: 2, target: 80, overlays: ["recovery_floor"], exchange: 0 },
-    { t: at(15), state: "transition", candidate: "defensive", mvrv: 20, recovery: "watch", conf: 1, exchange: -0.5, count: 1, price: 64942 },
+    { t: pre(0), state: "defensive", ...cheap, conf: 1 },
+    { t: fx(0), state: "defensive", candidate: "transition", table: "defensive", pending: 1, since: fx(0), count: 1, ...cheap, floor: 1 },
+    { t: fx(1), state: "transition", candidate: "transition", table: "defensive", since: fx(0), count: 2, ...cheap, floor: 2 },
+    { t: fx(2), state: "transition", candidate: "transition", table: "defensive", since: fx(0), count: 3, ...cheap, floor: 3 },
+    { t: fx(3), state: "transition", candidate: "transition", table: "defensive", since: fx(0), count: 4, ...cheap, floor: 3 },
+  ]);
+  const r = await runBot(snaps);
+  assert.deepEqual(r.sent.map((m) => `${m.k}:${m.before}→${m.after}`), ["1:5%→40%", "2:40%→60%", "3:60%→80%"], "три ступени — три сообщения; на четвёртом фиксе пол уже на верхней ступени");
+  const [one, two, three] = r.sent.map((m) => m.text);
+  assert.match(one, /Включён пол восстановления 40% \(ступень 1 из 3\) поверх режима «защитный» \(ступень 5%\)/, one);
+  // набор оверлеев до и после один и тот же — шаг назван ступенью пола и объяснён
+  assert.match(two, /Пол восстановления: ступень 2 из 3, цель 60% поверх режима «переходный» \(ступень 45%\); режим при этом сменился с «защитный», принят на втором фиксе подряд/, two);
+  assert.match(two, /Причина: детектор разворота подтверждён второй фикс подряд — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3/, two);
+  assert.match(two, /Следующая ступень пола — 80% на суточном фиксе \(ближайший — 22\.08, 09:00 МСК\)/, two);
+  assert.match(three, /^🔔 Bitcoin · Доля биткоина увеличена\n60% → 80%\n/, three);
+  assert.match(three, /Пол восстановления: ступень 3 из 3, цель 80% поверх режима «переходный» \(ступень 45%\)\n/, three);
+  assert.match(three, /Причина: детектор разворота подтверждён третий фикс подряд — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3/, three);
+  assert.doesNotMatch(three, /Следующая ступень/, "выше третьей ступени пола нет");
+  assert.match(three, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон/, three);
+  assert.match(three, /\n\nПол восстановления поднялся на ступень: сигнал разворота подтверждён ещё на одном суточном фиксе подряд\./, three);
+});
+
+testAsync("под полом восстановления лежит пол капитуляции — «что отменит» называет оба уровня", async () => {
+  // «Дёшево» в обоих окнах и детектор подтверждён: вторая ступень пола (60%) выше пола капитуляции
+  // (40%). Потеряв подтверждения, цель вернётся не к ступени режима, а к полу капитуляции.
+  const deepCheap = { state: "defensive", mvrv: 9, deep: 8, conf: 2 };
+  const text = texts(await runBot(timeline([{ t: fx(0), ...deepCheap, floor: 1 }, { t: fx(1), ...deepCheap, floor: 2 }])), "allocation")[0];
+  assert.match(text, /40% → 60%[^]*Пол восстановления: ступень 2 из 3, цель 60% поверх режима «защитный» \(ступень 5%\)/, text);
+  assert.match(text, /Что отменит\n• Пол снимается на суточном фиксе, если MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 9 за 4 года и 8 по всей истории\) или подтверждений станет меньше 2 из 3 \(сейчас 2\)\. Цель вернётся к полу капитуляции — 40%, а без него — к ступени режима, 5%/, text);
+});
+
+testAsync("ступень пола: причина журнала монитора о давней смене режима к шагу не приписывается", async () => {
+  // Монитор пишет шагу без смены режима и оверлеев род «regime» и причину из записи о рождении
+  // нынешнего кандидата — то есть причину смены режима, случившейся раньше.
+  const cheap = { mvrv: 19.5, deep: 22.1, conf: 2 };
+  const stale = { t: fx(1), from_pct: 60, to_pct: 80, direction: "up", price: 69116, strategic_from: "transition", strategic_to: "transition", overlays_from: ["recovery_floor"], overlays_to: ["recovery_floor"], kind: "regime",
+    cause: { text: "блок «Цикл» вышел из неблагоприятной полосы: старший ценовой тренд −1 → 0", families: [], detectors: [], candidate_since: fx(-5) } };
+  const snaps = timeline([
+    { t: fx(0), state: "transition", ...cheap, floor: 2 },
+    { t: fx(1), state: "transition", ...cheap, floor: 3, log: [stale] },
   ]);
   const text = (await runBot(snaps)).sent[0].text;
-  assert.match(text, /80% → 45%/);
-  assert.match(text, /Что делать\n• Понижение — сразу\. Кандидат уже «защитный»: следующий шаг до 5% подтвердится ближайшим снимком/, text);
-  assert.match(text, /Причина: подтверждений осталось 1 из 3, нужно 2; сдвинулся показатель «Запас биткоинов на биржах» \(ухудшился\)/);
-  assert.doesNotMatch(text, /на одну ступень вверх|вернёт долю/, "о возврате вверх при идущем понижении — ни слова");
+  assert.match(text, /Пол восстановления: ступень 3 из 3, цель 80%/, text);
+  assert.match(text, /Причина: детектор разворота подтверждён третий фикс подряд/, text);
+  assert.doesNotMatch(text, /блок «Цикл»|кандидат с/, text);
+  // на том же фиксе сменился и режим: тогда запись журнала — настоящая причина смены режима, и
+  // названы обе: ступень пола — со снимка, режим — из журнала
+  const both = { ...stale, t: fx(1), from_pct: 40, to_pct: 60, strategic_from: "defensive", strategic_to: "transition",
+    cause: { text: "детектор «Восстановление»: наблюдение → подтверждён", families: [], detectors: [{ id: "recovery", from: "watch", to: "good" }], candidate_since: fx(0) } };
+  const moved = (await runBot(timeline([
+    { t: fx(0), state: "defensive", candidate: "transition", table: "defensive", pending: 1, since: fx(0), count: 1, ...cheap, floor: 1 },
+    { t: fx(1), state: "transition", candidate: "transition", table: "defensive", since: fx(0), count: 2, ...cheap, floor: 2, log: [both] },
+  ]))).sent[0].text;
+  assert.match(moved, /Пол восстановления: ступень 2 из 3, цель 60% поверх режима «переходный» \(ступень 45%\); режим при этом сменился с «защитный»/, moved);
+  assert.match(moved, /Причина: детектор разворота подтверждён второй фикс подряд[^\n]*\n• Причина: детектор «Восстановление»: наблюдение → подтверждён \(кандидат с 20\.08, 09:08 МСК\)/, moved);
 });
 
-// Удержание повышения 20 → 45: кандидат «переходный» ждёт 48 часов; источник ETF пять раз отдаёт
-// устаревший день, кандидат каждый раз падает и возвращается — отсчёт начинается заново (20–21.09).
-const HOLD_SINCE = at(-41.5 * 60);
+testAsync("сутки без фикса: пол возвращается на первую ступень, и причина названа", async () => {
+  const cheap = { mvrv: 19.5, deep: 22.1, conf: 2 };
+  const snaps = timeline([
+    { t: fx(0), state: "defensive", ...cheap, floor: 3 },
+    // 21.08 фикса не было; на фиксе 22.08 движок начал счёт заново
+    { t: fx(2), state: "defensive", ...cheap, floor: 1, reasons: ["missed_fix_reset"] },
+  ]);
+  const text = (await runBot(snaps)).sent[0].text;
+  assert.match(text, /Доля биткоина сокращена\n80% → 40%/, text);
+  assert.match(text, /Пол восстановления: ступень 1 из 3, цель 40% поверх режима «защитный» \(ступень 5%\)/, text);
+  assert.match(text, /Причина: сутки прошли без фикса — счёт фиксов подряд начат заново/, text);
+  assert.match(text, /Что отменит\n• Следующая ступень пола — на суточном фиксе \(ближайший — 23\.08, 09:00 МСК\), если детектор разворота останется подтверждённым/, text);
+  // у «переходного» режима первая ступень пола (40%) ниже ступени режима (45%): пол снят, хотя детектор подтверждён
+  const lifted = (await runBot(timeline([
+    { t: fx(0), state: "transition", ...cheap, floor: 3 },
+    { t: fx(2), state: "transition", ...cheap, floor: 1, reasons: ["missed_fix_reset"] },
+  ]))).sent[0].text;
+  assert.match(lifted, /80% → 45%[^]*Снят пол восстановления: цель вернулась к ступени режима «переходный» \(45%\)/, lifted);
+  assert.match(lifted, /Причина: сутки прошли без фикса — счёт фиксов подряд начат заново, а первая ступень пола ниже ступени режима/, lifted);
+  assert.match(lifted, /Что отменит\n• Пол поднимет цель до 60% не раньше чем на втором фиксе подряд с подтверждённым детектором разворота\n/, lifted);
+});
+
+/* ---- п. 3: кандидат и ожидание второго фикса ---- */
+
+testAsync("сообщение о снятии аварийного режима между фиксами предупреждает об идущем понижении", async () => {
+  // Между фиксами входы уходят от тех, на которых решал фикс: по данным прогона кандидат уже
+  // «защитный», но решит это только ближайший фикс. На прогоне фикса так не бывает — понижение
+  // принимается сразу.
+  const snaps = timeline([
+    { t: at(60), state: "emergency", candidate: "emergency", target: 0, override: "НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА" },
+    { t: at(75), state: "transition", live_candidate: "defensive", blocks: REGIME_BLOCKS.defensive, price: 64942 },
+  ]);
+  const text = (await runBot(snaps)).sent[0].text;
+  assert.match(text, /0% → 45%/);
+  assert.match(text, /Что делать\n• Повышение — траншами со следующей сессии; к ней цель может снизиться: по данным этого прогона кандидат уже «защитный» \(5%\), решение — на суточном фиксе \(ближайший — 21\.08, 09:00 МСК\)/, text);
+});
+
+// Ожидание повышения 20 → 45: кандидат «переходный» ждёт второго фикса подряд. Источник ETF через
+// день отдаёт вчерашний набор — на таком фиксе кандидат падает, и счёт начинается заново
+// (20–21.09, ещё при часовом удержании v1, пять таких срывов сдвинули повышение на 60 часов).
+const waiting = (d) => ({ t: fx(d), state: "deteriorating", candidate: "transition", pending: 1, since: fx(d), count: 1, etf: 0 });
+const dropped = (d) => ({ t: fx(d), state: "deteriorating", candidate: "deteriorating", since: fx(d), count: 1, etf: -0.5, etf_stale: true });
 const holdLine = [
-  { t: at(0), state: "deteriorating", candidate: "transition", since: HOLD_SINCE, hold_until: at(6.5 * 60), count: 167, etf: 0 },
-  // сброс 1: удержанию 41,5 часа
-  { t: at(15), state: "deteriorating", candidate: "deteriorating", count: 1, etf: -0.5, etf_stale: true },
-  { t: at(30), state: "deteriorating", candidate: "transition", since: at(30), hold_until: at(30 + 2880), count: 1, etf: 0 },
-  // сбросы 2–5: удержания по 15–30 минут
-  { t: at(60), state: "deteriorating", candidate: "deteriorating", count: 1, etf: -0.5, etf_stale: true },
-  { t: at(75), state: "deteriorating", candidate: "transition", since: at(75), hold_until: at(75 + 2880), count: 1, etf: 0 },
-  { t: at(90), state: "deteriorating", candidate: "deteriorating", count: 1, etf: -0.5, etf_stale: true },
-  { t: at(105), state: "deteriorating", candidate: "transition", since: at(105), hold_until: at(105 + 2880), count: 1, etf: 0 },
-  { t: at(120), state: "deteriorating", candidate: "deteriorating", count: 1, etf: -0.5, etf_stale: true },
-  { t: at(135), state: "deteriorating", candidate: "transition", since: at(135), hold_until: at(135 + 2880), count: 1, etf: 0 },
-  { t: at(150), state: "deteriorating", candidate: "deteriorating", count: 1, etf: -0.5, etf_stale: true },
-  { t: at(165), state: "deteriorating", candidate: "transition", since: at(165), hold_until: at(165 + 2880), count: 1, etf: 0 },
-  // принятие через 48 часов после последнего возврата кандидата
-  { t: at(165 + 2880), state: "transition", candidate: "transition", since: at(165), count: 193, etf: 0 },
+  waiting(0),
+  dropped(1), // срыв 1: кандидат не подтвердился на втором фиксе
+  waiting(2),
+  dropped(3), // срыв 2 — тот же эпизод: режим не менялся
+  waiting(4),
+  { t: fx(5), state: "transition", candidate: "transition", since: fx(4), count: 2, etf: 0 },
 ];
 
-testAsync("пять сбросов удержания подряд — одно короткое сообщение с причиной", async () => {
-  const r = await runBot(timeline(holdLine));
-  const holds = texts(r, "hold");
-  assert.equal(holds.length, 1, `о сбросах не молчим, но и не шлём пять раз: ${holds.length}`);
-  assert.match(holds[0], /^⚠️ Bitcoin · Повышение доли биткоина откладывается\nКандидат «переходный» \(ступень 45%\) продержался 41,5 ч из 48 и сорван 19\.08, 23:53 МСК\. Цель остаётся 20%/, holds[0]);
-  assert.match(holds[0], /Причина: по свежим данным режим снова «ухудшается»: спрос неблагоприятен \(−25 при пороге −20\); сдвинулся показатель «Потоки в биткоин-ETF в США» \(ухудшился, источник отдал устаревшие данные\)/);
-  assert.match(holds[0], /Отсчёт 48 часов начнётся заново, когда кандидат вернётся/);
-  const alloc = texts(r, "allocation");
-  assert.equal(alloc.length, 1, "само повышение приходит своим сообщением");
-  assert.match(alloc[0], /Удержание до этого срывалось 5 раз: первый кандидат на повышение появился 18\.08, 06:08 МСК/, alloc[0]);
+testAsync("ожидающее повышение: счёт «1 из 2» и срок решения названы", async () => {
+  // Цель сменилась (снят пол капитуляции) на том же фиксе, где появился кандидат на повышение.
+  const snaps = timeline([
+    { t: pre(0), state: "deteriorating", mvrv: 9, deep: 8 },
+    { t: fx(0), state: "deteriorating", candidate: "transition", pending: 1, since: fx(0), count: 1, mvrv: 12, deep: 11 },
+  ]);
+  const text = (await runBot(snaps)).sent[0].text;
+  assert.match(text, /40% → 20%/, text);
+  assert.match(text, /Кандидат «переходный» \(ступень 45%\) ждёт второго фикса подряд: 1 из 2, решение — на фиксе 21\.08, 09:00 МСК/, text);
+  // понижение по режиму при уже ждущем кандидате: он и есть «что отменит», дважды не печатается
+  const down = timeline([
+    { t: pre(0), state: "constructive" },
+    { t: fx(0), state: "deteriorating", candidate: "transition", pending: 1, since: fx(0), count: 1 },
+  ]);
+  const fell = (await runBot(down)).sent[0].text;
+  assert.match(fell, /Что отменит\n• Возврат уже ждёт второго фикса: кандидат «переходный» \(ступень 45%\), 1 из 2, решение — на фиксе 21\.08, 09:00 МСК/, fell);
+  assert.equal(fell.split("ждёт второго фикса").length, 2, `строка о ждущем кандидате — одна: ${fell}`);
 });
 
-testAsync("в причину сброса удержания идут только карточки среднесрочного контура", async () => {
-  // Разница такта сборщика (tick_diff) несёт и краткосрочные карточки: на кандидата среднесрочного
-  // режима они не влияют и причиной его смены быть не могут.
-  const tick_diff = { families: [
-    { block: "demand", family: "etf", id: "etf_regime", name: "US spot-ETF · режим потоков", from: 0, to: -0.5 },
-    { block: "leverage", family: "oi", id: "oi_quality", name: "Качество движения · цена × OI", from: 0, to: -1 },
-  ], detectors: [] };
-  const oi = card("oi_quality", { block: "leverage", family: "oi", strategic: false, tactical: true, value: "OI стабилен" });
-  const line = holdLine.slice(0, 2).map((o, k) => ({ ...o, metrics: [...btcSnap(o).metrics, oi], ...(k === 1 ? { extra: { tick_diff } } : {}) }));
+testAsync("срыв ожидания: «кандидат не подтвердился на втором фиксе» — одно сообщение на эпизод", async () => {
+  const r = await runBot(timeline(holdLine));
+  const holds = texts(r, "hold");
+  assert.equal(holds.length, 1, `о срыве не молчим, но и не шлём на каждый: ${holds.length}`);
+  assert.match(holds[0], /^⚠️ Bitcoin · Повышение доли биткоина откладывается\nКандидат «переходный» \(ступень 45%\) не подтвердился на втором фиксе 21\.08, 09:08 МСК\. Цель остаётся 20%/, holds[0]);
+  assert.match(holds[0], /Причина: на фиксе кандидат снова «ухудшается»: спрос неблагоприятен \(−25 при пороге −20\)/, holds[0]);
+  assert.match(holds[0], /Счёт начнётся заново, когда кандидат лучше режима появится на фиксе; повышение — на втором фиксе подряд/);
+  assert.doesNotMatch(holds[0], /48|продержался|удержани|снимк/, `часов удержания у набора v3 нет: ${holds[0]}`);
+  const alloc = texts(r, "allocation");
+  assert.equal(alloc.length, 1, "само повышение приходит своим сообщением");
+  assert.match(alloc[0], /Ожидание второго фикса до этого срывалось 2 раза: первый кандидат на повышение появился 20\.08, 09:08 МСК/, alloc[0]);
+  // между фиксами счёт не меняется: прогоны того же дня срывом не считаются и ничего не шлют
+  const sameDay = await runBot(timeline([waiting(0), { ...waiting(0), t: at(15 + 60) }, { ...waiting(0), t: at(15 + 600) }]));
+  assert.equal(sameDay.sent.length, 0, sameDay.sent.map((m) => m.title).join("; "));
+});
+
+testAsync("срыв ожидания: что сдвинулось между фиксами — из записи о рождении кандидата", async () => {
+  // Сборщик пишет запись о рождении кандидата на фиксе, где тот сменился, — с разницей от прошлого
+  // фикса по баллам, которые читает движок. Разница соседних снимков (tick_diff) несёт и
+  // краткосрочные карточки, и другой промежуток: в причину она не идёт.
+  const regime_birth = { strategic: { t: fx(1), candidate: "deteriorating", from_candidate: "transition", price: 68000,
+    blocks: { demand: { from: -18.75, to: -31.25, band_from: "neutral", band_to: "adverse" } },
+    families: [{ block: "demand", family: "etf", id: "etf_regime", name: "US spot-ETF · режим потоков", from: 0, to: -0.5 }], detectors: [], note: null } };
+  const tick_diff = { families: [{ block: "leverage", family: "oi", id: "oi_quality", name: "Качество движения · цена × OI", from: 0, to: -1 }], detectors: [] };
+  const line = [waiting(0), { ...dropped(1), extra: { regime_birth, tick_diff } }];
   const text = texts(await runBot(timeline(line)), "hold")[0];
-  assert.match(text, /сдвинулся показатель «Потоки в биткоин-ETF в США» \(0 → −0,5, источник отдал устаревшие данные\)\n/, text);
+  assert.match(text, /между фиксами сдвинулось: оценка спроса −18,8 → −31,3 \(ушла в неблагоприятную полосу\): «Потоки в биткоин-ETF в США» 0 → −0,5 \(источник отдал устаревшие данные\)\n/, text);
   assert.doesNotMatch(text, /Качество движения|oi_quality/, text);
 });
 
-testAsync("кандидат, мигнувший на четверть часа, сообщения о сбросе не даёт", async () => {
-  const r = await runBot(timeline([
-    { t: at(0), state: "defensive", candidate: "defensive" },
-    { t: at(15), state: "defensive", candidate: "deteriorating", since: at(15), hold_until: at(15 + 2880), count: 1 },
-    { t: at(30), state: "defensive", candidate: "defensive", count: 1 },
-  ]));
-  assert.equal(r.sent.length, 0, `кандидат прожил один снимок: ${r.sent.map((m) => m.title)}`);
+testAsync("срыв ожидания: новый кандидат и сутки без фикса", async () => {
+  // на втором фиксе кандидат другой — счёт идёт заново уже для него
+  const other = await runBot(timeline([waiting(0), { t: fx(1), state: "deteriorating", candidate: "unconfirmed_positive", pending: 1, since: fx(1), count: 1 }]));
+  assert.match(texts(other, "hold")[0], /Кандидат «переходный» \(ступень 45%\) не подтвердился на втором фиксе 21\.08, 09:08 МСК[^]*Счёт идёт заново для кандидата «положительный, спрос не подтвердил» \(ступень 95%\): 1 из 2, решение — на фиксе 22\.08, 09:00 МСК/, texts(other, "hold")[0]);
+  // 21.08 фикса не было: кандидат тот же, но счёт не вырос
+  const missed = await runBot(timeline([waiting(0), { ...waiting(2), since: fx(0), reasons: ["missed_fix_reset"] }]));
+  assert.match(texts(missed, "hold")[0], /Кандидат «переходный» \(ступень 45%\) ждал второго фикса, но сутки прошли без фикса\. Цель остаётся 20%[^]*Причина: сутки прошли без фикса — счёт фиксов подряд начат заново[^]*Счёт идёт заново для кандидата «переходный» \(ступень 45%\): 1 из 2, решение — на фиксе 23\.08, 09:00 МСК/, texts(missed, "hold")[0]);
+  // режим не менялся больше недели — о новом срыве сообщается снова
+  const long = await runBot(timeline([waiting(0), dropped(1), waiting(9), dropped(10)]));
+  assert.deepEqual(long.sent.map((m) => `${m.k}:${m.kind}`), ["1:hold", "3:hold"]);
 });
 
 /* ---- п. 4: ошибки кода ---- */
 
-const flap = (targets) => timeline(targets.map((target, k) => target === 80
-  ? { t: at(k * 1440), state: "deteriorating", candidate: "transition", table: "deteriorating", hold_until: at(k * 1440 + 2880), mvrv: 19.5, recovery: "good", conf: 2, target: 80, overlays: ["recovery_floor"] }
-  : { t: at(k * 1440), state: "deteriorating", candidate: "deteriorating", mvrv: 19.5, recovery: "watch", conf: 1 }));
+const flap = (targets) => timeline(targets.map((target, k) => target === 40
+  ? { t: fx(k), state: "deteriorating", candidate: "transition", table: "deteriorating", pending: 1, since: fx(k), count: 1, mvrv: 19.5, deep: 22.1, conf: 2, floor: 1 }
+  : { t: fx(k), state: "deteriorating", candidate: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1 }));
 
 testAsync("повтор той же смены доли в пределах недели не глушится", async () => {
-  // 20 → 80 → 20 → 80 → 20 с шагом в сутки: раньше доходили два сообщения из четырёх.
-  const r = await runBot(flap([20, 80, 20, 80, 20]));
-  assert.deepEqual(r.sent.map((m) => `${m.before}→${m.after}`), ["20%→80%", "80%→20%", "20%→80%", "80%→20%"]);
+  // 20 → 40 → 20 → 40 → 20 с шагом в сутки: раньше доходили два сообщения из четырёх.
+  const r = await runBot(flap([20, 40, 20, 40, 20]));
+  assert.deepEqual(r.sent.map((m) => `${m.before}→${m.after}`), ["20%→40%", "40%→20%", "20%→40%", "40%→20%"]);
 });
 
 testAsync("повторное срабатывание детектора в пределах недели не глушится", async () => {
@@ -1038,7 +1272,7 @@ testAsync("повторный прогон после сбоя смену дол
   // Идемпотентность: рассылка упала после отправки — база сравнения осталась прежней, индекс
   // доставленного уцелел. Следующий запуск (уже на следующем снимке) видит ту же смену заново
   // и обязан промолчать.
-  const snaps = flap([20, 80, 80]);
+  const snaps = flap([20, 40, 40]);
   const first = await runBot(snaps.slice(0, 2));
   assert.equal(first.sent.length, 1);
   const crashed = { ...(await runBot([snaps[0]])).state, sent: first.state.sent };
@@ -1056,7 +1290,7 @@ testAsync("пауза решения не стирает базу: 45 → пау
   assert.match(r.sent[0].text, /^🔔 Bitcoin · Решение о доле биткоина на паузе\nЦель не опубликована: не хватает данных — Потоки в биткоин-ETF в США; Объём стейблкоинов или Запас биткоинов на биржах/, r.sent[0].text);
   assert.match(r.sent[0].text, /Новых действий не предпринимать\. Последняя цель — 45%/);
   assert.match(r.sent[1].text, /Решение возобновлено: доля биткоина сокращена\n45% → 20%/, r.sent[1].text);
-  assert.match(r.sent[1].text, /Решение возобновлено после паузы \(с 19\.08, 23:53 МСК\)/);
+  assert.match(r.sent[1].text, /Решение возобновлено после паузы \(с 20\.08, 09:08 МСК\)/);
   assert.match(r.sent[1].text, /Что делать\n• Понижение — сразу/);
 });
 
@@ -1079,59 +1313,221 @@ testAsync("мигающая пауза не превращается в пару
 });
 
 testAsync("аварийный режим — отдельное сообщение, а не шаблон обычной смены", async () => {
+  // Аварийный режим — единственное, что набор v3 включает и снимает на любом прогоне, не дожидаясь фикса.
   const r = await runBot(timeline([
-    { t: at(0), state: "transition" },
-    { t: at(15), state: "emergency", candidate: "emergency", target: 0, overlays: ["emergency_override"], override: "НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА" },
-    { t: at(30), state: "transition", count: 1 },
+    { t: at(60), state: "transition" },
+    { t: at(75), state: "emergency", candidate: "emergency", target: 0, override: "НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА" },
+    { t: at(90), state: "transition", count: 1 },
   ]));
   assert.equal(r.sent.length, 2, `вход и выход, без отдельного сигнала о целостности: ${r.sent.map((m) => m.title)}`);
   const on = r.sent[0].text;
   assert.match(on, /^🔔 Bitcoin · Аварийный режим: доля биткоина обнулена\n45% → 0%/, on);
   assert.match(on, /Сработал аварийный переключатель: нарушение целостности рынка \(peg 6,20%, spread 350 б\.п\.\)\. Цель обнулена независимо от режима/);
   assert.match(on, /Что делать\n• Понижение — сразу: убрать риск и ждать нормализации/);
-  assert.match(on, /Что отменит\n• Аварийный режим снимается первым снимком без нарушения/);
+  assert.match(on, /Что отменит\n• Аварийный режим снимается первым снимком без нарушения; цель вернётся к решению суточного фикса/);
   assert.doesNotMatch(on, /устойчив|уводит часть позиции|хуже прежней/);
   assert.match(r.sent[1].text, /Аварийный режим снят: доля биткоина увеличена\n0% → 45%/, r.sent[1].text);
+  assert.match(r.sent[1].text, /Аварийный режим снят: цель вернулась к ступени режима «переходный» \(45%\)/, r.sent[1].text);
   assert.match(r.sent[1].text, /Аварийный режим вернётся первым же снимком с нарушением целостности рынка/);
+  // после аварии действует пол — цель задаёт он, а не ступень режима
+  const floor = await runBot(timeline([
+    { t: at(75), state: "emergency", candidate: "emergency", target: 0, override: "НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА" },
+    { t: at(90), state: "defensive", mvrv: 19.5, deep: 22.1, conf: 2, floor: 2 },
+  ]));
+  assert.match(floor.sent[0].text, /0% → 60%[^]*Аварийный режим снят: действует пол восстановления 60% поверх режима «защитный» \(ступень 5%\)/, floor.sent[0].text);
 });
 
-testAsync("пол капитуляции и потолок эйфории названы своими именами", async () => {
-  const cap = (await runBot(timeline([
-    { t: at(0), state: "defensive", mvrv: 11 },
-    { t: at(15), state: "defensive", mvrv: 10, target: 40, overlays: ["capitulation_floor"] },
-  ]))).sent[0].text;
+testAsync("пол капитуляции: включается только при согласии двух окон MVRV, оба числа в тексте", async () => {
+  const snaps = timeline([
+    { t: pre(0), state: "defensive", mvrv: 11, deep: 9 },
+    { t: fx(0), state: "defensive", mvrv: 9.2, deep: 8.1 },
+    // на следующем фиксе окна разошлись: за 4 года по-прежнему дёшево, по всей истории — уже нет
+    { t: fx(1), state: "defensive", mvrv: 8, deep: 12.4 },
+  ]);
+  // карточка MVRV на тех же фиксах даёт и свои сообщения о данных — здесь смотрим только долю
+  const r = { sent: (await runBot(snaps)).sent.filter((m) => m.kind === "allocation") };
+  assert.deepEqual(r.sent.map((m) => `${m.before}→${m.after}`), ["5%→40%", "40%→5%"]);
+  const cap = r.sent[0].text;
   assert.match(cap, /Включён пол капитуляции 40% поверх режима «защитный» \(ступень 5%\)/, cap);
-  assert.match(cap, /Причина: MVRV-перцентиль 11 → 10 — не выше 10/);
-  assert.match(cap, /Пол капитуляции снимается одним снимком, если MVRV-перцентиль поднимется выше 10 \(сейчас 10\)\. Цель вернётся к ступени режима — 5%/);
-  assert.doesNotMatch(cap, /лучше прежней/);
-  const euph = (await runBot(timeline([
-    { t: at(0), state: "constructive", mvrv: 94 },
-    { t: at(15), state: "constructive", mvrv: 95, target: 60, overlays: ["euphoria_safety_cap"] },
-  ]))).sent[0].text;
-  assert.match(euph, /Доля биткоина сокращена\n100% → 60%/);
-  assert.match(euph, /Включён потолок эйфории 60% при режиме «конструктивный» \(ступень 100%\)/, euph);
-  assert.match(euph, /Потолок снимается одним снимком, если MVRV-перцентиль опустится ниже 95 \(сейчас 95\)/);
-  assert.doesNotMatch(euph, /хуже прежней/);
+  assert.match(cap, /Причина: MVRV-перцентиль 11 → 9,2 за 4 года и 9 → 8,1 по всей истории — 10 или ниже в обоих окнах/, cap);
+  assert.match(cap, /Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше 10 в любом из двух окон \(сейчас 9,2 за 4 года и 8,1 по всей истории\)\. Цель вернётся к ступени режима — 5%/, cap);
+  assert.doesNotMatch(cap, /лучше прежней|одним снимком|эйфори/);
+  const off = r.sent[1].text;
+  assert.match(off, /Снят пол капитуляции: цель вернулась к ступени режима «защитный» \(5%\)/, off);
+  assert.match(off, /Причина: окна MVRV разошлись — по всей истории перцентиль 8,1 → 12,4, выше 10 \(за 4 года 8\)/, off);
+  assert.match(off, /Что отменит\n• Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль по всей истории тоже будет 10 или ниже \(сейчас 12,4; за 4 года — 8\)/, off);
+});
+
+testAsync("пол капитуляции: при расхождении окон не включается, а без окна всей истории решает одно", async () => {
+  // за 4 года — 6,9, по всей истории — 18,3 (как 20.11.2026): «дёшево» нет, цель — ступень режима
+  const split = await runBot(timeline([
+    { t: pre(0), state: "defensive", mvrv: 11, deep: 19 },
+    { t: fx(0), state: "defensive", mvrv: 6.9, deep: 18.3 },
+  ]));
+  assert.deepEqual(texts(split, "allocation"), [], "окна разошлись — пола нет, и сообщения о доле нет");
+  assert.equal(split.state.last_alloc.pct, 5);
+  // ряд всей истории короток или устарел — движок решает по одному окну, как набор v1
+  const levels = { valuation_levels: { levels: [{ key: "capitulation_floor", percentile: 10, price_usd: 63600 }] } };
+  const single = texts(await runBot(timeline([
+    { t: pre(0), state: "defensive", mvrv: 11, deep: null },
+    { t: fx(0), state: "defensive", mvrv: 10, deep: null, extra: levels },
+  ])), "allocation")[0];
+  assert.match(single, /Причина: MVRV-перцентиль 11 → 10 — 10 или ниже\n/, single);
+  assert.match(single, /Пол капитуляции снимается на суточном фиксе, если MVRV-перцентиль поднимется выше 10 \(сейчас 10; это цена ≈ \$63,6 тыс\.\)\. Цель вернётся к ступени режима — 5%/, single);
+  // снят по окну четырёх лет при двух окнах
+  const off = texts(await runBot(timeline([
+    { t: pre(0), state: "defensive", mvrv: 9.2, deep: 8.1 },
+    { t: fx(0), state: "defensive", mvrv: 11.9, deep: 8.4 },
+  ])), "allocation")[0];
+  assert.match(off, /Причина: MVRV-перцентиль за 4 года 9,2 → 11,9 — выше 10 \(по всей истории 8,4\)/, off);
+  assert.match(off, /Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль за 4 года тоже будет 10 или ниже \(сейчас 11,9; по всей истории — 8,4\)/, off);
 });
 
 testAsync("шаги цели, пропущенные между запусками, названы поимённо", async () => {
-  // 12.08: «80 → 45 → 5» за 15 минут. Бот, попавший только на крайние снимки, видел «80 → 5».
+  // Два фикса подряд: снят пол (60 → 45), затем режим упал до «защитного» (45 → 5). Бот, попавший
+  // только на крайние снимки, видел бы «60 → 5».
   const snaps = timeline([
-    { t: at(0), state: "transition", mvrv: 18, recovery: "good", conf: 2, target: 80, overlays: ["recovery_floor"] },
-    { t: at(15), state: "transition", candidate: "defensive", mvrv: 18, recovery: "watch", conf: 1, count: 1 },
-    { t: at(30), state: "defensive", candidate: "defensive", mvrv: 18, recovery: "watch", conf: 1, count: 2, since: at(15) },
+    { t: fx(0), state: "transition", mvrv: 18, deep: 20, conf: 2, floor: 2 },
+    { t: fx(1), state: "transition", mvrv: 18, deep: 20, conf: 1 },
+    { t: fx(2), state: "defensive", candidate: "defensive", mvrv: 18, deep: 20, conf: 1, count: 1, since: fx(2) },
   ]);
   const r = await runBot(snaps, { only: [0, 2] });
   assert.equal(r.sent.length, 1);
-  assert.match(r.sent[0].text, /80% → 5%/);
-  assert.match(r.sent[0].text, /Путь: 80% → 45% \(19\.08, 23:53 МСК\) → 5% \(20\.08, 00:08 МСК\)\n• 80% → 45% — снят пол восстановления\n• Режим «переходный» → «защитный» \(ступень 5%\), подтверждён вторым снимком подряд/, r.sent[0].text);
+  assert.match(r.sent[0].text, /60% → 5%/);
+  assert.match(r.sent[0].text, /Путь: 60% → 45% \(21\.08, 09:08 МСК\) → 5% \(22\.08, 09:08 МСК\)\n• 60% → 45% — снят пол восстановления\n• Режим «переходный» → «защитный» \(ступень 5%\), принят на суточном фиксе/, r.sent[0].text);
 });
 
 testAsync("смена, целиком уместившаяся между двумя запусками, оставляет след", async () => {
-  const r = await runBot(flap([20, 80, 20]), { only: [0, 2] });
-  assert.equal(r.sent.length, 1, "20 → 80 → 20 между запусками раньше не давало ничего");
-  assert.match(r.sent[0].text, /Доля биткоина менялась между запусками\n.*\n\nЧто за этим стоит\n• Путь: 20% → 80% \(20\.08, 23:38 МСК\) → 20% \(21\.08, 23:38 МСК\)/, r.sent[0].text);
+  const r = await runBot(flap([20, 40, 20]), { only: [0, 2] });
+  assert.equal(r.sent.length, 1, "20 → 40 → 20 между запусками раньше не давало ничего");
+  assert.match(r.sent[0].text, /Доля биткоина менялась между запусками\n.*\n\nЧто за этим стоит\n• Путь: 20% → 40% \(21\.08, 09:08 МСК\) → 20% \(22\.08, 09:08 МСК\)/, r.sent[0].text);
   assert.match(r.sent[0].text, /Действий не требуется: цель снова 20%/);
+});
+
+/* ---- шаг выпуска 2.15.0: смена набора боевых правил v1 → v3 ---- */
+
+// База сравнения на шаге выпуска — снимок прежней формы: набор v1, цель 40% с полом капитуляции
+// (MVRV-перцентиль за 4 года 6,9 — «не выше 10» по одному окну). Первый снимок нового сборщика:
+// набор v3, цель 5% — по всей истории перцентиль 18,3, окна расходятся, пола нет. Рынок за эти
+// четверть часа не менялся: цель изменило правило.
+const SWITCH_ROW = {
+  t: at(435), from_pct: 40, to_pct: 5, direction: "down", price: 61494, strategic_from: "defensive", strategic_to: "defensive", overlays_from: ["capitulation_floor"], overlays_to: [], kind: "overlay",
+  cause: { text: "смена боевых правил v1 → v3; пол капитуляции снят", families: [], detectors: [], candidate_since: null },
+  policy_switch: { from: "btc-decision-suite-v1", to: "btc-decision-suite-v3" },
+};
+// три прошлых снятия пола капитуляции при v1 — следующая смена наступала через часы
+const V1_ERA = [-9000, -6000, -3000].flatMap((min) => [
+  { t: at(min), from_pct: 5, to_pct: 40, direction: "up", price: 62000, strategic_from: "defensive", strategic_to: "defensive", overlays_from: [], overlays_to: ["capitulation_floor"], kind: "overlay", cause: { text: "пол капитуляции включён: перцентиль MVRV 11,7 → 7,8", families: [], detectors: [], candidate_since: null } },
+  { t: at(min + 200), from_pct: 40, to_pct: 5, direction: "down", price: 65000, strategic_from: "defensive", strategic_to: "defensive", overlays_from: ["capitulation_floor"], overlays_to: [], kind: "overlay", cause: { text: "пол капитуляции снят: перцентиль MVRV 9,2 → 11,9", families: [], detectors: [], candidate_since: null } },
+]).concat([{ t: at(-1000), from_pct: 5, to_pct: 40, direction: "up", price: 62436, strategic_from: "defensive", strategic_to: "defensive", overlays_from: [], overlays_to: ["capitulation_floor"], kind: "overlay", cause: { text: "пол капитуляции включён: перцентиль MVRV 11,7 → 7,8", families: [], detectors: [], candidate_since: null } }]);
+// Монитор панели на шаге выпуска здоров: хэш решения он сверяет с набором, который в решении
+// назван, — смена набора сама по себе паузой не становится.
+const HEALTHY = { operational_status: "healthy", operational_issues: [] };
+const releaseStep = (extra1 = {}) => timeline([
+  { form: "v1", t: at(420), state: "defensive", mvrv: 6.9, target: 40, overlays: ["capitulation_floor"], count: 776, since: at(-11000), price: 61539, extra: { monitoring: { target_change_log: V1_ERA, health: HEALTHY } } },
+  { t: at(435), state: "defensive", mvrv: 6.9, deep: 18.3, count: 1, price: 61494, extra: { monitoring: { target_change_log: [...V1_ERA, SWITCH_ROW], health: HEALTHY } }, ...extra1 },
+]);
+// Состояние, каким его оставил бот ДО выпуска: фактов набора v3 в нём нет, а факты набора v1 есть.
+function preReleaseState(state) {
+  const st = JSON.parse(JSON.stringify(state));
+  const eng = st.allocation.engine;
+  for (const k of ["suite", "supersedes", "fix_at", "next_fix_at", "pending", "floor_closes", "mvrv_deep", "cheap", "live"]) delete eng[k];
+  Object.assign(eng, { contract: true, cadence_min: 15, mvrv_score: 2, recovery_inputs: "оценка низкая · подтверждений 1/3", distribution: "calm" });
+  return st;
+}
+
+testAsync("шаг выпуска: цель изменили правила — названа смена правил, а не рынок", async () => {
+  const snaps = releaseStep();
+  const base = await runBot([snaps[0]]);
+  // и на состоянии, записанном прежней версией бота, и на состоянии от нынешней версии по снимку прежней формы
+  for (const state of [preReleaseState(base.state), base.state]) {
+    const r = await runBot([snaps[1]], { state });
+    assert.deepEqual(r.sent.map((m) => m.kind), ["allocation"], `одно сообщение, без паузы и без сорванного удержания: ${r.sent.map((m) => m.title)}`);
+    const text = r.sent[0].text;
+    assert.match(text, /^🔔 Bitcoin · Смена правил: доля биткоина сокращена\n40% → 5%\nBTC \$61 494\n/, text);
+    assert.match(text, /Снят пол капитуляции: цель вернулась к ступени режима «защитный» \(5%\)/, text);
+    assert.match(text, /Причина: смена боевых правил v1 → v3; пол капитуляции снят/, text);
+    assert.match(text, /По правилам v3 пол капитуляции включается, только когда MVRV-перцентиль 10 или ниже в обоих окнах; сейчас 6,9 за 4 года и 18,3 по всей истории/, text);
+    assert.match(text, /Что делать\n• Понижение — сразу/, text);
+    assert.match(text, /Что отменит\n• Пол капитуляции вернётся на суточном фиксе, когда MVRV-перцентиль по всей истории тоже будет 10 или ниже \(сейчас 18,3; за 4 года — 6,9\)/, text);
+    assert.match(text, /\n\nЦель изменили правила, а не рынок: решение принимается по набору v3 вместо v1\./, text);
+    assert.doesNotMatch(text, /выше 10/, `механика одного окна («MVRV-перцентиль … выше 10») шагу выпуска не приписывается: ${text}`);
+    assert.doesNotMatch(text, /вернётся, если|опустится до 10|одним снимком|снимком подряд|48 час|удержани/, `ни условий возврата, ни сроков набора v1: ${text}`);
+    assert.doesNotMatch(text, /снимался|включался|Такая же смена|наступала через/, `база частот времён v1 к шагу выпуска не относится: ${text}`);
+    assert.doesNotMatch(text, /на паузе|приостанов/, text);
+    assert.equal(r.state.allocation.engine.suite, "btc-decision-suite-v3", "в базе сравнения теперь набор v3");
+  }
+});
+
+testAsync("шаг выпуска без записи в журнале монитора: смена правил видна по самим снимкам", async () => {
+  const snaps = releaseStep({ extra: { monitoring: { health: HEALTHY } } });
+  // в собственном журнале бота — три таких же снятия пола времён v1 (журнала монитора в снимках нет)
+  const own = [-9000, -6000, -3000].flatMap((min) => [
+    { t: Date.parse(at(min)), from: 5, to: 40, overlays_from: [], overlays_to: ["capitulation_floor"] },
+    { t: Date.parse(at(min + 200)), from: 40, to: 5, overlays_from: ["capitulation_floor"], overlays_to: [] },
+  ]).concat([{ t: Date.parse(at(-1000)), from: 5, to: 40, overlays_from: [], overlays_to: ["capitulation_floor"] }]);
+  const base = await runBot([{ ...snaps[0], monitoring: {} }]);
+  const r = await runBot([snaps[1]], { state: { ...base.state, alloc_changes: own } });
+  const text = r.sent[0].text;
+  assert.match(text, /Смена правил: доля биткоина сокращена\n40% → 5%/, text);
+  assert.match(text, /Причина: смена боевых правил v1 → v3\n/, text);
+  assert.doesNotMatch(text, /выше 10|опустится до 10/, text);
+  assert.doesNotMatch(text, /Такая же смена|наступала через/, `база частот времён v1 к шагу выпуска не относится: ${text}`);
+  assert.deepEqual(r.state.alloc_changes.at(-1).policy_switch, { from: "btc-decision-suite-v1", to: "btc-decision-suite-v3" }, "шаг выпуска помечен и в собственном журнале бота");
+});
+
+testAsync("шаг выпуска: сорванное удержание v1 срывом ожидания не объявляется", async () => {
+  // Цель на шаге выпуска не изменилась (оба набора дают ступень режима), а в базе — кандидат на
+  // повышение, ждавший 48 часов по правилам v1. У набора v3 своё ожидание, в фиксах: сорванным
+  // удержанием это не называется.
+  const snaps = timeline([
+    { form: "v1", t: at(420), state: "deteriorating", candidate: "transition", since: at(420 - 30 * 60), hold_until: at(420 + 18 * 60), count: 120 },
+    { t: at(435), state: "deteriorating", candidate: "deteriorating", count: 1 },
+    { t: fx(1), state: "deteriorating", candidate: "deteriorating", count: 2 },
+  ]);
+  const base = await runBot([snaps[0]]);
+  for (const state of [preReleaseState(base.state), base.state]) {
+    const r = await runBot(snaps.slice(1), { state });
+    assert.deepEqual(r.sent.map((m) => m.title), [], "цель прежняя — сообщений нет");
+    assert.equal(r.state.hold_track.resets, 0, "счёт сорванных ожиданий набора v3 начинается с нуля");
+  }
+});
+
+testAsync("после шага выпуска база частот считается только по сменам нынешнего набора правил", async () => {
+  // Журнал монитора несёт три включения пола капитуляции времён v1 (снимались через три часа) и
+  // запись шага выпуска. Включение пола уже по правилам v3 с ними не сравнивается.
+  const on = { t: fx(1), from_pct: 5, to_pct: 40, direction: "up", price: 60000, strategic_from: "defensive", strategic_to: "defensive", overlays_from: [], overlays_to: ["capitulation_floor"], kind: "overlay", cause: { text: "пол капитуляции включён: перцентиль MVRV 11 → 9,2", families: [], detectors: [], candidate_since: null } };
+  const snaps = timeline([
+    { t: at(435), state: "defensive", mvrv: 6.9, deep: 18.3, log: [...V1_ERA, SWITCH_ROW] },
+    { t: fx(1), state: "defensive", mvrv: 6.5, deep: 9.4, log: [...V1_ERA, SWITCH_ROW, on] },
+  ]);
+  const text = (await runBot(snaps)).sent[0].text;
+  assert.match(text, /^🔔 Bitcoin · Доля биткоина увеличена\n5% → 40%/, text);
+  assert.match(text, /Причина: MVRV-перцентиль 6,9 → 6,5 за 4 года и 18,3 → 9,4 по всей истории — 10 или ниже в обоих окнах/, text);
+  assert.doesNotMatch(text, /включался|наступала через/, `смены времён v1 в базу частот не идут: ${text}`);
+});
+
+testAsync("бот пропустил прогон выпуска: поздняя смена цели по новым правилам сменой правил не называется", async () => {
+  // В базе — состояние до выпуска; первый снимок, который видит бот, уже несёт обычную запись
+  // журнала о шаге цели на фиксе (без пометки смены правил).
+  const base = await runBot([btcSnapV1({ t: pre(0), state: "deteriorating" })]);
+  const r = await runBot([upgrade({ log: UP_LOG })[1]], { state: preReleaseState(base.state) });
+  assert.match(r.sent[0].text, /^🔔 Bitcoin · Доля биткоина увеличена\n20% → 45%/, r.sent[0].text);
+  assert.match(r.sent[0].text, /Причина: блок «Спрос» вышел из неблагоприятной полосы/, r.sent[0].text);
+  assert.doesNotMatch(r.sent[0].text, /Смена правил|смена боевых правил/, r.sent[0].text);
+});
+
+test("снимок прежней формы читается без ошибок, и правил ему бот не приписывает", () => {
+  for (const o of [{ state: "defensive", mvrv: 6.9, target: 40, overlays: ["capitulation_floor"] }, { state: "deteriorating", candidate: "transition", hold_until: at(600) }, { state: "insufficient", target: null }, { state: "emergency", target: 0, overlays: ["emergency_override"], override: "X" }]) {
+    const panel = mute(() => fromSnapshotJSON(btcSnapV1(o)));
+    const eng = panel.allocation.engine;
+    assert.equal(eng.suite, "btc-decision-suite-v1");
+    assert.equal(eng.contract, false, "контракт набора v3 снимок прежней формы не объявляет");
+    assert.equal(engineAgrees(eng), false);
+    assert.equal(eng.pending, null);
+    assert.doesNotThrow(() => mute(() => llmInput([], panel)));
+    assert.doesNotThrow(() => mute(() => snapshotState(panel)));
+  }
 });
 
 /* ---- карточки на отказавших входах, живой фид, обновление в ту же дату, цепочка ---- */
@@ -1527,7 +1923,7 @@ testAsync("предупреждение о данных: одно сообщен
     warnSnap(120, []), warnSnap(120 + 5 * 60, []), warnSnap(120 + 6 * 60, []), warnSnap(120 + 7 * 60, []),
   ]));
   assert.deepEqual(r.sent.map((m) => `${m.k}:${m.title}`), ["2:Предупреждение о данных", "10:Предупреждение о данных снято"], "ни повтора при смене числа, ни пары сообщений на мигание");
-  assert.match(r.sent[0].text, /^ℹ️ Bitcoin · Предупреждение о данных\n• Потоки бирж расходятся с остатком на 61,7 тыс\. BTC за 30 дней — затронуты: «Запас биткоинов на биржах», «Приток биткоинов на биржи за месяц»\n\nОткрыть панель · 20\.08, 00:08 МСК$/, r.sent[0].text);
+  assert.match(r.sent[0].text, /^ℹ️ Bitcoin · Предупреждение о данных\n• Потоки бирж расходятся с остатком на 61,7 тыс\. BTC за 30 дней — затронуты: «Запас биткоинов на биржах», «Приток биткоинов на биржи за месяц»\n\nОткрыть панель · 20\.08, 09:23 МСК$/, r.sent[0].text);
 });
 
 testAsync("предупреждение, висящее неделями, не повторяется", async () => {
@@ -1553,11 +1949,13 @@ testAsync("во входе модели о смене доли есть прич
   const snaps = floorOn();
   const r = await runBot(snaps);
   const input = llmInput([r.sent[0].ev], mute(() => fromSnapshotJSON(snaps[1])));
-  for (const needle of ["цена биткоина $69 116", "снимок 19.08, 23:53 МСК", "доля биткоина 80%", "режим «ухудшается» (ступень 20%)", "кандидат «переходный», на удержании до 21.08, 23:53 МСК", "оверлей: пол восстановления",
-    "детектор разворота подтверждён", "Повышение — траншами со следующей сессии", "Пол снимается одним снимком"]) {
+  for (const needle of ["цена биткоина $69 116", "снимок 20.08, 09:08 МСК", "доля биткоина 40%", "режим «ухудшается» (ступень 20%)", "кандидат «переходный» ждёт второго фикса подряд: 1 из 2, решение — на фиксе 21.08, 09:00 МСК", "оверлей: пол восстановления, ступень 1 из 3",
+    "решение принимается раз в сутки, на фиксе: последний — 20.08, 09:08 МСК, следующий — 21.08, 09:00 МСК", "MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории",
+    "детектор разворота подтверждён", "Повышение — траншами со следующей сессии", "Пол снимается на суточном фиксе"]) {
     assert.ok(input.replace(/ /g, " ").includes(needle), `во входе нет «${needle}»`);
   }
   assert.doesNotMatch(input, /"stability"|Шаткое|Умеренно устойчивое/, "класса устойчивости, который модель пересказывала бы, больше нет");
+  assert.doesNotMatch(input, /удержани|48 час|снимком подряд|одним снимком/, "решение описано в фиксах, а не в часах и снимках набора v1");
 });
 
 testAsync("разбор модели о смене доли: честный идёт в сообщение, с посторонним числом — заменяется шаблоном", async () => {
@@ -1567,11 +1965,11 @@ testAsync("разбор модели о смене доли: честный ид
     await quiet(async () => { r = await withFetch(reply(txt), () => runBot(upgrade({ log: UP_LOG }))); });
     return r.sent[0].text;
   };
-  const honest = await send("===0===\nЦель поднята с 20 до 45 %: режим выдержал удержание, цена биткоина — 86 198 долларов.");
-  assert.match(honest, /💬 Цель поднята с 20 до 45%: режим выдержал удержание, цена биткоина — 86 198 долларов\./, `типографика разбора — та же, что у сообщения: ${honest}`);
+  const honest = await send("===0===\nЦель поднята с 20 до 45 %: режим подтвердился на втором фиксе, цена биткоина — 86 198 долларов.");
+  assert.match(honest, /💬 Цель поднята с 20 до 45%: режим подтвердился на втором фиксе, цена биткоина — 86 198 долларов\./, `типографика разбора — та же, что у сообщения: ${honest}`);
   const invented = await send("===0===\nЦель поднята до 45 %, а ставка ФРС при этом остаётся на уровне 5,25 %.");
   assert.doesNotMatch(invented, /5,25/, "числа, которого модели не давали, в сообщении быть не должно");
-  assert.match(invented, /\n\nРежим улучшился и выдержал удержание/, "вместо отброшенного разбора — шаблон из записи решения");
+  assert.match(invented, /\n\nРежим улучшился и подтвердился: повышение принимается только на втором суточном фиксе подряд/, "вместо отброшенного разбора — шаблон из записи решения");
   assert.doesNotMatch(invented, /💬/, "шаблон не выдаёт себя за ИИ-разбор: «💬» — только у ответа модели");
 });
 
@@ -1611,7 +2009,7 @@ testAsync("база частот — по сменам того же рода: �
     logRow(-10000, 45, 20, [], [], ["transition", "deteriorating"]),
     logRow(-5000, 20, 80, [], F), logRow(-5000 + 7 * 60, 80, 20, F, []),
   ];
-  const now = logRow(15, 20, 80, [], F);
+  const now = logRow(15, 20, 40, [], F);
   const text = (await runBot(floorOn({ log: [...past, now] }))).sent[0].text;
   assert.match(text, /Пол восстановления включался 3 раза: следующая смена цели наступала через 48 ч, 4 сут, 7 ч/, text);
   // двух случаев мало — строка не печатается
@@ -1637,8 +2035,8 @@ testAsync("незнакомый контракт движка: чужое пра
   const text = (await runBot(upgrade({ log: UP_LOG, model_id: "btc-model-policy-v2" }))).sent[0].text;
   assert.match(text, /20% → 45%/);
   assert.match(text, /Причина: блок «Спрос» вышел/, "причина из журнала от правил бота не зависит");
-  assert.doesNotMatch(text, /Что делать|если оценка спроса/, `ни правила исполнения, ни порога из замороженной v1: ${text}`);
-  assert.match(text, /Что отменит\n• Понижение принимается вторым снимком подряд/);
+  assert.doesNotMatch(text, /Что делать|если оценка спроса|принят на втором фиксе/, `ни правила исполнения, ни порога, ни счёта фиксов набора v3: ${text}`);
+  assert.match(text, /Что отменит\n• Понижение принимается на суточном фиксе \(ближайший — 21\.08, 09:00 МСК\)/);
 });
 
 testAsync("упавшие тесты не выключают сообщения о доле", async () => {
@@ -1646,7 +2044,7 @@ testAsync("упавшие тесты не выключают сообщения 
   const tga = (v, day) => card("tga_daily", { block: "macro", family: "liquidity", vote: false, value: `$${v} млрд`, value_num: v, score: null, observed_at: `2026-08-${day}T00:00:00.000Z`, source: "fiscaldata" });
   const base = [card("mvrv_cycle", { block: "cycle", family: "valuation", value: "42-й перцентиль 4 лет", value_num: 42 })];
   const snaps = timeline([
-    { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), metrics: [...base, tga(818, 17)] },
+    { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, pending: 1, metrics: [...base, tga(818, 17)] },
     { t: at(15), state: "transition", since: SINCE, metrics: [...base, tga(822, 18)] },
     { t: at(30), state: "transition", since: SINCE, metrics: [...base, tga(871, 19)] },
   ]);
@@ -1699,10 +2097,10 @@ const NEW_FORM = (birthT) => ({
 const OLD_LOG = [logRow(-9000, 20, 80, [], ["recovery_floor"]), logRow(-8500, 80, 20, ["recovery_floor"], [])];
 
 testAsync("первый запуск после выкладки: ни ложного сообщения, ни пропуска настоящей смены", async () => {
-  const old = timeline([{ t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), count: 192, price: 86120 }])[0];
+  const old = timeline([{ t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, pending: 1, count: 192, price: 86120 }])[0];
   const state = legacyState(old);
   // 1) цель не менялась: снимок новой формы приносит журнал, запись о рождении, уровни и предупреждение
-  const same = timeline([{ t: at(0) }, { t: at(15), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), count: 193, log: OLD_LOG, extra: NEW_FORM(SINCE) }])[1];
+  const same = timeline([{ t: at(0) }, { t: at(15), state: "deteriorating", candidate: "transition", since: SINCE, pending: 1, count: 193, log: OLD_LOG, extra: NEW_FORM(SINCE) }])[1];
   const quietRun = await runBot([same], { state });
   assert.deepEqual(quietRun.sent.map((m) => m.title), [], "новые поля сами по себе событием не являются");
   assert.equal(quietRun.state.version, 2, "состояние переписано в новой форме");
@@ -1714,7 +2112,7 @@ testAsync("первый запуск после выкладки: ни ложн�
   assert.match(r.sent[0].text, /Причина: блок «Спрос» вышел из неблагоприятной полосы/, r.sent[0].text);
   assert.doesNotMatch(r.sent[0].text, /Путь|80 %/, "старые записи журнала в сообщение не попадают");
   // 3) предупреждение, висящее в снимке новой формы, объявляется один раз — со второго запуска
-  const next = timeline([{ t: at(0) }, { t: at(15) }, { t: at(30), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), count: 194, log: OLD_LOG, extra: NEW_FORM(SINCE) }])[2];
+  const next = timeline([{ t: at(0) }, { t: at(15) }, { t: at(30), state: "deteriorating", candidate: "transition", since: SINCE, pending: 1, count: 194, log: OLD_LOG, extra: NEW_FORM(SINCE) }])[2];
   const second = await runBot([next], { state: quietRun.state });
   assert.deepEqual(second.sent.map((m) => m.title), ["Предупреждение о данных"]);
 });
@@ -1730,7 +2128,7 @@ testAsync("первый запуск на состоянии прежнего ф
   const stale = [flow("etf_1d", "+433 млн $", 433e6, 14), flow("etf_5d", "+6 млн $", 6.1e6, 14), flow("etf_20d", "+2 млрд $", 1.8e9, 14)];
   const fresh = [flow("etf_1d", "+999 млн $", 999e6, 17), flow("etf_5d", "+845 млн $", 845e6, 17), flow("etf_20d", "+2 млрд $", 2.45e9, 17)];
   const snaps = timeline([
-    { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), metrics: [mvrv, ...stale, tga(818, 17)] },
+    { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, pending: 1, metrics: [mvrv, ...stale, tga(818, 17)] },
     { t: at(15), state: "transition", since: SINCE, metrics: [mvrv, ...fresh, tga(822, 18)] },
     { t: at(30), state: "transition", since: SINCE, metrics: [mvrv, ...fresh, tga(871, 19)] },
   ]);
@@ -1776,8 +2174,8 @@ testAsync("выкладка, попавшая на паузу решения, н
 
 testAsync("потеря состояния — молчаливая фиксация базы", async () => {
   const snaps = timeline([
-    { t: at(0), state: "transition", target: 80, overlays: ["recovery_floor"], mvrv: 19, recovery: "good", conf: 2, extra: { data_warnings: WARN } },
-    { t: at(15), state: "transition", target: 80, overlays: ["recovery_floor"], mvrv: 19, recovery: "good", conf: 2, extra: { data_warnings: WARN } },
+    { t: at(0), state: "transition", floor: 3, mvrv: 19, conf: 2, extra: { data_warnings: WARN } },
+    { t: at(15), state: "transition", floor: 3, mvrv: 19, conf: 2, extra: { data_warnings: WARN } },
   ]);
   const r = await runBot(snaps, { state: null });
   assert.equal(r.sent.length, 0, `без состояния бот ничего не знает о прошлом и не шлёт ни доли, ни предупреждений: ${r.sent.map((m) => m.title)}`);
@@ -1788,7 +2186,7 @@ testAsync("снимок старше базы сравнения ничего н
   // Выкладка со снимком-заглушкой или revert коммита снимка: в ветке на один прогон оказался прежний
   // файл. Сравнение с ним дало бы «45 → 20», а следующий настоящий снимок — «20 → 45» обратно.
   const snaps = timeline([
-    { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, hold_until: at(15), count: 192 },
+    { t: at(0), state: "deteriorating", candidate: "transition", since: SINCE, pending: 1, count: 192 },
     { t: at(15), state: "transition", since: SINCE, count: 193 },
     { t: at(30), state: "transition", since: SINCE, count: 194 },
   ]);
@@ -1820,7 +2218,7 @@ testAsync("запись журнала о старте наблюдения ша
   // 3) журнал начат заново в такте настоящей смены — смена не теряется, идёт запасной веткой
   const moved = (await runBot(upgrade({ log: [startRow(15, 45, "transition")] }))).sent;
   assert.deepEqual(moved.map((m) => `${m.before}→${m.after}`), ["20%→45%"]);
-  assert.match(moved[0].text, /Причина: смена режима, принятая после удержания/, moved[0].text);
+  assert.match(moved[0].text, /Причина: смена режима, подтверждённая на втором фиксе подряд/, moved[0].text);
 });
 
 testAsync("запись о старте наблюдения не идёт в базу частот", async () => {
@@ -1831,38 +2229,44 @@ testAsync("запись о старте наблюдения не идёт в б
     logRow(-20000, 5, 80, [], F, ["defensive", "defensive"]), logRow(-20000 + 95 * 60, 80, 45, F, [], ["transition", "transition"]),
     logRow(-5000, 20, 80, [], F), logRow(-5000 + 7 * 60, 80, 20, F, []),
   ];
-  const text = (await runBot(floorOn({ log: [...past, logRow(15, 20, 80, [], F)] }))).sent[0].text;
+  const text = (await runBot(floorOn({ log: [...past, logRow(15, 20, 40, [], F)] }))).sent[0].text;
   assert.match(text, /Пол восстановления включался 3 раза: следующая смена цели наступала через 48 ч, 4 сут, 7 ч/, `старт наблюдения — не смена цели: ${text}`);
 });
 
 testAsync("смена одного оверлея объясняется со снимка и при журнале монитора", async () => {
-  // Причина оверлея лежит в том же снимке: детектор называет её числами. Запись журнала о том же
-  // шаге («пол восстановления включён: …») повторила бы строку о поле и не назвала бы ни порога, ни счёта.
-  const row = { ...logRow(15, 20, 80, [], ["recovery_floor"]), cause: { text: "пол восстановления включён: старший ценовой тренд −1 → 2", families: [{ block: "cycle", family: "trend", id: "trend_regime", name: "Старший ценовой тренд", from: -1, to: 2 }], detectors: [{ id: "recovery", from: "watch", to: "good" }], candidate_since: null } };
-  const tick_diff = { families: [{ block: "cycle", family: "trend", id: "trend_regime", name: "Старший ценовой тренд", from: -1, to: 2 }, { block: "leverage", family: "oi", id: "oi_quality", name: "Качество движения", from: 0, to: 1 }], detectors: [{ id: "recovery", from: "watch", to: "good" }] };
-  const text = (await runBot(floorOn({ log: [row], extra: { tick_diff } }))).sent[0].text;
-  assert.match(text, /Причина: детектор разворота подтверждён — MVRV-перцентиль 19,5 \(ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, text);
-  assert.doesNotMatch(text, /Причина: пол восстановления включён|Качество движения/, "ни повтора строки о поле, ни карточки, не входящей в детектор");
-  // сборщик разницу такта не отдал (расчёт отказал) — сдвинувшийся вход берётся из записи журнала
-  const noTick = (await runBot(floorOn({ log: [row] }))).sent[0].text;
-  assert.match(noTick, /подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, noTick);
+  // Причина оверлея лежит в записи решения того же снимка: она называется числами. Запись журнала
+  // о том же шаге («пол восстановления включён: …») повторила бы строку о поле и не назвала бы ни
+  // порога, ни счёта. Из журнала берётся только то, чего в снимке нет: какой вход сдвинулся между
+  // двумя ФИКСАМИ. Разница соседних снимков (tick_diff) для решения на фиксе не годится.
+  const tick_diff = { families: [{ block: "cycle", family: "trend", id: "trend_regime", name: "Старший ценовой тренд", from: 0, to: 2 }, { block: "leverage", family: "oi", id: "oi_quality", name: "Качество движения", from: 0, to: 1 }], detectors: [{ id: "recovery", from: "watch", to: "good" }] };
+  // в записи журнала рядом с ногой детектора может стоять и посторонняя семья — причиной пола она не называется
+  const mixed = { ...FLOOR_ROW, cause: { ...FLOOR_ROW.cause, families: [...FLOOR_ROW.cause.families, { block: "demand", family: "institutional", id: "institutional_quality", name: "Качество институционального спроса", from: -1, to: 0 }] } };
+  const text = (await runBot(floorOn({ log: [mixed], extra: { tick_diff } }))).sent[0].text;
+  assert.match(text, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)\n/, text);
+  assert.doesNotMatch(text, /Причина: пол восстановления включён|Качество движения|0 → \+2|Позиции фондов/, "ни повтора строки о поле, ни карточки вне детектора, ни разницы соседних снимков вместо разницы фиксов");
+  assert.match(text, /Открыть панель · 20\.08, 09:08 МСК$/, "в подвале — время самого шага цели");
+  // журнала нет — сдвинувшийся вход не называется вовсе
+  const noLog = (await runBot(floorOn({ extra: { tick_diff } }))).sent[0].text;
+  assert.match(noLog, /подтверждений 2 из 3\n/, noLog);
+  assert.doesNotMatch(noLog, /сдвинулся показатель/, noLog);
   // тот же шаг, пропущенный между запусками: снимка смены у бота нет — причина берётся из журнала
+  const row = { ...FLOOR_ROW, price: 65000 };
   const later = timeline([
-    { t: at(0), state: "deteriorating", candidate: "deteriorating", mvrv: 19.5, recovery: "watch", conf: 1 },
-    { t: at(15), state: "deteriorating", candidate: "deteriorating", mvrv: 19.5, recovery: "good", conf: 2, trend: 2, target: 80, overlays: ["recovery_floor"] },
-    { t: at(30), state: "deteriorating", candidate: "deteriorating", mvrv: 19.5, recovery: "good", conf: 2, trend: 2, target: 80, overlays: ["recovery_floor"], log: [row] },
+    { t: pre(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 1 },
+    { t: fx(0), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1 },
+    { t: at(30), state: "deteriorating", mvrv: 19.5, deep: 22.1, conf: 2, trend: 2, floor: 1, log: [row] },
   ]);
   const skipped = (await runBot(later, { only: [0, 2] })).sent[0].text;
-  assert.match(skipped, /20% → 80%\nBTC \$65 000\n/, skipped);
-  assert.match(skipped, /Открыть панель · 19\.08, 23:53 МСК$/, "в подвале — время самого шага цели, а не прогона");
+  assert.match(skipped, /20% → 40%\nBTC \$65 000\n/, skipped);
+  assert.match(skipped, /Открыть панель · 20\.08, 09:08 МСК$/, "в подвале — время самого шага цели, а не прогона");
   assert.match(skipped, /Причина: пол восстановления включён: старший ценовой тренд −1 → 2/, skipped);
   // журнал, засеянный до правки монитора 13.10.2026, несёт прежнее имя оверлея — запись читается так же
   const seeded = { ...row, cause: { ...row.cause, text: "пол recovery включён: старший ценовой тренд −1 → 2" } };
   const old = (await runBot(later.map((x, k) => (k === 2 ? { ...x, monitoring: { target_change_log: [seeded] } } : x)), { only: [0, 2] })).sent[0].text;
-  assert.match(old, /20% → 80%\nBTC \$65 000\n/, old);
+  assert.match(old, /20% → 40%\nBTC \$65 000\n/, old);
   assert.match(old, /Причина: пол recovery включён: старший ценовой тренд −1 → 2/, old);
   const oldLive = (await runBot(floorOn({ log: [seeded] }))).sent[0].text;
-  assert.match(oldLive, /Причина: детектор разворота подтверждён — MVRV-перцентиль 19,5 \(ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, oldLive);
+  assert.match(oldLive, /Причина: детектор разворота подтверждён на фиксе — MVRV-перцентиль 19,5 за 4 года и 22,1 по всей истории \(оба ниже 25\), подтверждений 2 из 3; сдвинулся показатель «Тренд цены биткоина» \(−1 → \+2\)/, oldLive);
 });
 
 testAsync("причина журнала, повторяющая сам переход, причиной не считается", async () => {
@@ -1871,8 +2275,8 @@ testAsync("причина журнала, повторяющая сам пере
   const bare = [{ ...UP_LOG[0], cause: { text: "режим «ухудшается» → «переходный»", families: [], detectors: [], candidate_since: SINCE } }];
   const text = (await runBot(upgrade({ log: bare }))).sent[0].text;
   assert.doesNotMatch(text, /Причина: режим «ухудшается»/, text);
-  assert.match(text, /Режим «ухудшается» → «переходный» \(ступень 45%\), принят после 48 часов удержания/, "срок удержания читается из той же записи журнала");
-  assert.match(text, /Причина: смена режима, принятая после удержания\n• Сейчас: неблагоприятных направлений нет/, text);
+  assert.match(text, /Режим «ухудшается» → «переходный» \(ступень 45%\), принят на втором фиксе подряд/, "фикс, на котором кандидат появился, читается из той же записи журнала");
+  assert.match(text, /Причина: смена режима, подтверждённая на втором фиксе подряд\n• Сейчас: неблагоприятных направлений нет/, text);
   // причина оверлея в той же записи — настоящая, и вместе с переходом печатается целиком
   const both = [{ ...UP_LOG[0], kind: "both", cause: { text: "пол восстановления снят: биржевое предложение BTC 0 → −1,5; режим «ухудшается» → «переходный»", families: [], detectors: [], candidate_since: SINCE } }];
   assert.match((await runBot(upgrade({ log: both }))).sent[0].text, /Причина: пол восстановления снят: биржевое предложение BTC 0 → −1,5; режим «ухудшается» → «переходный»/);
@@ -1899,11 +2303,11 @@ testAsync("негодные значения необязательных пол
     snaps[1].sources = { etf: { state: "ok", source: "The Block", legs: [null, { name: null, state: 7 }, "x"] } };
     const r = await runBot(snaps);
     assert.deepEqual(r.sent.map((m) => `${m.before}→${m.after}`), ["20%→45%"], "смена доли приходит и при мусоре в соседних полях");
-    assert.match(r.sent[0].text, /Режим «ухудшается» → «переходный» \(ступень 45%\), принят после 48 часов удержания\n• Причина: смена режима, принятая после удержания/, r.sent[0].text);
+    assert.match(r.sent[0].text, /Режим «ухудшается» → «переходный» \(ступень 45%\), принят на втором фиксе подряд\n• Причина: смена режима, подтверждённая на втором фиксе подряд/, r.sent[0].text);
   }
   // пол на мусорных уровнях оценки: строка об отмене остаётся, цена порога не выдумывается
   const floor = (await runBot(floorOn({ extra: nested }))).sent[0].text;
-  assert.match(floor, /MVRV-перцентиль дойдёт до 25 \(сейчас 19,5\)/, floor);
+  assert.match(floor, /MVRV-перцентиль дойдёт до 25 в любом из двух окон \(сейчас 19,5 за 4 года и 22,1 по всей истории\)/, floor);
   // из четырёх записей предупреждений годна одна — у неё есть пара «источник:код»
   const warned = await runBot(timeline([warnSnap(0, []), warnSnap(15, nested.data_warnings), warnSnap(30, nested.data_warnings)]));
   assert.deepEqual(warned.sent.map((m) => m.text.replace(/\n\nОткрыть панель · .*$/, "")), ["ℹ️ Bitcoin · Предупреждение о данных\n• etf: redundancy_lost"]);
@@ -2358,7 +2762,7 @@ const mskDayOfSnap = (snap) => new Date(Date.parse(snap.generated_at) + 90e3 + 3
 testAsync("расход разбора копится в состоянии рассылки (llm_spend)", async () => {
   const snaps = upgrade({ log: UP_LOG });
   let r;
-  await quiet(async () => { r = await withFetch(reply("===0===\nЦель поднята с 20 до 45 %: режим выдержал удержание."), () => runBot(snaps)); });
+  await quiet(async () => { r = await withFetch(reply("===0===\nЦель поднята с 20 до 45 %: режим подтвердился на втором фиксе."), () => runBot(snaps)); });
   assert.equal(r.sent.length, 1);
   // 1200 входных × $2 + 800 выходных × $10 за миллион — сутки по Москве, как у снимка
   assert.deepEqual(r.state.llm_spend, { day: mskDayOfSnap(snaps[1]), usd: 0.0104 });
@@ -2373,7 +2777,7 @@ testAsync("потолок расходов исчерпан — main() не де
   await quiet(async () => { r = await withFetch(impl, () => runBot(snaps, { state, only: [1] })); });
   assert.equal(seen.length, 0, "после исчерпания потолка в сеть не уходит ни одного запроса");
   assert.equal(r.sent.length, 1, "сообщение о доле от потолка не зависит");
-  assert.match(r.sent[0].text, /\n\nРежим улучшился и выдержал удержание/, "вместо разбора — шаблон из записи решения");
+  assert.match(r.sent[0].text, /\n\nРежим улучшился и подтвердился: повышение принимается только на втором суточном фиксе подряд/, "вместо разбора — шаблон из записи решения");
   assert.doesNotMatch(r.sent[0].text, /💬/, "шаблон — без знака ИИ-разбора");
   assert.deepEqual(r.state.llm_spend, { day: mskDayOfSnap(snaps[1]), usd: 5 }, "расход не меняется");
 });
@@ -2499,7 +2903,7 @@ testAsync("main(): учёт переживает прогоны в состоя�
   // учёт прошлой недели в состоянии: первый же прогон новой недели отправляет её строку
   const state = { ...base.state, llm_week: { cur: { week: "2000-W01", asked: 3, shown: 2, cut: 1, rejected: { "числа": 1 }, failed: {}, usd: 0.05 } } };
   let r;
-  await quiet(async () => { r = await withFetch(reply("===0===\nЦель поднята с 20 до 45 %: режим выдержал удержание."), () => runBot(snaps, { state, only: [1], sendOps: async (t) => (sent.push(t), true) })); });
+  await quiet(async () => { r = await withFetch(reply("===0===\nЦель поднята с 20 до 45 %: режим подтвердился на втором фиксе."), () => runBot(snaps, { state, only: [1], sendOps: async (t) => (sent.push(t), true) })); });
   assert.equal(sent.length, 1, "строка за прошлую неделю ушла один раз");
   assert.match(sent[0], /^📊 838 · ИИ-разборы за .*: показано 2 из 3; отбраковано 1 \(числа 1\); вырезано фраз 1; потрачено \$0,05$/);
   assert.equal(r.state.llm_week.report, undefined, "ушедшая строка снята с очереди");
