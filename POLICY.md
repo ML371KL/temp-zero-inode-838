@@ -41,6 +41,13 @@ assembly. The published `regime`, `regime_meta.strategic` and `decision` describ
 `live_inputs` is what the live rule reads on the current snapshot, `regime_meta.strategic.fix` is the
 same at the last fix. Metric cards, blocks and detectors keep showing the scores of the v1 method.
 
+Release 2.15.1 added three descriptive fields and changed no rule: `valuation_levels` carries the
+full-history MVRV level and the rule price of the two cheap thresholds (the lower of the two window
+prices; a level that does not agree with the engine's own percentile is withheld),
+`regime_meta.strategic.fix_diff` is the difference between the last two fixes, and
+`live_inputs.detectors` holds the recovery, macro-shock and distribution cards as the live rule reads
+them. The suite contract hash and the locked model sections are unchanged.
+
 ### Decision record, 2026-11-20
 
 - **Objective.** Remove measurement artifacts of v1 from the live decision: hysteresis counted in
