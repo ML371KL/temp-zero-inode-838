@@ -194,7 +194,7 @@ for(const [re,why] of [
     writeFileSync(viewFile,`${pageImports.map(m=>`import ${m[1]} from ${u(m[2])};`).join("\n")}\n${viewSrc}\nexport default VIEW;\n`);
     V=(await import(pathToFileURL(viewFile).href)).default;
   }finally{try{unlinkSync(viewFile)}catch{}}
-  const HOUR=3600e3,DAY=24*HOUR,NB=String.fromCharCode(160),plain=s=>String(s).replaceAll(NB," ");
+  const HOUR=3600e3,DAY=24*HOUR,NB=String.fromCharCode(160),WJ=String.fromCharCode(0x2060),plain=s=>String(s).replaceAll(NB," ").replaceAll(WJ,"");
   const lines=a=>a.map(x=>plain(x.text??x));
 
   // 1. Закоммиченный снимок — какой бы формы он ни был (старой, новой, на паузе). Проверка НЕ фатальна:
@@ -452,6 +452,7 @@ for(const [re,why] of [
     const ht=V.triggersOf(half,now),hcap=ht.filter(x=>/капитуляц/.test(x.text));
     assert.deepEqual(hcap.map(x=>[x.dir,x.pct,plain(x.text)]),[["up",40,"пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 7-й пц за 4 года, 18-й по всей истории"]],"условие пола капитуляции названо по двум окнам");
     for(const x of screen(half,now))assert.doesNotMatch(x,/капитуляции[^·]*(?:включится|включён)|Пол капитуляции/,`экран обещает пол капитуляции при несогласии окон: «${x}»`);
+    assert.doesNotMatch(V.levelsText(half),/[0-9]-(?:й|го)/,"дефис в «10-го» и «18-й» в строке порогов не должен давать перенос строки");
     assert.match(plain(V.levelsText(half)),/· MVRV 7-й пц за 4 года, 18-й по всей истории на \d\d\.\d\d · пол 40 % — ≤ 10-го пц в обоих окнах · якорь восстановления — < 25-го пц в обоих окнах · гейт оценки — ≥ 82-го пц$/);
     half.valuation_levels={window_days:1460,levels:[{key:"recovery_anchor",percentile:25,price_usd:72800},{key:"capitulation_floor",percentile:10,price_usd:63600},{key:"valuation_gate",percentile:82,price_usd:121200}]};
     assert.match(plain(V.levelsText(half)),/пол 40 % — ≤ 10-го пц в обоих окнах \(за 4 года — ниже ≈ 64 тыс\. \$\) · якорь восстановления — < 25-го пц в обоих окнах \(за 4 года — ниже ≈ 73 тыс\. \$\) · гейт оценки — выше ≈ 121 тыс\. \$$/,"уровень цены подписан окном, по которому посчитан");

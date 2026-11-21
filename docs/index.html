@@ -209,7 +209,7 @@ import { POLICY_V3_CANDIDATE } from "./policy-v3-candidate.mjs";
 import { evaluateActionGateV1 } from "./action-gate-v1.mjs";
 /* VIEW:START — чистые функции «снимок → что показать»: без DOM, время приходит параметром.
    static-audit исполняет этот блок в Node. Новые поля снимка необязательны: у каждого есть запасной путь. */
-const fin=Number.isFinite,arr=x=>Array.isArray(x)?x:[],objs=x=>arr(x).filter(o=>o&&typeof o==="object"),NB=String.fromCharCode(160),OV=POLICY_V1.allocation_overlays,RB=MODEL_POLICY_V1.regime_bands,HY=MODEL_POLICY_V1.hysteresis;
+const fin=Number.isFinite,arr=x=>Array.isArray(x)?x:[],objs=x=>arr(x).filter(o=>o&&typeof o==="object"),NB=String.fromCharCode(160),WJ=String.fromCharCode(0x2060),OV=POLICY_V1.allocation_overlays,RB=MODEL_POLICY_V1.regime_bands,HY=MODEL_POLICY_V1.hysteresis;
 // Боевой набор правил v3: из его контракта берутся только числа правил — ступени пола, час фикса, пороги «дёшево».
 // Сам расчёт цели страница не вызывает. Прежний набор v1 решал по снимкам; его решение лежит в закоммиченном
 // снимке до первого сбора новым кодом и показывается по его же правилам.
@@ -481,7 +481,9 @@ function levelsText(S){
       out.push(`${label} — ${pctTxt} в обоих окнах${price(k,"ниже")?` (за 4 года — ${price(k,"ниже")})`:""}`);
     out.push(`гейт оценки — ${price("valuation_gate","выше")||`≥ ${gatePct(S)}-го пц`}`);
   }
-  return out.map(x=>x.replaceAll(" ",NB)).join(" · "); // перенос строки — только между пунктами
+  // Перенос строки — между пунктами и перед скобкой с ценой: пункт с двумя окнами длиннее колонки. Дефис в
+  // «10-го» и «18-й» окружён соединителем слов (U+2060): иначе браузер рвёт строку прямо на нём.
+  return out.map(x=>x.replaceAll(" ",NB).replaceAll(`${NB}(за`," (за").replace(/([0-9])-(й|го)/g,`$1${WJ}-${WJ}$2`)).join(" · ");
 }
 // Окно честного нуля тайминга: «с начала», а когда оно закрылось (старт ушёл из дневных строк) — 365 дней.
 const nullWindow=S=>{const t=S.monitoring?.timing_null||{};return[t.since_start,t.d365].find(w=>w&&fin(w.policy_net_return_pct)&&fin(w.null_net_return_pct))||null};
