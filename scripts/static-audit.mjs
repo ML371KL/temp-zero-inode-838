@@ -114,7 +114,11 @@ assert.equal(POLICY_V1.id,"btc-allocation-policy-v1");
 assert.match(html,/import \{ POLICY_V1, applyStrategicDetectorPolicyV1 \} from "\.\/policy-v1\.mjs"/,"frontend policy-v1 metadata import missing");
 assert.match(html,/import \{ EXECUTION_POLICY_V1 \} from "\.\/execution-policy-v1\.mjs"/,"frontend execution-policy-v1 import missing");
 assert.match(html,/import \{ evaluateActionGateV1 \} from "\.\/action-gate-v1\.mjs"/,"frontend fail-closed action gate import missing");
-assert.doesNotMatch(html,/allocationTargetV1|allocationDecisionV1/,"frontend must not calculate allocation");
+// Боевой набор v3: страница берёт из его контракта только числа правил (ступени пола, час фикса, пороги «дёшево»).
+// Ни одна функция движка в браузер не импортируется: режим, пол и цель считает сервер.
+assert.match(html,/import \{ POLICY_SUITE_V3 \} from "\.\/policy-suite-v3\.mjs"/,"страница обязана знать боевой набор правил v3");
+assert.match(html,/import \{ POLICY_V3_CANDIDATE \} from "\.\/policy-v3-candidate\.mjs"/,"числа правил v3 обязаны приходить из контракта движка, а не из литералов");
+assert.doesNotMatch(html,/allocationTargetV1|allocationDecisionV1|allocationDecisionV3|dailyHysteresisStepV3|fixClockV3|evaluateV3Inputs|evaluateShadowVariantsV1|scoreValuationV3|buildLiveDecisionV3/,"frontend must not calculate allocation");
 assert.match(html,/const target=Number\.isFinite\(D\.target_pct\)/,"strategy strip must display the server target");
 assert.match(html,/evaluateActionGateV1\(/,"strategy strip must use the shared fail-closed action gate");
 assert.match(html,/decision:SNAP\.decision/,"strategy strip must gate the signed server decision");
@@ -161,6 +165,10 @@ for(const [re,why] of [
   [/Таблица вкладов всех индикаторов/,"панель индикаторов снова названа таблицей вкладов без вкладов"],
   [/реальных forward-срабатываний/,"витрина снова обещает выборку по потолку эйфории"],
   [/id="(?:strategicNeedle|tacticalNeedle|shortBehavior|mediumBehavior|phase)"/,"вернулась стрелка среднего балла, блок «Как вести себя» или строка фазы"],
+  // Выпуск 2.15.0: боевое решение принимает набор v3. Правил, которых в нём нет, витрина не утверждает.
+  [/euphoria_cap_pct|euphoria_min_mvrv_percentile|euphoria_safety_cap|[Пп]отолок эйфории|[Пп]олы и потолок|полы\/потолок/,"потолка эйфории в боевых правилах нет: витрина не имеет права его называть"],
+  [/[Мм]акрошок и дистрибуция|дистрибуция (?:не да[её]т|ограничива)|distributionState:det\(/,"у «Дистрибуции» нет права на режим и цель"],
+  [/ЗАМОРОЖЕННОЙ policy v1|живое решение задаёт v1|<b>Policy v1<\/b>|status:"frozen 2026-07-19/,"боевой политикой снова названа v1"],
 ])assert.doesNotMatch(html,re,why);
 
 // ПОВЕДЕНИЕ ВИТРИНЫ. Блок VIEW страницы — чистые функции «снимок → что показать»; он исполняется здесь в Node.
@@ -171,11 +179,19 @@ for(const [re,why] of [
   assert.doesNotMatch(viewSrc,/\bdocument\b|\bwindow\b|\$\(|Date\.now\(|localStorage|\bSNAP\b/,"блок VIEW обязан оставаться чистым: DOM, часы и состояние страницы — снаружи");
   const {pathToFileURL}=await import("node:url");
   const {allocationDecisionV1}=await import("../docs/policy-v1.mjs");
+  // Фикстуры набора v3 собираются теми же функциями, что и боевой снимок: портами движка и сборкой записи решения.
+  // Форма фикстуры не может разойтись с формой сборщика, а её решение проверяется правилом набора.
+  const E3=await import("../docs/policy-v3-candidate.mjs"),L3=await import("./live-decision-v3.mjs");
   const u=name=>JSON.stringify(new URL(`../docs/${name}`,import.meta.url).href);
+  // Импорты харнеса — те же строки, что стоят в самой странице: новый импорт страницы не роняет все проверки
+  // VIEW с ReferenceError. Модули — только соседние файлы docs/.
+  const pageImports=[...scripts.join("\n").matchAll(/^import (\{[^}]+\}) from "\.\/([\w.-]+\.mjs)";$/gm)];
+  assert.ok(pageImports.length>=5,"импорты страницы не разобраны");
+  assert.equal([...scripts.join("\n").matchAll(/^import\b/gm)].length,pageImports.length,"у страницы появился импорт не из соседнего модуля docs/");
   const viewFile=join(tmpdir(),`btc21m-view-${process.pid}.mjs`);
   let V;
   try{
-    writeFileSync(viewFile,`import { POLICY_V1, applyStrategicDetectorPolicyV1 } from ${u("policy-v1.mjs")};\nimport { MODEL_POLICY_V1 } from ${u("model-policy-v1.mjs")};\nimport { EXECUTION_POLICY_V1 } from ${u("execution-policy-v1.mjs")};\n${viewSrc}\nexport default VIEW;\n`);
+    writeFileSync(viewFile,`${pageImports.map(m=>`import ${m[1]} from ${u(m[2])};`).join("\n")}\n${viewSrc}\nexport default VIEW;\n`);
     V=(await import(pathToFileURL(viewFile).href)).default;
   }finally{try{unlinkSync(viewFile)}catch{}}
   const HOUR=3600e3,DAY=24*HOUR,NB=String.fromCharCode(160),plain=s=>String(s).replaceAll(NB," ");
@@ -186,17 +202,21 @@ for(const [re,why] of [
   //    из-за формы одного снимка. Отказ печатается; сами функции проверяются ниже на синтетических состояниях.
   {
     const now=Date.parse(snap.generated_at)+5*60e3,gate={actionable:false,code:"snapshot_stale",age_hours:5},run=(name,fn)=>{try{fn()}catch(e){pageWarnings.push(`${name}: ${e.message}`)}};
-    for(const f of ["changeLog","blockRows","whyOf","tactRows","dataNotes","warnMap","holdOf","overlayLines","monitorModel","levelsText","resultText","tactOf"])run(f,()=>V[f](snap));
+    for(const f of ["changeLog","blockRows","whyOf","tactRows","dataNotes","warnMap","holdOf","overlayLines","monitorModel","levelsText","resultText","tactOf","detView","alarmCount","policyFacts","methodParts","aiPolicy"])run(f,()=>V[f](snap));
     for(const f of ["leadOf","triggersOf"])run(f,()=>V[f](snap,now));
     for(const code of ["snapshot_stale","time_invalid","snapshot_in_future","decision_missing","decision_not_actionable","decision_quality_not_actionable","operational_status_not_healthy"])run(`pauseOf:${code}`,()=>assert.ok(V.pauseOf(snap,{...gate,code},{okAt:now},now,3).lead));
     for(const m of snap.metrics||[])run(`карточка ${m.id}`,()=>{V.cardFace(m);V.badge(m.score)});
     // Копия дерева гейтов обязана воспроизводить кандидата сервера на живом снимке — иначе подсказки называют только ступени.
-    run("правило полос не воспроизвело кандидата сервера",()=>{const cand=snap.regime_meta?.strategic?.candidate;if(["defensive","deteriorating","transition","unconfirmed_positive","constructive"].includes(cand)&&!snap.mock)assert.equal(V.whyOf(snap).ok,true)});
+    // Кандидат сервера у набора v3 — то, что правило читает на этом прогоне (live_inputs), у прежнего — regime_meta.
+    run("правило полос не воспроизвело кандидата сервера",()=>{const cand=V.whyOf(snap).cand;if(["defensive","deteriorating","transition","unconfirmed_positive","constructive"].includes(cand)&&!snap.mock)assert.equal(V.whyOf(snap).ok,true)});
   }
 
   // 2. Синтетические состояния. Время — параметр, а не часы машины; набор прогоняется на семи днях недели подряд.
   const FAM={macro:{liquidity:"liquidity_regime",conditions:"financial_conditions",stress:"system_stress"},demand:{etf:"etf_regime",stablecoins:"stablecoin_regime",exchange_supply:"exchange_supply",institutional:"institutional_quality"},cycle:{valuation:"mvrv_cycle",network:"network_security",activity:"network_activity",miners:"miner_regime",trend:"trend_regime"}};
+  // mk — снимок ПРЕЖНЕЙ формы: решение набора v1 (policy_id названо в записи). Такой снимок лежит в репозитории и
+  // на витрине до первого сбора новым кодом; страница показывает его по правилам v1. Снимок набора v3 — mk3, ниже.
   // По умолчанию — состояние 10.10.2026: Макро −41,7 (неблагоприятен), Спрос −6,3, Цикл +25 → «переходный», 45 %.
+  const SUITE_V1="btc-decision-suite-v1";
   function mk({now,scores={},mvrv=42,strategic="transition",candidate=strategic,tactical="balanced",recovery="calm",shock="calm",events=[],hold=null,extra={}}){
     const sc={liquidity_regime:0,financial_conditions:-2,system_stress:-0.5,etf_regime:-0.5,stablecoin_regime:0,exchange_supply:0,institutional_quality:0,us_spot_premium:0,mvrv_cycle:mvrv>=95?-2:mvrv>=82?-1:mvrv<=10?1:0,network_security:0,network_activity:0.5,miner_regime:0,trend_regime:2,...scores};
     const metrics=Object.entries(FAM).flatMap(([block,f])=>Object.entries(f).map(([family,id])=>({id,block,family,name:`«${id}»`,vote:true,strategic:true,tactical:id!=="mvrv_cycle",score:sc[id],value_num:id==="mvrv_cycle"?mvrv:sc[id],value:"слово движка",delta:"числа движка",note:"",observed_at:new Date(now-DAY).toISOString(),stale:false})));
@@ -207,7 +227,7 @@ for(const [re,why] of [
     return{generated_at:new Date(now-5*60e3).toISOString(),verdict:"ВЕРДИКТ",regime:{strategic,tactical},regime_meta:{strategic:{state:strategic,candidate,since:new Date(now-6*HOUR).toISOString(),...(hold?{hold_until:new Date(now+hold*HOUR).toISOString()}:{})},tactical:{state:tactical,candidate:tactical}},
       scores:{critical_coverage_ok:true,critical_missing:{strategic:[],tactical:[]}},metrics,blocks,
       detectors:[["recovery",recovery],["macro_shock",shock],["distribution","calm"],["integrity","calm"]].map(([id,state])=>({id,state})),
-      decision:{...d,regime_targets_pct:Object.fromEntries(POLICY_V1.strategic_order.map(r=>[r,alloc(r).target_pct])),quality:{status:"good"}},
+      decision:{...d,policy_id:SUITE_V1,regime_targets_pct:Object.fromEntries(POLICY_V1.strategic_order.map(r=>[r,alloc(r).target_pct])),quality:{status:"good"}},
       history:Array.from({length:14},(_,i)=>({t:new Date(now-(14-i)*15*60e3).toISOString()})),
       monitoring:{started_at:new Date(now-83*DAY).toISOString(),days_elapsed:83,health:{operational_status:"healthy"},decision_events:events.map(([hoursAgo,s,target_pct,binding_overlays=[]])=>({t:new Date(now-hoursAgo*HOUR).toISOString(),strategic:s,tactical:"balanced",target_pct,binding_overlays}))},...extra};
   }
@@ -322,6 +342,246 @@ for(const [re,why] of [
     assert.ok(!cp.stale,"пауза по покрытию не гасит вердикт: данные свежие");
   }
 
+  // 3. НАБОР v3 (выпуск 2.15.0, «бой на правилах v3»). Среднесрочный режим, полы и цель решаются раз в сутки, на
+  //    фиксе: понижение — на этом фиксе, повышение — на втором фиксе подряд; пол восстановления 40 / 60 / 80 % по
+  //    фиксам подряд; «дёшево» — по согласию двух окон MVRV; потолка эйфории и права «Дистрибуции» нет.
+  //    Фикстура собирается портами движка и сборкой боевой записи решения — теми же функциями, что снимок сборщика.
+  const dmtL=t=>{const d=new Date(t),p=x=>String(x).padStart(2,"0");return`${p(d.getDate())}.${p(d.getMonth()+1)} ${p(d.getHours())}:${p(d.getMinutes())}`};
+  const OWN={trend:"cycle",network:"cycle",valuation:"cycle",exchange_supply:"demand"};
+  const DET_TEXT={recovery:["оценка низкая · подтверждений 1/3","Низкая циклическая оценка (MVRV <25-го перцентиля) — обязательный якорь; плюс минимум два подтверждения стабилизации тренда/ETF/биржевого предложения."],macro_shock:["условий 1/3","Сжатие Net Liquidity, ужесточение ставок/доллара и кредитный стресс должны подтвердить друг друга."],
+    distribution:["оценка не высокая · подтверждений 1/2","Высокая накопленная прибыль (MVRV) — обязательный якорь. Оба подтверждения (рост биржевого предложения И потеря ценовых опор) — «сработал» и ограничение вердикта сверху; одно из двух — «наблюдение»."],integrity:["peg 0.10% · spread 6 б.п.","Hard override."]};
+  // Что правило прочитало бы на этих баллах. own — баллы семей, которые движок считает сам (иначе — как на карточке).
+  function calc3({now,scores={},own={},mvrv=42,deep=mvrv,hard=false}){
+    const cards=mk({now,scores,mvrv}).metrics,fam=Object.fromEntries(Object.entries(FAM).map(([block,f])=>[block,Object.fromEntries(Object.entries(f).map(([family,id])=>[family,cards.find(m=>m.id===id).score]))]));
+    const valuation=E3.scoreValuationV3({percentile:mvrv,percentileDeep:deep});fam.cycle.valuation=valuation.score;
+    for(const [family,score] of Object.entries(own))fam[OWN[family]][family]=score;
+    const blocks=E3.blockScoresV1Port(fam),shock=E3.macroShockStateV1Port(fam.macro),recovery=E3.recoveryStateV1Port({anchor:valuation.anchor,trend:fam.cycle.trend,etf:fam.demand.etf,exchangeSupply:fam.demand.exchange_supply});
+    return{candidate:E3.strategicCandidateV1Port({families:fam,criticalOk:true,hardOverride:hard,macroShockState:shock,distributionState:"calm",recoveryState:recovery.state}),families:fam,blocks,macro_shock_state:shock,recovery,valuation,
+      record:{mvrv_percentile:mvrv,mvrv_percentile_deep:deep,deep_window_used:deep!=null,observed:{closed_day:new Date(now-DAY).toISOString().slice(0,10)}}};
+  }
+  // fix — чем входы на фиксе отличались от нынешних (по умолчанию фикс видел то же, что видно сейчас); strategic —
+  // действующий режим (по умолчанию — кандидат фикса); floor — число фиксов подряд с подтверждённым восстановлением;
+  // pending — повышение, ждущее второго фикса; hard — аварийный режим; view — вид линии целиком (для паузы).
+  function mk3({now,scores={},own={},mvrv=42,deep=mvrv,fix=null,strategic=null,floor=0,pending=null,hard=false,fixHoursAgo=3.5,tactical="balanced",events=[],extra={},view}){
+    const cur=calc3({now,scores,own,mvrv,deep,hard}),at=fix?calc3({now,scores:{...scores,...fix.scores},own:{...own,...fix.own},mvrv:fix.mvrv??mvrv,deep:"deep" in fix?fix.deep:deep}):hard?calc3({now,scores,own,mvrv,deep}):cur;
+    const state=strategic??at.candidate,alloc=E3.allocationDecisionV3({strategic:state,floorCloses:floor,cheap:at.valuation.cheap}),fixMs=now-fixHoursAgo*HOUR,generatedAt=new Date(now-5*60e3).toISOString();
+    const record={blocks:at.blocks,families:Object.fromEntries(Object.keys(OWN).map(f=>[f,{v3:at.families[OWN[f]][f]}])),mvrv_percentile:at.record.mvrv_percentile,mvrv_percentile_deep:at.record.mvrv_percentile_deep,deep_window_used:at.record.deep_window_used,recovery:at.recovery,macro_shock_state:at.macro_shock_state,notes:[]};
+    const line=view!==undefined?view:{target_pct:hard?0:alloc.target_pct,base_target_pct:alloc.base_target_pct,state:hard?"emergency":state,candidate:hard?"emergency":at.candidate,fix_at:new Date(fixMs).toISOString(),next_fix_at:new Date(E3.fixClockV3(now,Math.floor(fixMs/DAY)).next_at).toISOString(),
+      floor:{active:floor>0,rung:floor||null,level_pct:alloc.floor_level_pct,closes:floor},binding_overlays:hard?["emergency_override"]:alloc.binding_overlays,pending,inputs:record,reason_codes:hard?["emergency_override","between_fixes"]:["between_fixes",`base:${state}`,...alloc.binding_overlays,...(pending?[`upgrade_pending:${pending.candidate}:${pending.fixes}/${pending.need}`]:[])]};
+    const decision=L3.buildLiveDecisionV3({generatedAt,v1Decision:{tactical,quality:{critical_coverage_ok:true},input_hash:"fixture"},view:line});
+    assert.equal(decision.policy_id,L3.LIVE_SUITE_ID_V3);assert.equal(L3.reproduceDecisionV3(decision).ok,true,"фикстура набора v3 обязана воспроизводиться правилом набора");
+    // Карточки, блоки и детекторы снимка — по методике v1: якорь восстановления по одному окну, баллы карточек.
+    const S=mk({now,scores,mvrv,strategic:hard?"emergency":state,tactical,events,extra}),card=id=>S.metrics.find(m=>m.id===id).score;
+    const cardState={recovery:E3.recoveryStateV1Port({anchor:mvrv<25,trend:card("trend_regime"),etf:card("etf_regime"),exchangeSupply:card("exchange_supply")}).state,macro_shock:cur.macro_shock_state,distribution:"calm",integrity:hard?"fired":"calm"};
+    S.detectors=Object.entries(DET_TEXT).map(([id,[inputs,logic]])=>({id,name:`«${id}»`,state:cardState[id],inputs,logic}));
+    return Object.assign(S,{regime:{strategic:decision.strategic,tactical},regime_meta:{strategic:L3.liveRegimeMetaV3({decision,view:line,previousMeta:null,now,calc:at}),tactical:{state:tactical,candidate:tactical}},decision,live_inputs:L3.liveInputsV3(cur,generatedAt),
+      reference_v1:{decision:{strategic:state,target_pct:S.decision.target_pct,binding_overlays:S.decision.binding_overlays}},...(hard?{override:"НАРУШЕНИЕ ЦЕЛОСТНОСТИ РЫНКА"}:{})});
+  }
+  // Весь текст среднесрока на первом экране и под вердиктом — для проверок «чего экран не говорит».
+  const screen=(S,now)=>[...lines(V.triggersOf(S,now)),...V.overlayLines(S).map(plain),plain(V.levelsText(S)),...V.holdOf(S).map(plain).filter(x=>x.startsWith("Среднесрок"))];
+  // Всё, что страница пишет словами о правилах: первый экран, справка, статус, детекторы, промпт и данные ИИ-разбора.
+  const everything=(S,now)=>[...screen(S,now),plain(V.whyOf(S).rule),...V.methodParts(S).flat().map(plain),...Object.values(V.policyFacts(S)).map(plain),...V.detView(S).flatMap(d=>[plain(d.role),plain(d.logic),plain(d.inputs)]),plain(V.aiHead()),plain(JSON.stringify(V.aiPolicy(S)))];
+  const twoAdverse={stablecoin_regime:-2,institutional_quality:-1,etf_regime:0,trend_regime:-1}; // Макро −41,7 и Спрос −37,5 неблагоприятны
+  for(let weekday=0;weekday<7;weekday++){
+    const now=Date.parse("2026-03-02T09:30:00.000Z")+weekday*DAY,RX_FIX="на фиксе \\d\\d\\.\\d\\d \\d\\d:\\d\\d";
+    // 3.1. Режим без изменений: условия — из live_inputs, сроки — в фиксах. Числа целей — только из снимка.
+    const base=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});
+    assert.equal(base.decision.target_pct,45);assert.deepEqual(base.decision.binding_overlays,[]);assert.equal(base.regime_meta.strategic.next_fix_at,new Date(Math.floor(now/DAY)*DAY+DAY+6*HOUR).toISOString());
+    const fixAt=dmtL(base.regime_meta.strategic.next_fix_at),bw=V.whyOf(base);
+    assert.equal(bw.ok,true,"копия дерева гейтов обязана воспроизводить кандидата правила из live_inputs");assert.equal(bw.rule,"неблагоприятен только Макро → «переходный»");assert.equal(bw.note,null);
+    const bt=V.triggersOf(base,now),bdn=bt.find(x=>x.dir==="dn"),bup=bt.find(x=>x.dir==="up");
+    assert.equal(bdn.pct,5);assert.equal(plain(bdn.text),"Спрос — в неблагоприятную (3 полушага) · на первом же фиксе","понижение принимается на первом же фиксе");
+    assert.equal(bup.pct,95);assert.equal(plain(bup.text),"Макро — в благоприятную (8 полушагов) · на втором фиксе подряд","повышение — на втором фиксе подряд");
+    assert.deepEqual(V.holdOf(base),[],"режим равен кандидату и повышений не ждёт — под вердиктом пусто");
+    assert.equal(plain(V.levelsText(base)).split(" · ")[0],`следующий фикс — ${fixAt}`,"срок ближайшего решения стоит на первом экране");
+    assert.match(plain(V.leadOf(base,now).text),/^Цель 45 % без изменений с \d\d\.\d\d — действий нет$/);
+    for(const x of screen(base,now))assert.doesNotMatch(x,/снимк|удержание|48 ч/,`среднесрок набора v3 решается на фиксе, а экран говорит о снимках: «${x}»`);
+    // Браузер цель не считает: числа ступеней — те, что стоят в снимке, даже если они «неправильные».
+    const odd=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});odd.decision.regime_targets_pct={...odd.decision.regime_targets_pct,defensive:7,unconfirmed_positive:93};
+    assert.equal(V.triggersOf(odd,now).find(x=>x.dir==="dn").pct,7,"число нижней ступени обязано прийти из regime_targets_pct снимка");assert.equal(V.triggersOf(odd,now).find(x=>x.dir==="up").pct,93);
+    // Баллы сети, бирж, оценки и тренда — те, что считает правило: дорожки и расчёт сходятся с ними, а не с карточками.
+    const ownTrend=mk3({now,own:{trend:0},events:[[900,"deteriorating",20],[17*24,"transition",45]]}),oc=V.blockRows(ownTrend).find(r=>r.key==="cycle");
+    assert.ok(Math.abs(oc.score-5)<1e-9&&oc.band==="neutral","балл блока — тот, что читает правило (тренд 0), а не балл по карточкам (+25)");
+    assert.deepEqual([oc.families.find(f=>f.id==="trend_regime").score,oc.families.find(f=>f.id==="trend_regime").card],[0,2],"балл карточки, расходящийся с баллом правила, остаётся рядом");
+    assert.equal(V.blockRows(base).flatMap(r=>r.families).every(f=>f.card===null),true,"без расхождения балл карточки рядом не печатается");
+    assert.ok(Math.abs(oc.families.reduce((a,f)=>a+f.contrib,0)-oc.score)<1e-9,"пункты семей в сумме дают балл блока и у набора v3");
+
+    // 3.2 (а). Пол восстановления растёт ступенями 40 / 60 / 80 по фиксам подряд — экран называет свою ступень.
+    const rung=(n,strategic,pending=null)=>mk3({now,strategic,pending,floor:n,mvrv:19,deep:21,scores:twoAdverse,events:[[400,"defensive",5],[3.5,strategic,[40,60,80][n-1],["recovery_floor"]]]});
+    const r1=rung(1,"defensive",{candidate:"transition",fixes:1,need:2}),r2=rung(2,"transition"),r3=rung(3,"transition");
+    assert.deepEqual([r1,r2,r3].map(s=>[s.decision.base_target_pct,s.decision.target_pct,s.decision.binding_overlays.join()]),[[5,40,"recovery_floor"],[45,60,"recovery_floor"],[45,80,"recovery_floor"]]);
+    assert.equal(plain(V.overlayLines(r1)[0]),"Пол восстановления 40 % — ступень 1 из 3 · MVRV сейчас 19-й пц за 4 года, 21-й по всей истории (якорь — ниже 25-го в обоих окнах) · тренд −1 · ETF 0 · биржи 0 — 2 из 3 не ниже нуля","строка пола называет свою ступень и посчитанное");
+    assert.match(plain(V.overlayLines(r2)[0]),/^Пол восстановления 60 % — ступень 2 из 3 · /);assert.match(plain(V.overlayLines(r3)[0]),/^Пол восстановления 80 % — ступень 3 из 3 · /);
+    for(const x of screen(r1,now))assert.doesNotMatch(x,/Пол восстановления 80|пол 80/,`первая ступень пола подана как 80 %: «${x}»`);
+    const t1=V.triggersOf(r1,now),t2=V.triggersOf(r2,now),t3=V.triggersOf(r3,now);
+    assert.deepEqual([t1[0].dir,t1[0].pct,t1[0].more],["dn",5,true],"при связывающем поле первым стоит его снятие");
+    assert.match(plain(t1[0].text),new RegExp(`^пол снимается ${RX_FIX}, если восстановление не подтверждено: подтверждений меньше двух \\(сейчас 2 из 3\\), MVRV ≥ 25-го пц в любом из окон \\(сейчас 19-й пц за 4 года, 21-й по всей истории\\) или макрошок$`));
+    assert.ok(plain(t1[0].text).includes(`на фиксе ${fixAt}`),"срок снятия пола — следующий фикс из снимка");
+    assert.deepEqual([t1[1].dir,t1[1].pct,plain(t1[1].text)],["up",60,`пол восстановления — ступень 2 из 3 на фиксе ${fixAt}, если детектор подтверждён (сейчас 2 из 3)`],"следующая ступень пола названа со сроком");
+    assert.deepEqual([t2[0].pct,t2[1].pct,plain(t2[1].text)],[45,80,`пол восстановления — ступень 3 из 3 на фиксе ${fixAt}, если детектор подтверждён (сейчас 2 из 3)`]);
+    assert.equal(t3[0].pct,45);assert.ok(!t3.some(x=>/ступень/.test(x.text)),"на последней ступени следующей нет");
+    for(const t of [t1,t2,t3])assert.ok(!lines(t).some(x=>/аварийн/.test(x)),"при поле единственным нижним триггером снова назван аварийный режим");
+    assert.deepEqual([40,60,80].map(V.toneOf),["neutral","neutral","good"],"цвет полосы следует за ступенью пола");
+    assert.equal(plain(V.detView(r1).find(d=>d.id==="recovery").role),"поднимает «защитный» и «ухудшается» до «переходного» и включает пол 40 / 60 / 80 % — по числу фиксов подряд");
+    // Пол не включён, якорь по MVRV выполнен в обоих окнах: подсказка называет первую ступень, а не 80 %.
+    const nearFloor=mk3({now,mvrv:20,deep:22,scores:{...twoAdverse,etf_regime:-1,exchange_supply:-0.5},events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.equal(nearFloor.decision.target_pct,5);
+    assert.ok(V.triggersOf(nearFloor,now).some(x=>x.dir==="up"&&x.pct===40&&plain(x.text)==="пол восстановления: MVRV уже ниже 25-го пц в обоих окнах, нужно два неотрицательных балла из трёх (сейчас 0) · ступени 40 / 60 / 80 по фиксам подряд"),"подсказка про пол называет первую ступень 40 %");
+    // Детектор подтверждён по текущим данным, а фикс его ещё не видел: первая ступень — на ближайшем фиксе.
+    const armed=mk3({now,strategic:"defensive",mvrv:20,deep:22,scores:twoAdverse,fix:{scores:{etf_regime:-1,exchange_supply:-0.5}},events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.equal(armed.decision.target_pct,5);assert.deepEqual(armed.decision.binding_overlays,[]);
+    assert.ok(V.triggersOf(armed,now).some(x=>x.dir==="up"&&x.pct===40&&plain(x.text)===`пол восстановления: детектор подтверждён (2 из 3) — первая ступень на фиксе ${fixAt}`));
+    // Якорь выполнен только в окне четырёх лет: пол восстановления экран не обещает, детектор показан состоянием правила.
+    const oneWin=mk3({now,mvrv:20,deep:31,scores:{...twoAdverse,trend_regime:0},events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.equal(oneWin.detectors.find(d=>d.id==="recovery").state,"good","карточка детектора (методика v1, одно окно) считает восстановление выполненным");
+    const oneDet=V.detView(oneWin).find(d=>d.id==="recovery");
+    assert.deepEqual([oneDet.state,plain(oneDet.inputs)],["calm","оценка не низкая хотя бы в одном окне MVRV · подтверждений 3/3"],"детектор восстановления показан так, как его читает боевое правило");
+    assert.match(plain(oneDet.logic),/MVRV <25-го перцентиля за 4 года и по всей истории/);
+    // Обе правки текста карточек детекторов — замена подстроки в тексте сборщика (он в запертой секции v1). Если
+    // сборщик эти слова изменит, замена на странице молча перестанет срабатывать — поэтому слова закреплены здесь.
+    for(const phrase of [" и ограничение вердикта сверху","(MVRV <25-го перцентиля)"])assert.equal(collector.split(phrase).length,2,`текст детектора в сборщике изменился: страница правит фразу «${phrase.trim()}» заменой подстроки`);
+    assert.doesNotMatch(plain(V.detView(oneWin).find(d=>d.id==="distribution").logic),/ограничение вердикта сверху/,"право «Дистрибуции» из текста карточки убрано");
+    assert.ok(!screen(oneWin,now).some(x=>/пол восстановления/i.test(x)),"якорь по одному окну пол восстановления не обещает");
+
+    // 3.3 (б). «Дёшево» — только при согласии двух окон. MVRV ≤ 10 за четыре года, но выше по всей истории:
+    //          пола капитуляции нет, и экран его не обещает.
+    const allAdverse={...twoAdverse,etf_regime:-1,exchange_supply:-1,network_security:-1,network_activity:-1,miner_regime:-1};
+    const half=mk3({now,mvrv:7,deep:18,scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.equal(half.decision.target_pct,5);assert.deepEqual(half.decision.binding_overlays,[]);assert.equal(half.decision.inputs.cheap,false);
+    assert.equal(half.metrics.find(m=>m.id==="mvrv_cycle").score,1,"карточка оценки (одно окно) при этом показывает «дёшево»");
+    const ht=V.triggersOf(half,now),hcap=ht.filter(x=>/капитуляц/.test(x.text));
+    assert.deepEqual(hcap.map(x=>[x.dir,x.pct,plain(x.text)]),[["up",40,"пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 7-й пц за 4 года, 18-й по всей истории"]],"условие пола капитуляции названо по двум окнам");
+    for(const x of screen(half,now))assert.doesNotMatch(x,/капитуляции[^·]*(?:включится|включён)|Пол капитуляции/,`экран обещает пол капитуляции при несогласии окон: «${x}»`);
+    assert.match(plain(V.levelsText(half)),/· MVRV 7-й пц за 4 года, 18-й по всей истории на \d\d\.\d\d · пол 40 % — ≤ 10-го пц в обоих окнах · якорь восстановления — < 25-го пц в обоих окнах · гейт оценки — ≥ 82-го пц$/);
+    half.valuation_levels={window_days:1460,levels:[{key:"recovery_anchor",percentile:25,price_usd:72800},{key:"capitulation_floor",percentile:10,price_usd:63600},{key:"valuation_gate",percentile:82,price_usd:121200}]};
+    assert.match(plain(V.levelsText(half)),/пол 40 % — ≤ 10-го пц в обоих окнах \(за 4 года — ниже ≈ 64 тыс\. \$\) · якорь восстановления — < 25-го пц в обоих окнах \(за 4 года — ниже ≈ 73 тыс\. \$\) · гейт оценки — выше ≈ 121 тыс\. \$$/,"уровень цены подписан окном, по которому посчитан");
+    assert.equal(V.blockRows(half).find(r=>r.key==="cycle").families.find(f=>f.id==="mvrv_cycle").score,0,"балл оценки в расчёте — правила (0), а не карточки (+1)");
+    assert.deepEqual(V.ruleScore(half,half.metrics.find(m=>m.id==="mvrv_cycle")),{score:0,why:"«дёшево» — по двум окнам MVRV"},"карточка оценки называет балл боевого правила, когда он расходится с её баллом");
+    assert.deepEqual(V.ruleScore(ownTrend,ownTrend.metrics.find(m=>m.id==="trend_regime")),{score:0,why:"тренд — по закрытому дню"});
+    assert.ok(base.metrics.every(m=>V.ruleScore(base,m)===null),"без расхождения балл правила на карточке не печатается");
+    // Округление не переносит перцентиль через порог: 10,3 не печатается «10-м».
+    const edge=mk3({now,mvrv:10.3,deep:9,scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.ok(lines(V.triggersOf(edge,now)).includes("пол капитуляции: нужен MVRV ≤ 10-го пц в обоих окнах — сейчас 10,3-й пц за 4 года, 9-й по всей истории"));
+    // Оба окна согласны, фикс этого ещё не видел: пол включится на фиксе. После фикса — строка пола с перцентилями фикса.
+    const both=mk3({now,strategic:"defensive",mvrv:7,deep:9,fix:{deep:18},scores:allAdverse,events:[[900,"transition",45],[100,"defensive",5]]});
+    assert.equal(both.decision.target_pct,5);
+    assert.ok(V.triggersOf(both,now).some(x=>x.dir==="up"&&x.pct===40&&plain(x.text)===`пол капитуляции: MVRV ≤ 10-го пц в обоих окнах (7-й пц за 4 года, 9-й по всей истории) — включится на фиксе ${fixAt}`));
+    const capOn=mk3({now,mvrv:7,deep:9,scores:allAdverse,events:[[900,"transition",45],[3.5,"defensive",40,["capitulation_floor"]]]});
+    assert.equal(capOn.decision.target_pct,40);assert.deepEqual(capOn.decision.binding_overlays,["capitulation_floor"]);
+    assert.equal(plain(V.overlayLines(capOn)[0]),"Пол капитуляции 40 %: на фиксе MVRV 7-й пц за 4 года и 9-й по всей истории (≤ 10 в обоих окнах)");
+    assert.deepEqual([V.triggersOf(capOn,now)[0].pct,plain(V.triggersOf(capOn,now)[0].text)],[5,`пол снимается на фиксе ${fixAt}, если MVRV выше 10-го пц в любом из окон (сейчас 7-й пц за 4 года, 9-й по всей истории)`]);
+    // Ряд всей истории негоден — правило честно работает по одному окну, и экран второе окно не выдумывает.
+    const single=mk3({now,mvrv:7,deep:null,scores:allAdverse,events:[[900,"transition",45],[3.5,"defensive",40,["capitulation_floor"]]]});
+    assert.equal(single.decision.target_pct,40);assert.equal(plain(V.overlayLines(single)[0]),"Пол капитуляции 40 %: на фиксе MVRV 7-й пц (≤ 10)");
+    assert.ok(!screen(single,now).some(x=>/в обоих окнах|по всей истории|в любом из окон/.test(x)),"при одном окне экран о двух окнах не говорит");
+
+    // 3.4 (в). Повышение принято на первом фиксе и ждёт второго: «на фиксе …» со сроком из снимка.
+    const pend=mk3({now,strategic:"deteriorating",pending:{candidate:"transition",fixes:1,need:2},events:[[900,"transition",45],[150,"deteriorating",20]]});
+    assert.equal(pend.decision.target_pct,20);assert.equal(pend.regime_meta.strategic.hold_until,pend.regime_meta.strategic.next_fix_at,"пока повышение ждёт, hold_until — следующий фикс");
+    const holdAt=dmtL(pend.regime_meta.strategic.hold_until),pu=V.triggersOf(pend,now).find(x=>x.dir==="up");
+    assert.deepEqual([pu.pct,plain(pu.text)],[45,`уже насчитан «переходный» (фикс 1 из 2) — вступит на фиксе ${holdAt}, если кандидат тот же`],"ожидающее повышение названо со сроком фикса");
+    assert.equal(plain(V.holdOf(pend)[0]),`Среднесрок удерживается: на фиксе ${dmtL(pend.regime_meta.strategic.since)} насчитан «переходный» (1 из 2) · вступит на фиксе ${holdAt}, если кандидат тот же`,"ожидание второго фикса подписано рядом с вердиктом");
+    assert.match(plain(V.leadOf(pend,now).text),/^Цель 20 % без изменений с /);
+    pend.regime_birth={strategic:{t:pend.regime_meta.strategic.fix_at,candidate:"transition",from_candidate:"deteriorating",blocks:{demand:{from:-31.25,to:-18.75,band_from:"adverse",band_to:"neutral"}},families:[{block:"demand",name:"Качество институционального спроса",from:-1,to:0}],detectors:[],note:null}};
+    assert.match(plain(V.holdOf(pend)[0]),/насчитан «переходный» \(1 из 2\), причина: Спрос −31,3 → −18,8 \(«Качество институционального спроса» −1 → 0\) · вступит на фиксе /,"причина рождения кандидата — разница между фиксами из regime_birth");
+    // Срок берётся из hold_until; без него — из next_fix_at; срок, прошедший к моменту снимка, датой не печатается.
+    const noHold=structuredClone(pend);delete noHold.regime_meta.strategic.hold_until;
+    assert.ok(plain(V.triggersOf(noHold,now).find(x=>x.dir==="up").text).includes(`вступит на фиксе ${holdAt}`));
+    const late=structuredClone(pend);late.regime_meta.strategic.hold_until=late.regime_meta.strategic.next_fix_at=late.decision.inputs.next_fix_at=new Date(now-HOUR).toISOString();
+    assert.ok(plain(V.triggersOf(late,now).find(x=>x.dir==="up").text).includes("вступит на следующем фиксе, если кандидат тот же"));assert.ok(!plain(V.levelsText(late)).includes("следующий фикс"),"прошедший срок фикса датой не печатается");
+    // Текущие данные повышение уже не поддерживают — экран это называет.
+    const fading=mk3({now,strategic:"deteriorating",pending:{candidate:"transition",fixes:1,need:2},scores:weakDemand,fix:{scores:{etf_regime:-0.5,stablecoin_regime:0,exchange_supply:0,financial_conditions:-2,system_stress:-0.5}},events:[[900,"transition",45],[150,"deteriorating",20]]});
+    assert.ok(plain(V.triggersOf(fading,now).find(x=>x.dir==="up").text).endsWith("если кандидат тот же; по текущим данным «ухудшается»"));assert.ok(plain(V.holdOf(fading)[0]).endsWith("если кандидат тот же · по текущим данным «ухудшается»"));
+    // Режим по текущим данным уже хуже действующего: понижение вступит на ближайшем фиксе.
+    const worse=mk3({now,scores:weakDemand,fix:{scores:{etf_regime:-0.5,stablecoin_regime:0,exchange_supply:0,financial_conditions:-2,system_stress:-0.5}},events:[[900,"deteriorating",20],[17*24,"transition",45]]});
+    assert.deepEqual([worse.regime.strategic,worse.live_inputs.candidate,worse.decision.target_pct],["transition","deteriorating",45]);
+    const wd=V.triggersOf(worse,now).find(x=>x.dir==="dn");
+    assert.deepEqual([wd.pct,plain(wd.text)],[20,`по текущим данным «ухудшается» — вступит на фиксе ${fixAt}`]);
+    assert.equal(plain(V.holdOf(worse)[0]),`Среднесрок: по текущим данным «ухудшается» · вступит на фиксе ${fixAt}`);
+    assert.equal(V.whyOf(worse).note,"действует «переходный»: режим решается на фиксе","расчёт по текущим данным подписан, когда расходится с действующим режимом");
+    // Режим по текущим данным лучше действующего, фикс его ещё не видел: нужны два фикса подряд.
+    const better=mk3({now,fix:{scores:weakDemand},events:[[900,"transition",45],[150,"deteriorating",20]]});
+    assert.deepEqual([better.regime.strategic,better.live_inputs.candidate,better.regime_meta.strategic.pending],["deteriorating","transition",null]);
+    assert.deepEqual([V.triggersOf(better,now).find(x=>x.dir==="up").pct,plain(V.triggersOf(better,now).find(x=>x.dir==="up").text)],[45,`по текущим данным «переходный» — нужен на двух фиксах подряд, первый — ${fixAt}`]);
+    assert.equal(plain(V.holdOf(better)[0]),`Среднесрок: по текущим данным «переходный» · нужен на двух фиксах подряд, первый — ${fixAt}`);
+    // Тактика набором v3 не менялась: её гистерезис — по снимкам, строка удержания прежняя.
+    const tactHeld=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});tactHeld.regime_meta.tactical={state:"balanced",candidate:"spot_led",since:new Date(now-6*HOUR).toISOString(),hold_until:new Date(now+40*HOUR).toISOString()};
+    assert.match(plain(V.holdOf(tactHeld)[0]),/^Тактика удерживается: по свежим данным «спот ведёт» — кандидат с \d\d\.\d\d \d\d:\d\d · не раньше \d\d\.\d\d \d\d:\d\d$/);
+    // Аварийный режим — сразу, на любом прогоне; выход выше прежнего режима — через два фикса.
+    const crash3=mk3({now,hard:true,events:[[900,"transition",45],[1,"emergency",0,["emergency_override"]]]});
+    assert.deepEqual([crash3.regime.strategic,crash3.decision.target_pct,crash3.decision.binding_overlays.join()],["emergency",0,"emergency_override"]);
+    assert.deepEqual(V.triggersOf(crash3,now).map(x=>plain(x.text)),["выход: первый прогон без нарушения целостности возвращает прежний режим; выше него — на втором фиксе подряд"]);
+    assert.deepEqual(V.overlayLines(crash3),[]);assert.deepEqual(V.holdOf(crash3),[]);assert.equal(V.whyOf(crash3).ok,false);
+    assert.match(plain(V.leadOf(crash3,now).text),/^Цель снижена 45 → 0 % \d\d\.\d\d — выйти сразу$/);
+    // Решение на паузе: цели нет, причина названа; функции экрана не падают.
+    const blind=mk3({now,view:null}),noFix=mk3({now,view:{state:"transition",target_pct:null,candidate:"transition",reason_codes:["fix_deferred","insufficient_data"]}});
+    assert.deepEqual([blind.decision.status,blind.decision.target_pct,noFix.decision.status,noFix.regime.strategic],["paused",null,"paused","transition"]);
+    const gatePaused={actionable:false,code:"decision_not_actionable"};
+    assert.equal(V.pauseOf(blind,gatePaused,{okAt:now},now,3).sub,"Решение сервера приостановлено: расчёт правил не выполнен.");assert.equal(V.pauseOf(noFix,gatePaused,{okAt:now},now,3).sub,"Решение сервера приостановлено: на фиксе не хватило данных.");
+    for(const s of [blind,noFix]){assert.deepEqual(V.triggersOf(s,now),[]);for(const f of ["holdOf","overlayLines","levelsText","whyOf","blockRows","detView","alarmCount","methodParts","policyFacts","aiPolicy"])assert.doesNotThrow(()=>V[f](s),`VIEW.${f} упала на решении набора v3 на паузе`);}
+
+    // 3.5 (г). Потолка эйфории и права «Дистрибуции» в правилах нет — страница их нигде не утверждает, даже когда
+    //          детектор «сработал», а MVRV выше 95-го перцентиля.
+    const hot=mk3({now,mvrv:96,deep:97,scores:{financial_conditions:1,system_stress:0,liquidity_regime:1,etf_regime:1,stablecoin_regime:1},events:[[900,"deteriorating",20],[17*24,"transition",45]]});
+    const calmDist=[V.whyOf(hot).ok,V.whyOf(hot).cand,V.whyOf(hot).rule,lines(V.triggersOf(hot,now)).join("|"),V.alarmCount(hot)];
+    hot.detectors.find(d=>d.id==="distribution").state="fired";
+    assert.deepEqual([hot.regime.strategic,hot.decision.target_pct,hot.decision.binding_overlays.join()],["transition",45,""],"при MVRV выше 95-го перцентиля цель задаёт режим: потолка нет");
+    assert.deepEqual([V.whyOf(hot).ok,V.whyOf(hot).cand,V.whyOf(hot).rule,lines(V.triggersOf(hot,now)).join("|"),V.alarmCount(hot)],calmDist,"сработавшая «Дистрибуция» не меняет ни расчёта режима, ни подсказок, ни счёта тревожных детекторов");
+    assert.equal(V.whyOf(hot).rule,"благоприятны Макро и Спрос → «конструктивный»; гейт оценки (MVRV 96-й пц) → «переходный»");
+    assert.ok(lines(V.triggersOf(hot,now)).includes("цели выше закрыты гейтом оценки: MVRV 96-й пц (≥ 82)"));
+    const dist=V.detView(hot).find(d=>d.id==="distribution");
+    assert.deepEqual([dist.state,dist.reference,plain(dist.role)],["fired",true,"справочный: на режим и цель не влияет"]);
+    assert.equal(plain(dist.logic),"Высокая накопленная прибыль (MVRV) — обязательный якорь. Оба подтверждения (рост биржевого предложения И потеря ценовых опор) — «сработал»; одно из двух — «наблюдение».","текст карточки не обещает ограничения вердикта");
+    for(const s of [base,r1,half,capOn,pend,hot,crash3])for(const x of everything(s,now))
+      assert.doesNotMatch(x,/потол\S* эйфори|[Пп]отолок \d|полы и потолок|euphoria|ограничение вердикта сверху|дистрибуци\S* (?:ограничива|не да[её]т)|ЗАМОРОЖЕННОЙ|задаёт v1/i,`страница утверждает правило, которого в наборе v3 нет: «${String(x).slice(0,160)}»`);
+    assert.equal(V.detView(base).find(d=>d.id==="macro_shock").role,"не даёт среднесрочному режиму быть лучше «ухудшается» и запрещает пол восстановления");
+
+    // 3.6. Справка, статус и слой правил ИИ-разбора говорят правилами набора v3.
+    const parts=Object.fromEntries(V.methodParts(base).map(([k,x])=>[k,plain(x)]));
+    assert.deepEqual(Object.keys(parts),["Полосы блоков","Баллы правила","Гейт оценки","Смена режима","Полы","Детекторы"]);
+    // Сроки на первом экране — по часам устройства; если они не московские, справка называет час фикса и по ним.
+    const ownHour=fixAt.slice(-5);
+    assert.ok(parts["Смена режима"].includes(ownHour==="09:00"?"(09:00 МСК)":`(09:00 МСК, по часам устройства — ${ownHour})`),"час фикса в справке сходится со сроками первого экрана");
+    assert.match(parts["Смена режима"],/^Среднесрочный режим, полы и цель решаются раз в сутки, на фиксе: первый снимок не раньше 06:00 UTC \(09:00 МСК(?:, по часам устройства — \d\d:\d\d)?\)\. Ухудшение принимается на этом фиксе, улучшение — на втором фиксе подряд с тем же кандидатом; пропущенные сутки обнуляют счёт фиксов\. Между фиксами режим и цель не меняются; аварийный режим — сразу, на любом снимке\. Краткосрочный режим считается на каждом снимке: ухудшение — двумя снимками подряд \(сейчас между снимками ≈ 15 мин\), улучшение — после 48 ч без встречного снимка\.$/);
+    assert.match(parts["Полы"],/^Пол восстановления 40 \/ 60 \/ 80 % — по одному, двум и трём фиксам подряд .* снимается на фиксе, где детектор не подтверждён\. Пол капитуляции 40 %: MVRV не выше 10-го перцентиля\. «Дёшево» в обоих полах — только при согласии двух окон MVRV: четырёх лет и всей истории\. Потолка у цели нет\.$/);
+    assert.match(parts["Детекторы"],/«Дистрибуция» — справочный детектор: на режим и цель не влияет\.$/);
+    assert.deepEqual([V.policyFacts(base).name,plain(V.policyFacts(base).since)],["Правила v3","утверждены 20.11.2026"]);
+    const ai=V.aiPolicy(base);
+    assert.deepEqual([ai.id,ai.target_pct,ai.rules.daily_fix.hour_utc,ai.rules.recovery_floor_ladder_pct.join(),ai.decision_inputs.next_fix_at],[L3.LIVE_SUITE_ID_V3,45,6,"40,60,80",base.regime_meta.strategic.next_fix_at]);
+    assert.deepEqual(ai.live_inputs,base.live_inputs,"ИИ-разбор получает то, что читает боевое правило");assert.deepEqual(ai.ladder_pct,base.decision.regime_targets_pct);
+    assert.match(V.aiHead(),/РАЗ В СУТКИ, на фиксе — первом снимке не раньше 06:00 UTC: понижение режима принимается на этом фиксе, повышение — на втором фиксе подряд/);
+
+    // 3.7. Мусор в полях набора v3 (их пишут другие потоки) не роняет экран и не отнимает цели.
+    const junk=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});
+    Object.assign(junk,{live_inputs:{blocks:"x",families:7},reference_v1:"x",regime_birth:{strategic:7}});Object.assign(junk.regime_meta.strategic,{pending:7,floor:"x",fix:1,next_fix_at:"не дата",hold_until:{},since:null});junk.decision.inputs="x";
+    const junk2=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});
+    Object.assign(junk2.live_inputs,{families:{macro:"x",demand:null,cycle:{trend:"2",valuation:{}}},blocks:{macro:"−41",demand:null},recovery:"x",candidate:42,mvrv_percentile:"7",mvrv_percentile_deep:{},cheap:"да"});junk2.regime_meta.strategic={pending:{candidate:"неведомый",fixes:"1"},floor:{closes:99,level_pct:"x"}};junk2.decision.inputs={floor_closes:-3,pending:"x"};
+    for(const s of [junk,junk2]){
+      for(const f of ["changeLog","blockRows","whyOf","tactRows","dataNotes","warnMap","holdOf","overlayLines","monitorModel","levelsText","resultText","tactOf","detView","alarmCount","methodParts","policyFacts","aiPolicy"])assert.doesNotThrow(()=>V[f](s),`VIEW.${f} упала на мусоре в полях набора v3`);
+      assert.doesNotThrow(()=>V.triggersOf(s,now));assert.doesNotThrow(()=>s.metrics.map(m=>V.ruleScore(s,m)));assert.match(plain(V.leadOf(s,now).text),/^Цель 45 % без изменений с \d\d\.\d\d — действий нет$/,"мусор в полях набора v3 не отнимает цель и её историю");
+    }
+    // Снимок набора v3 без live_inputs (расчёт входов не удался): условий экран не выдумывает, называет соседние ступени.
+    const bare=mk3({now,events:[[900,"deteriorating",20],[17*24,"transition",45]]});bare.live_inputs=null;
+    assert.equal(V.whyOf(bare).ok,false);
+    assert.deepEqual(V.triggersOf(bare,now).map(x=>[x.dir,x.pct,plain(x.text)]),[["up",95,"режим «спрос не подтв.» · на втором фиксе подряд"],["dn",20,"ухудшение режима · на первом же фиксе"]]);
+
+    // 3.8 (д). Снимок прежней формы (решение набора v1) показан по правилам v1 и без исключений: такой снимок
+    //          лежит на витрине до первого сбора новым кодом.
+    const old=mk({now,strategic:"defensive",candidate:"transition",hold:40,mvrv:19,recovery:"good",scores:{financial_conditions:0,system_stress:0,liquidity_regime:-0.5,etf_regime:0,stablecoin_regime:-1,network_security:-1,network_activity:0.5,trend_regime:-1},events:[[400,"defensive",5],[1,"defensive",80,["recovery_floor"]]]});
+    assert.equal(old.decision.policy_id,SUITE_V1);
+    for(const f of ["changeLog","blockRows","whyOf","tactRows","dataNotes","warnMap","holdOf","overlayLines","monitorModel","levelsText","resultText","tactOf","detView","alarmCount","methodParts","policyFacts","aiPolicy"])assert.doesNotThrow(()=>V[f](old),`VIEW.${f} упала на снимке прежней формы`);
+    assert.doesNotThrow(()=>V.triggersOf(old,now));assert.doesNotThrow(()=>V.leadOf(old,now));
+    assert.match(plain(V.overlayLines(old)[0]),/^Пол восстановления 80 %: MVRV 19-й пц \(< 25\)/,"пол прежнего набора — 80 % одним снимком, так и показан");
+    assert.match(plain(V.triggersOf(old,now)[0].text),/^пол снимается одним снимком: /);assert.match(plain(V.holdOf(old)[0]),/^Среднесрок удерживается: по свежим данным «переходный» — кандидат с .* · не раньше /);
+    assert.ok(!plain(V.levelsText(old)).includes("следующий фикс"),"у прежнего набора фиксов нет");
+    assert.deepEqual([V.policyFacts(old).name,V.methodParts(old)[0][0]],["Правила v1","Снимок прежних правил"],"снимок прежней формы подписан как принятый прежними правилами");
+    assert.match(plain(V.methodParts(old)[0][1]),/^Решение этого снимка принято набором v1: режим менялся по снимкам/);
+    assert.match(V.aiPolicy(old).status,/ЭТОТ снимок ещё принят прежним набором v1/);assert.equal(V.aiPolicy(old).live_inputs,null);
+    old.live_inputs={families:{cycle:{trend:2}},blocks:{cycle:99}};
+    assert.ok(old.metrics.every(m=>V.ruleScore(old,m)===null)&&V.blockRows(old).find(r=>r.key==="cycle").score!==99,"у снимка прежней формы баллы — с карточек, даже если в нём окажется live_inputs");
+    assert.equal(plain(V.detView(old).find(d=>d.id==="recovery").role),"поднимает «защитный» и «ухудшается» до «переходного» и включает пол 80 %");
+  }
+
   // 2.5. Снимок перечитывается: 304 оставляет прежний, 200 заменяет, отказ сети не стирает экран.
   {
     let clock=1e12;const now=()=>clock,calls=[];
@@ -366,6 +626,14 @@ for(const [re,why] of [
       revision_alerts:Array.from({length:100},(_,i)=>({quality_impact:i<3?"quality":"audit",detected_at:new Date(now-(100-i)*26*60e3).toISOString()}))});
     let m=V.monitorModel(s);
     assert.deepEqual(m.groups.map(g=>g.kind),["live","benchmark","candidate"],"без strategy_meta группы восстанавливаются по известным именам");
+    // Линии выпуска 2.15.0. Ключ policy_v1 — боевая политика (правила v1 до выпуска, затем v3); прежние правила v1
+    // ведёт policy_v1_frozen. Без strategy_meta они подписаны запасными подписями, с ним — подписями монитора.
+    const s215=structuredClone(s);Object.assign(s215.monitoring.performance,{policy_v1_frozen:P(1.1,0.2,40),policy_v3_shadow:P(1.2,0.3,5)});
+    const lab=id=>plain(V.monitorModel(s215).groups.flatMap(g=>g.rows).find(r=>r.id===id).label);
+    assert.deepEqual(V.monitorModel(s215).groups.map(g=>g.kind),["live","benchmark","candidate","attribution"]);
+    assert.deepEqual([lab("policy_v1"),lab("policy_v1_frozen"),lab("policy_v3_shadow")],["боевая политика · мгновенный переход к цели","прежние правила v1","правила v3, след с 13.10"],"запасные подписи линий не называют боевую политику «v1»");
+    s215.monitoring.strategy_meta={policy_v1:{kind:"live",label:"боевая политика (v1 до выпуска 2.15.0, затем v3)"},policy_v1_frozen:{kind:"attribution",label:"прежние правила v1 (после 2.15.0)"}};
+    assert.deepEqual([lab("policy_v1"),lab("policy_v1_frozen")],["боевая политика (v1 до выпуска 2.15.0, затем v3) · мгновенный переход к цели","прежние правила v1 (после 2.15.0)"],"подписи монитора главнее запасных");
     assert.match(m.groups[1].rows.find(r=>r.id==="static_theta").label,/^сглаженная доля политики, до фиксации на 90-й день · с \d\d\.\d\d$/,"static_theta до фиксации обязана быть подписана тем, что она есть");
     assert.equal(m.groups[1].rows.find(r=>r.id==="static_theta").gap,null,"стратегию с более поздним стартом нельзя сравнивать с политикой без общего окна");
     assert.ok(Math.abs(m.groups[1].rows.find(r=>r.id==="fixed_50").gap.pp-12.5)<1e-9);
